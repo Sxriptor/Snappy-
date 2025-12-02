@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline';">
+  <title>Snappy</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div id="app">
+    <div id="webview-container">
+      <webview id="site-view" allowpopups webpreferences="contextIsolation=no"></webview>
+    </div>
+    
+    <button id="settings-toggle" title="Settings">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+        <line x1="3" y1="6" x2="21" y2="6"/>
+        <line x1="3" y1="12" x2="21" y2="12"/>
+        <line x1="3" y1="18" x2="21" y2="18"/>
+      </svg>
+    </button>
+
+    <aside id="settings-panel">
+      <header class="panel-header">
+        <h1>SNAPPY</h1>
+        <button id="panel-close">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+            <path d="M18 6L6 18M6 6l12 12"/>
+          </svg>
+        </button>
+      </header>
+
+      <div class="panel-body">
+        <!-- Status -->
+        <section class="section">
+          <div class="section-header">STATUS</div>
+          <div class="status-row">
+            <div class="status-info">
+              <span id="status-dot"></span>
+              <span id="status-text">Inactive</span>
+            </div>
+            <button id="toggle-bot" class="btn">Start</button>
+          </div>
+        </section>
+
+        <!-- Navigation -->
+        <section class="section">
+          <div class="section-header">NAVIGATION</div>
+          <div class="input-row">
+            <input type="url" id="url-input" placeholder="Enter URL">
+            <button id="go-btn" class="btn">Go</button>
+          </div>
+        </section>
+
+        <!-- Settings -->
+        <section class="section">
+          <div class="section-header">SETTINGS</div>
+          <div class="setting-row">
+            <span>Auto-inject</span>
+            <label class="checkbox">
+              <input type="checkbox" id="auto-inject">
+              <span class="checkmark"></span>
+            </label>
+          </div>
+        </section>
+
+        <!-- Rules -->
+        <section class="section">
+          <div class="section-header">
+            <span>REPLY RULES</span>
+            <button id="add-rule" class="btn-text">+ Add</button>
+          </div>
+          <div id="rules-container"></div>
+        </section>
+
+        <!-- Timing -->
+        <section class="section">
+          <div class="section-header">TIMING</div>
+          <div class="setting-row">
+            <span>Typing (ms)</span>
+            <div class="input-pair">
+              <input type="number" id="typing-min" value="50">
+              <span>-</span>
+              <input type="number" id="typing-max" value="150">
+            </div>
+          </div>
+          <div class="setting-row">
+            <span>Delay (ms)</span>
+            <div class="input-pair">
+              <input type="number" id="delay-min" value="2000">
+              <span>-</span>
+              <input type="number" id="delay-max" value="6000">
+            </div>
+          </div>
+        </section>
+
+        <!-- Limits -->
+        <section class="section">
+          <div class="section-header">RATE LIMITS</div>
+          <div class="setting-row">
+            <span>Per minute</span>
+            <input type="number" id="rate-minute" value="5" class="input-sm">
+          </div>
+          <div class="setting-row">
+            <span>Per hour</span>
+            <input type="number" id="rate-hour" value="30" class="input-sm">
+          </div>
+          <div class="setting-row">
+            <span>Skip %</span>
+            <input type="number" id="skip-rate" value="15" class="input-sm">
+          </div>
+        </section>
+
+        <button id="save-btn" class="btn btn-full">Save</button>
+      </div>
+    </aside>
+  </div>
+
+  <script src="renderer.js"></script>
+</body>
+</html>

@@ -6,8 +6,7 @@
 import { contextBridge, ipcRenderer } from 'electron';
 
 /**
- * Bot API exposed to the web page context
- * Limited to only log and injectBot functions for security
+ * Bot API exposed to the renderer process
  */
 const botAPI = {
   /**
@@ -18,29 +17,67 @@ const botAPI = {
   },
 
   /**
-   * Request manual injection of the automation script
+   * Request injection of the automation script
    */
   injectBot: (): void => {
     ipcRenderer.send('bot:inject');
   },
 
   /**
-   * Get current bot status
+   * Stop the bot
+   */
+  stopBot: (): void => {
+    ipcRenderer.send('bot:stop');
+  },
+
+  /**
+   * Get current bot status and config
    */
   getStatus: async (): Promise<{ isInjected: boolean; config: unknown }> => {
     return await ipcRenderer.invoke('bot:status');
+  },
+
+  /**
+   * Save configuration
+   */
+  saveConfig: async (config: unknown): Promise<void> => {
+    return await ipcRenderer.invoke('bot:saveConfig', config);
+  },
+
+  /**
+   * Load URL in webview
+   */
+  loadUrl: (url: string): void => {
+    ipcRenderer.send('bot:loadUrl', url);
   }
 };
 
-// Expose the API to the web page via contextBridge
-// This ensures context isolation while providing necessary functionality
-contextBridge.exposeInMainWorld('bot', botAPI);
-
-// Type declaration for the exposed API
-declare global {
-  interface Window {
-    bot: typeof botAPI;
+/**
+ * Updater API exposed to the renderer process
+ */
+const updaterAPI = {
+  checkForUpdates: (): void => {
+    ipcRenderer.send('update:check');
+  },
+  downloadUpdate: (): void => {
+    ipcRenderer.send('update:download');
+  },
+  installUpdate: (): void => {
+    ipcRenderer.send('update:install');
+  },
+  onUpdateAvailable: (callback: (info: unknown) => void): void => {
+    ipcRenderer.on('update-available', (_, info) => callback(info));
+  },
+  onUpdateProgress: (callback: (progress: unknown) => void): void => {
+    ipcRenderer.on('update-progress', (_, progress) => callback(progress));
+  },
+  onUpdateDownloaded: (callback: (info: unknown) => void): void => {
+    ipcRenderer.on('update-downloaded', (_, info) => callback(info));
   }
-}
+};
 
-console.log('[Preload] Bridge initialized with context isolation');
+// Expose the APIs to the renderer
+contextBridge.exposeInMainWorld('bot', botAPI);
+contextBridge.exposeInMainWorld('updater', updaterAPI);
+
+console.log('[Preload] Bridge initialized');

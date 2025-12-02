@@ -4,6 +4,7 @@
  */
 
 import { app, BrowserWindow, ipcMain, session } from 'electron';
+import { autoUpdater } from 'electron-updater';
 import * as path from 'path';
 import * as fs from 'fs';
 import { Configuration, DEFAULT_CONFIG } from '../types';
@@ -69,45 +70,45 @@ const CHROME_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit
 export function createWindow(): BrowserWindow {
   const preloadPath = path.join(__dirname, '../preload/preload.js');
   
-  // Use persistent partition for session data (cookies, localStorage)
-  const partition = 'persist:snappy';
-  
   mainWindow = new BrowserWindow({
-    width: 1200,
-    height: 800,
+    width: 1400,
+    height: 900,
+    frame: true,
     webPreferences: {
       preload: preloadPath,
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: false,
-      partition: partition
+      webviewTag: true
     }
   });
 
-  // Enable session persistence for cookies and localStorage
-  const ses = session.fromPartition(partition);
-  
-  // Spoof user agent to appear as Chrome (required for Snapchat Web)
-  ses.webRequest.onBeforeSendHeaders((details, callback) => {
-    details.requestHeaders['User-Agent'] = CHROME_USER_AGENT;
-    callback({ requestHeaders: details.requestHeaders });
-  });
-  
-  // Also set user agent on the webContents
-  mainWindow.webContents.setUserAgent(CHROME_USER_AGENT);
-  
-  // Allow all permissions for messaging sites
-  ses.setPermissionRequestHandler((webContents, permission, callback) => {
-    callback(true);
-  });
-  
-  // Persist cookies to disk
-  ses.cookies.on('changed', () => {
-    ses.cookies.flushStore();
-  });
-
-  console.log('[Shell] Window created with Chrome user agent spoofing');
+  console.log('[Shell] Window created with webview support');
   return mainWindow;
+}
+
+/**
+ * Set up webview handling for user agent spoofing
+ */
+function setupWebviewHandling(): void {
+  app.on('web-contents-created', (event, contents) => {
+    if (contents.getType() === 'webview') {
+      // Set Chrome user agent
+      contents.setUserAgent(CHROME_USER_AGENT);
+      
+      // Allow all permissions
+      contents.session.setPermissionRequestHandler((wc, permission, callback) => {
+        callback(true);
+      });
+
+      // Spoof user agent in requests
+      contents.session.webRequest.onBeforeSendHeaders((details, callback) => {
+        details.requestHeaders['User-Agent'] = CHROME_USER_AGENT;
+        callback({ requestHeaders: details.requestHeaders });
+      });
+
+      console.log('[Shell] Webview configured with Chrome user agent');
+    }
+  });
 }
 
 /**
@@ -158,6 +159,21 @@ export async function injectAutomationScript(): Promise<void> {
 }
 
 /**
+ * Save configuration to file
+ */
+export function saveConfiguration(newConfig: Configuration): void {
+  const configPath = path.join(process.cwd(), 'config.json');
+  
+  try {
+    config = { ...DEFAULT_CONFIG, ...newConfig };
+    fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
+    console.log('[Shell] Configuration saved');
+  } catch (error) {
+    console.error('[Shell] Error saving configuration:', error);
+  }
+}
+
+/**
  * Set up IPC handlers for communication with web context
  */
 export function setupIPCHandlers(): void {
@@ -170,6 +186,12 @@ export function setupIPCHandlers(): void {
   ipcMain.on('bot:inject', async () => {
     await injectAutomationScript();
   });
+
+  // Handle stop bot request
+  ipcMain.on('bot:stop', () => {
+    isInjected = false;
+    console.log('[Shell] Bot stopped');
+  });
   
   // Handle status request
   ipcMain.handle('bot:status', () => {
@@ -177,6 +199,27 @@ export function setupIPCHandlers(): void {
       isInjected,
       config
     };
+  });
+
+  // Handle save config request
+  ipcMain.handle('bot:saveConfig', (event, newConfig: Configuration) => {
+    saveConfiguration(newConfig);
+    return { success: true };
+  });
+
+  // Handle update actions
+  ipcMain.on('update:download', () => {
+    autoUpdater.downloadUpdate();
+  });
+
+  ipcMain.on('update:install', () => {
+    autoUpdater.quitAndInstall();
+  });
+
+  ipcMain.on('update:check', () => {
+    autoUpdater.checkForUpdates().catch(err => {
+      console.log('[Updater] Manual check failed:', err.message);
+    });
   });
   
   console.log('[Shell] IPC handlers set up');
@@ -205,6 +248,58 @@ export function getMainWindow(): BrowserWindow | null {
 
 
 /**
+ * Set up auto-updater for GitHub releases
+ */
+function setupAutoUpdater(): void {
+  // Configure logging
+  autoUpdater.logger = console;
+  
+  // Check for updates on startup (don't auto-download)
+  autoUpdater.autoDownload = false;
+  
+  autoUpdater.on('checking-for-update', () => {
+    console.log('[Updater] Checking for updates...');
+  });
+  
+  autoUpdater.on('update-available', (info) => {
+    console.log('[Updater] Update available:', info.version);
+    // Notify renderer about available update
+    if (mainWindow) {
+      mainWindow.webContents.send('update-available', info);
+    }
+  });
+  
+  autoUpdater.on('update-not-available', () => {
+    console.log('[Updater] No updates available');
+  });
+  
+  autoUpdater.on('download-progress', (progress) => {
+    console.log(`[Updater] Download progress: ${progress.percent.toFixed(1)}%`);
+    if (mainWindow) {
+      mainWindow.webContents.send('update-progress', progress);
+    }
+  });
+  
+  autoUpdater.on('update-downloaded', (info) => {
+    console.log('[Updater] Update downloaded:', info.version);
+    if (mainWindow) {
+      mainWindow.webContents.send('update-downloaded', info);
+    }
+  });
+  
+  autoUpdater.on('error', (err) => {
+    console.error('[Updater] Error:', err);
+  });
+  
+  // Check for updates after a short delay
+  setTimeout(() => {
+    autoUpdater.checkForUpdates().catch(err => {
+      console.log('[Updater] Update check failed:', err.message);
+    });
+  }, 3000);
+}
+
+/**
  * Initialize and start the application
  */
 async function initializeApp(): Promise<void> {
@@ -213,6 +308,9 @@ async function initializeApp(): Promise<void> {
   
   // Load injection script
   loadInjectionScript();
+  
+  // Set up webview handling before creating window
+  setupWebviewHandling();
   
   // Create window
   createWindow();
@@ -244,8 +342,14 @@ async function initializeApp(): Promise<void> {
     mainWindow = null;
   });
   
-  // Load the target site
-  await loadTargetSite(config.initialUrl);
+  // Load the UI HTML file
+  const htmlPath = path.join(__dirname, '../renderer/index.html');
+  await mainWindow.loadFile(htmlPath);
+
+  // Set up auto-updater (only in production)
+  if (app.isPackaged) {
+    setupAutoUpdater();
+  }
 }
 
 // Application lifecycle
