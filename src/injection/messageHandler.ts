@@ -12,7 +12,30 @@ import { RateLimitTracker } from '../brain/rateLimiter';
 import { typeAndSendWithRetry } from './messageSender';
 import { setConfig as setTypingConfig } from './typingSimulator';
 import { setSiteMode } from './siteStrategy';
-import { isWithinActiveHours } from '../main/configLoader';
+
+/**
+ * Check if current time is within active hours (browser-compatible version)
+ */
+function isWithinActiveHours(activeHours?: { start: string; end: string }): boolean {
+  if (!activeHours) {
+    return true; // No restriction
+  }
+  
+  const now = new Date();
+  const currentTime = now.getHours() * 60 + now.getMinutes();
+  
+  const [startHour, startMin] = activeHours.start.split(':').map(Number);
+  const [endHour, endMin] = activeHours.end.split(':').map(Number);
+  
+  const startTime = startHour * 60 + startMin;
+  const endTime = endHour * 60 + endMin;
+  
+  if (startTime <= endTime) {
+    return currentTime >= startTime && currentTime <= endTime;
+  } else {
+    return currentTime >= startTime || currentTime <= endTime;
+  }
+}
 
 let config: Configuration = DEFAULT_CONFIG;
 let rateLimiter: RateLimitTracker;

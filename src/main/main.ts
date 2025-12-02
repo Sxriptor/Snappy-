@@ -3,7 +3,7 @@
  * Responsible for window management, script injection, and configuration
  */
 
-import { app, BrowserWindow, ipcMain, session } from 'electron';
+import { app, BrowserWindow, ipcMain } from 'electron';
 import { autoUpdater } from 'electron-updater';
 import * as path from 'path';
 import * as fs from 'fs';
@@ -40,23 +40,13 @@ export function loadConfiguration(): Configuration {
 
 /**
  * Load the injection script from file
+ * NOTE: Bot injection is now handled by the renderer directly into the webview
  */
 export function loadInjectionScript(): string {
-  const scriptPath = path.join(__dirname, '../injection/bot.js');
-  
-  try {
-    if (fs.existsSync(scriptPath)) {
-      injectionScript = fs.readFileSync(scriptPath, 'utf-8');
-      console.log('[Shell] Injection script loaded');
-    } else {
-      console.warn('[Shell] Injection script not found at:', scriptPath);
-      injectionScript = '';
-    }
-  } catch (error) {
-    console.error('[Shell] Error loading injection script:', error);
-    injectionScript = '';
-  }
-  
+  // Bot injection is now handled by renderer.ts directly into the webview
+  // The old bot.js file has CommonJS exports which don't work in browser context
+  console.log('[Shell] Injection script loading skipped (handled by renderer)');
+  injectionScript = '';
   return injectionScript;
 }
 
@@ -90,19 +80,20 @@ export function createWindow(): BrowserWindow {
  * Set up webview handling for user agent spoofing
  */
 function setupWebviewHandling(): void {
-  app.on('web-contents-created', (event, contents) => {
+  app.on('web-contents-created', (_event, contents) => {
     if (contents.getType() === 'webview') {
       // Set Chrome user agent
       contents.setUserAgent(CHROME_USER_AGENT);
       
       // Allow all permissions
-      contents.session.setPermissionRequestHandler((wc, permission, callback) => {
+      contents.session.setPermissionRequestHandler((_wc, _permission, callback) => {
         callback(true);
       });
 
       // Spoof user agent in requests
       contents.session.webRequest.onBeforeSendHeaders((details, callback) => {
         details.requestHeaders['User-Agent'] = CHROME_USER_AGENT;
+        delete details.requestHeaders['X-Electron-Version'];
         callback({ requestHeaders: details.requestHeaders });
       });
 
@@ -182,9 +173,9 @@ export function setupIPCHandlers(): void {
     console.log('[Bot]', message);
   });
   
-  // Handle manual injection request
+  // Handle manual injection request (now handled by renderer directly)
   ipcMain.on('bot:inject', async () => {
-    await injectAutomationScript();
+    console.log('[Shell] Bot injection requested (handled by renderer)');
   });
 
   // Handle stop bot request
@@ -330,11 +321,7 @@ async function initializeApp(): Promise<void> {
   // Handle page load completion
   mainWindow.webContents.on('did-finish-load', async () => {
     console.log('[Shell] Page finished loading');
-    
-    // Auto-inject if configured
-    if (config.autoInject) {
-      await injectAutomationScript();
-    }
+    // Bot injection is now handled by renderer.ts directly into the webview
   });
   
   // Handle window close

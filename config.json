@@ -1,51 +1,44 @@
 {
   "initialUrl": "https://web.snapchat.com",
   "autoInject": false,
-  "siteMode": "universal",
-  
   "replyRules": [
     {
       "match": "?",
       "reply": "I'll check and get back to you soon!",
-      "priority": 1
+      "priority": 0
     },
     {
       "match": "hello",
       "reply": "Hey! How's it going?",
-      "priority": 2,
-      "caseSensitive": false
+      "priority": 1
     },
     {
       "match": "hi",
       "reply": "Hi there! 👋",
-      "priority": 2,
-      "caseSensitive": false
+      "priority": 2
     },
     {
       "match": "thanks",
       "reply": "You're welcome!",
-      "priority": 1,
-      "caseSensitive": false
+      "priority": 3
     },
     {
       "match": "bye",
       "reply": "Talk to you later!",
-      "priority": 1,
-      "caseSensitive": false
+      "priority": 4
     }
   ],
-  
-  "typingDelayRangeMs": [50, 150],
-  "preReplyDelayRangeMs": [2000, 6000],
-  
+  "typingDelayRangeMs": [
+    50,
+    150
+  ],
+  "preReplyDelayRangeMs": [
+    2000,
+    6000
+  ],
   "maxRepliesPerMinute": 5,
   "maxRepliesPerHour": 30,
   "maxReplyLength": 500,
-  
-  "randomSkipProbability": 0.15,
-  
-  "activeHours": {
-    "start": "09:00",
-    "end": "22:00"
-  }
+  "siteMode": "universal",
+  "randomSkipProbability": 0.15
 }

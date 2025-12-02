@@ -3,14 +3,23 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline';">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline';">
   <title>Snappy</title>
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
   <div id="app">
     <div id="webview-container">
-      <webview id="site-view" allowpopups webpreferences="contextIsolation=no"></webview>
+      <webview id="site-view" allowpopups useragent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" partition="persist:snapchat"></webview>
+    </div>
+    
+    <!-- Activity Log Panel -->
+    <div id="log-panel">
+      <div id="log-header">
+        <span>Activity Log</span>
+        <button id="log-toggle">▼</button>
+      </div>
+      <div id="log-content"></div>
     </div>
     
     <button id="settings-toggle" title="Settings">
@@ -109,6 +118,17 @@
           <div class="setting-row">
             <span>Skip %</span>
             <input type="number" id="skip-rate" value="15" class="input-sm">
+          </div>
+        </section>
+
+        <!-- Conversation Memories -->
+        <section class="section">
+          <div class="section-header">
+            <span>MEMORIES</span>
+            <button id="refresh-memories" class="btn-text">↻ Refresh</button>
+          </div>
+          <div id="memories-container">
+            <div class="memory-empty">No conversations yet</div>
           </div>
         </section>
 
