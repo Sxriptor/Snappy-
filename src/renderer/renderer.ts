@@ -311,29 +311,61 @@ function getBotScript(config: Config): string {
   
   // Find unread indicators
   function hasUnreadIndicator(element) {
-    // Check for blue dots, badges, bold text, etc.
-    const html = element.innerHTML.toLowerCase();
     const cls = (element.className || '').toLowerCase();
+    const allClasses = element.innerHTML.toLowerCase();
     
-    // Check class names
-    if (cls.includes('unread') || cls.includes('new') || cls.includes('badge') || cls.includes('notification')) {
-      return true;
+    // Check element and all children class names for unread-related words
+    const unreadKeywords = ['unread', 'unseen', 'new', 'badge', 'notification', 'dot', 'indicator', 'pending', 'alert'];
+    for (const keyword of unreadKeywords) {
+      if (cls.includes(keyword) || allClasses.includes(keyword)) {
+        return true;
+      }
     }
     
-    // Check for nested unread indicators
-    const unreadEl = element.querySelector('[class*="unread"], [class*="Unread"], [class*="badge"], [class*="new"], [class*="notification"]');
-    if (unreadEl) return true;
+    // Check for any small circular elements (dots/badges)
+    const smallElements = element.querySelectorAll('div, span');
+    for (const el of smallElements) {
+      const style = window.getComputedStyle(el);
+      const width = parseInt(style.width);
+      const height = parseInt(style.height);
+      const borderRadius = style.borderRadius;
+      
+      // Small circular element (likely a dot indicator)
+      if (width > 0 && width < 20 && height > 0 && height < 20 && 
+          (borderRadius.includes('50%') || borderRadius.includes('100%') || parseInt(borderRadius) > 5)) {
+        const bgColor = style.backgroundColor;
+        // Check if it has a visible background color (not transparent)
+        if (bgColor && bgColor !== 'transparent' && bgColor !== 'rgba(0, 0, 0, 0)') {
+          return true;
+        }
+      }
+    }
     
-    // Check for blue color (common unread indicator)
-    const blueElements = element.querySelectorAll('[style*="background"], [style*="color"]');
-    for (const el of blueElements) {
-      const style = el.getAttribute('style') || '';
-      if (style.includes('rgb(0, 149, 246)') || style.includes('#0095f6') || style.includes('blue')) {
+    // Check for bold/emphasized text (unread messages often have bold names)
+    const boldElements = element.querySelectorAll('strong, b, [style*="font-weight"]');
+    if (boldElements.length > 0) {
+      // Has bold text - might be unread
+      // But this is less reliable, so we'll use it as a secondary check
+    }
+    
+    // Check for SVG icons that might indicate unread
+    const svgs = element.querySelectorAll('svg');
+    for (const svg of svgs) {
+      const fill = svg.getAttribute('fill') || '';
+      if (fill.includes('blue') || fill.includes('#0') || fill.includes('rgb(0')) {
         return true;
       }
     }
     
     return false;
+  }
+  
+  // Debug function to analyze a chat element
+  function debugChatElement(element, index) {
+    const text = (element.textContent || '').substring(0, 30);
+    const cls = (element.className || '').substring(0, 50);
+    const childCount = element.children.length;
+    log('Chat ' + index + ': "' + text + '" class="' + cls + '" children=' + childCount);
   }
   
   // Find the input field
@@ -387,17 +419,36 @@ function getBotScript(config: Config): string {
   // Get visible text content from chat area
   function getVisibleMessages() {
     const messages = [];
+    const seen = new Set();
     
-    // Find message-like elements
-    document.querySelectorAll('[class*="message" i], [class*="Message"], [class*="chat" i], [class*="bubble" i]').forEach(el => {
-      const text = el.textContent?.trim();
-      if (text && text.length > 0 && text.length < 1000) {
-        // Try to determine if incoming or outgoing based on position/style
-        const rect = el.getBoundingClientRect();
-        const isLeft = rect.left < window.innerWidth / 2;
-        messages.push({ text, isIncoming: isLeft });
-      }
-    });
+    // Try multiple selectors for messages
+    const selectors = [
+      '[class*="message" i]',
+      '[class*="Message"]', 
+      '[class*="bubble" i]',
+      '[class*="Bubble"]',
+      '[class*="chat-text"]',
+      '[class*="ChatText"]',
+      '[class*="content" i] p',
+      '[class*="content" i] span'
+    ];
+    
+    for (const selector of selectors) {
+      try {
+        document.querySelectorAll(selector).forEach(el => {
+          const text = el.textContent?.trim();
+          if (text && text.length > 1 && text.length < 1000 && !seen.has(text)) {
+            seen.add(text);
+            // Try to determine if incoming or outgoing based on position
+            const rect = el.getBoundingClientRect();
+            const isLeft = rect.left < window.innerWidth * 0.4;
+            const cls = (el.className || '').toLowerCase();
+            const isIncoming = isLeft || cls.includes('received') || cls.includes('incoming') || cls.includes('other');
+            messages.push({ text, isIncoming });
+          }
+        });
+      } catch(e) {}
+    }
     
     return messages;
   }
@@ -490,30 +541,39 @@ function getBotScript(config: Config): string {
   
   // Send the message
   async function sendMessage() {
+    const input = findInput();
+    
+    // Method 1: Try Enter key on input (most reliable for Snapchat)
+    if (input) {
+      input.focus();
+      
+      // Try multiple Enter key event variations
+      const enterEvents = [
+        new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true }),
+        new KeyboardEvent('keypress', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true }),
+        new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true })
+      ];
+      
+      for (const event of enterEvents) {
+        input.dispatchEvent(event);
+      }
+      
+      // Also try dispatching on document
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true }));
+      
+      log('Pressed Enter key');
+      await sleep(200);
+    }
+    
+    // Method 2: Try clicking send button as backup
     const sendBtn = findSendButton();
     if (sendBtn) {
       sendBtn.click();
-      log('Clicked send button');
+      log('Also clicked send button');
       return true;
     }
     
-    // Try Enter key
-    const input = findInput();
-    if (input) {
-      const enterEvent = new KeyboardEvent('keydown', {
-        key: 'Enter',
-        code: 'Enter',
-        keyCode: 13,
-        which: 13,
-        bubbles: true
-      });
-      input.dispatchEvent(enterEvent);
-      log('Pressed Enter');
-      return true;
-    }
-    
-    log('ERROR: Could not send');
-    return false;
+    return input !== null;
   }
   
   // Find reply based on message
@@ -539,15 +599,78 @@ function getBotScript(config: Config): string {
     return null;
   }
   
+  // Try to click an element properly
+  function clickElement(el) {
+    // Try multiple click methods
+    
+    // Method 1: Direct click
+    el.click();
+    
+    // Method 2: Dispatch mouse events
+    const rect = el.getBoundingClientRect();
+    const centerX = rect.left + rect.width / 2;
+    const centerY = rect.top + rect.height / 2;
+    
+    el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, clientX: centerX, clientY: centerY }));
+    el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, clientX: centerX, clientY: centerY }));
+    el.dispatchEvent(new MouseEvent('click', { bubbles: true, clientX: centerX, clientY: centerY }));
+    
+    // Method 3: Try clicking a child button or link if exists
+    const clickable = el.querySelector('button, a, [role="button"]');
+    if (clickable) {
+      clickable.click();
+    }
+  }
+  
+  // Get all text content from the main chat area
+  function getAllChatText() {
+    // Find the main content area (usually right side of screen)
+    const mainArea = document.querySelector('main, [role="main"], [class*="main"], [class*="content"], [class*="chat"]');
+    
+    // Get all text elements
+    const textElements = [];
+    const selector = 'p, span, div';
+    const elements = mainArea ? mainArea.querySelectorAll(selector) : document.querySelectorAll(selector);
+    
+    elements.forEach(el => {
+      const text = el.textContent?.trim();
+      if (text && text.length > 0 && text.length < 500) {
+        // Skip if it's a timestamp or UI element
+        if (!/^\\d{1,2}:\\d{2}/.test(text) && !/^(Send|Type|Message|Chat)/.test(text)) {
+          textElements.push({ text, element: el });
+        }
+      }
+    });
+    
+    return textElements;
+  }
+  
   // Process a chat
   async function processChat(chatEl, chatText) {
     log('Opening chat: ' + chatText.substring(0, 30));
-    chatEl.click();
-    await sleep(2000);
     
-    // Get messages
-    const messages = getVisibleMessages();
-    log('Found ' + messages.length + ' messages in chat');
+    // Try clicking
+    clickElement(chatEl);
+    log('Clicked, waiting for chat to load...');
+    await sleep(2500);
+    
+    // Get messages using multiple methods
+    let messages = getVisibleMessages();
+    log('Method 1 found ' + messages.length + ' messages');
+    
+    // If no messages found, try getting all text
+    if (messages.length === 0) {
+      const allText = getAllChatText();
+      log('Method 2 found ' + allText.length + ' text elements');
+      
+      // Convert to messages format
+      messages = allText.map((t, i) => ({
+        text: t.text,
+        isIncoming: i % 2 === 0 // Alternate as a guess
+      }));
+    }
+    
+    log('Total messages: ' + messages.length);
     
     if (messages.length === 0) {
       log('No messages found');
@@ -619,13 +742,23 @@ function getBotScript(config: Config): string {
   }
   
   // Main poll function
+  let pollCount = 0;
   async function poll() {
     if (!window.__SNAPPY_RUNNING__) return;
+    pollCount++;
     
-    log('--- Polling ---');
+    log('--- Poll #' + pollCount + ' ---');
     
     const chats = findClickableChats();
     log('Found ' + chats.length + ' chat items');
+    
+    // Debug first 3 chats on first poll
+    if (pollCount === 1 && chats.length > 0) {
+      log('Debugging first 3 chats:');
+      for (let i = 0; i < Math.min(3, chats.length); i++) {
+        debugChatElement(chats[i], i);
+      }
+    }
     
     // Find chats with unread
     const unreadChats = [];
@@ -636,6 +769,15 @@ function getBotScript(config: Config): string {
     }
     
     log('Unread chats: ' + unreadChats.length);
+    
+    // If no unread found but we have chats, try processing the first one anyway (for testing)
+    if (unreadChats.length === 0 && chats.length > 0 && pollCount <= 2) {
+      log('No unread detected - trying first chat for testing');
+      const chat = chats[0];
+      const chatText = chat.textContent?.trim().substring(0, 50) || 'Unknown';
+      await processChat(chat, chatText);
+      return;
+    }
     
     if (unreadChats.length === 0) {
       return;
