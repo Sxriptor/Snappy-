@@ -263,8 +263,6 @@ function getBotScript(config: Config): string {
   
   const CONFIG = ${JSON.stringify(config)};
   const seenMessages = new Set();
-  window.conversationMemories = new Map();
-  const conversationMemories = window.conversationMemories;
   let pollInterval = null;
   
   // Log storage for polling
@@ -273,7 +271,6 @@ function getBotScript(config: Config): string {
   function log(msg) {
     console.log('[Snappy] ' + msg);
     window.__SNAPPY_LOGS__.push(msg);
-    // Keep only last 50 logs
     if (window.__SNAPPY_LOGS__.length > 50) {
       window.__SNAPPY_LOGS__ = window.__SNAPPY_LOGS__.slice(-50);
     }
@@ -282,6 +279,113 @@ function getBotScript(config: Config): string {
   function sleep(ms) {
     return new Promise(r => setTimeout(r, ms));
   }
+  
+  // ============ MEMORY SYSTEM (localStorage) ============
+  const MEMORY_KEY = 'snappy_memories';
+  
+  // Load all memories from localStorage
+  function loadAllMemories() {
+    try {
+      const data = localStorage.getItem(MEMORY_KEY);
+      return data ? JSON.parse(data) : {};
+    } catch (e) {
+      log('Error loading memories: ' + e);
+      return {};
+    }
+  }
+  
+  // Save all memories to localStorage
+  function saveAllMemories(memories) {
+    try {
+      localStorage.setItem(MEMORY_KEY, JSON.stringify(memories));
+    } catch (e) {
+      log('Error saving memories: ' + e);
+    }
+  }
+  
+  // Get memory for a specific user
+  function getUserMemory(username) {
+    const memories = loadAllMemories();
+    if (!memories[username]) {
+      memories[username] = {
+        username: username,
+        messages: [],
+        firstSeen: Date.now(),
+        lastSeen: Date.now()
+      };
+      saveAllMemories(memories);
+    }
+    return memories[username];
+  }
+  
+  // Add a message to user's memory
+  function addToMemory(username, text, isFromThem) {
+    const memories = loadAllMemories();
+    if (!memories[username]) {
+      memories[username] = {
+        username: username,
+        messages: [],
+        firstSeen: Date.now(),
+        lastSeen: Date.now()
+      };
+    }
+    
+    // Add the message
+    memories[username].messages.push({
+      text: text,
+      from: isFromThem ? 'them' : 'me',
+      timestamp: Date.now()
+    });
+    
+    // Keep only last 100 messages per user
+    if (memories[username].messages.length > 100) {
+      memories[username].messages = memories[username].messages.slice(-100);
+    }
+    
+    memories[username].lastSeen = Date.now();
+    saveAllMemories(memories);
+    
+    log('Memory saved for ' + username + ': ' + (isFromThem ? 'THEM' : 'ME') + ' - "' + text.substring(0, 30) + '..."');
+  }
+  
+  // Get conversation summary for a user
+  function getMemorySummary(username) {
+    const memory = getUserMemory(username);
+    const msgCount = memory.messages.length;
+    const theirMsgs = memory.messages.filter(m => m.from === 'them').length;
+    const myMsgs = memory.messages.filter(m => m.from === 'me').length;
+    
+    // Get last few messages for context
+    const recent = memory.messages.slice(-5).map(m => 
+      (m.from === 'them' ? 'Them: ' : 'Me: ') + m.text.substring(0, 50)
+    ).join(' | ');
+    
+    return {
+      total: msgCount,
+      fromThem: theirMsgs,
+      fromMe: myMsgs,
+      recent: recent,
+      firstSeen: memory.firstSeen,
+      lastSeen: memory.lastSeen
+    };
+  }
+  
+  // List all users in memory
+  function listAllUsers() {
+    const memories = loadAllMemories();
+    return Object.keys(memories);
+  }
+  
+  // Expose memory functions globally for UI access
+  window.__SNAPPY_MEMORY__ = {
+    getUser: getUserMemory,
+    addMessage: addToMemory,
+    getSummary: getMemorySummary,
+    listUsers: listAllUsers,
+    loadAll: loadAllMemories
+  };
+  
+  // ============ END MEMORY SYSTEM ============
   
   // Scan the DOM to find clickable chat items
   function findClickableChats() {
@@ -647,7 +751,19 @@ function getBotScript(config: Config): string {
   
   // Process a chat
   async function processChat(chatEl, chatText) {
-    log('Opening chat: ' + chatText.substring(0, 30));
+    // Extract username from chatText
+    const username = chatText.split(/[·\\n]/)[0].trim();
+    log('Opening chat with: ' + username);
+    
+    // Load and display memory for this user
+    const memory = getUserMemory(username);
+    if (memory.messages.length > 0) {
+      const summary = getMemorySummary(username);
+      log('MEMORY: ' + summary.total + ' previous messages with ' + username);
+      log('Recent: ' + summary.recent);
+    } else {
+      log('No previous memory for ' + username);
+    }
     
     // Try clicking
     clickElement(chatEl);
@@ -732,12 +848,18 @@ function getBotScript(config: Config): string {
       log('SUCCESS: Sent reply: ' + reply);
       seenMessages.add(msgId);
       
-      // Update memory
-      let mem = conversationMemories.get(chatText) || { sender: chatText, messages: [], summary: '' };
-      mem.messages.push({ text: lastIncoming, isIncoming: true, timestamp: Date.now() });
-      mem.messages.push({ text: reply, isIncoming: false, timestamp: Date.now() });
-      mem.summary = chatText + ': ' + mem.messages.length + ' msgs';
-      conversationMemories.set(chatText, mem);
+      // Extract username from chatText (remove timestamps, etc.)
+      const username = chatText.split(/[·\\n]/)[0].trim();
+      
+      // Save their message to memory
+      addToMemory(username, lastIncoming, true);
+      
+      // Save our reply to memory
+      addToMemory(username, reply, false);
+      
+      // Log memory summary
+      const summary = getMemorySummary(username);
+      log('Memory for ' + username + ': ' + summary.total + ' msgs (' + summary.fromThem + ' from them, ' + summary.fromMe + ' from me)');
     }
   }
   
@@ -869,17 +991,29 @@ webview.addEventListener('did-fail-load', (e) => {
   addLog('Load failed: ' + e.errorDescription, 'error');
 });
 
-// Refresh memories from webview
+// Refresh memories from webview (now using localStorage)
 async function refreshMemories() {
   try {
     const memories = await webview.executeJavaScript(`
       (function() {
-        if (!window.__SNAPPY_RUNNING__) return [];
-        const mems = [];
-        if (typeof conversationMemories !== 'undefined') {
-          conversationMemories.forEach((v, k) => mems.push({ sender: k, summary: v.summary, count: v.messages.length }));
+        if (!window.__SNAPPY_MEMORY__) return [];
+        const allMems = window.__SNAPPY_MEMORY__.loadAll();
+        const result = [];
+        for (const username in allMems) {
+          const mem = allMems[username];
+          const fromThem = mem.messages.filter(m => m.from === 'them').length;
+          const fromMe = mem.messages.filter(m => m.from === 'me').length;
+          result.push({
+            username: username,
+            total: mem.messages.length,
+            fromThem: fromThem,
+            fromMe: fromMe,
+            lastSeen: mem.lastSeen
+          });
         }
-        return mems;
+        // Sort by lastSeen (most recent first)
+        result.sort((a, b) => b.lastSeen - a.lastSeen);
+        return result;
       })();
     `);
     
@@ -888,10 +1022,10 @@ async function refreshMemories() {
       return;
     }
     
-    memoriesContainer.innerHTML = memories.map((m: {sender: string, summary: string, count: number}) => `
+    memoriesContainer.innerHTML = memories.map((m: {username: string, total: number, fromThem: number, fromMe: number}) => `
       <div class="memory-item">
-        <div class="memory-sender">${escapeHtml(m.sender)}</div>
-        <div class="memory-summary">${m.count} messages</div>
+        <div class="memory-sender">${escapeHtml(m.username)}</div>
+        <div class="memory-summary">${m.total} msgs (${m.fromThem} them, ${m.fromMe} me)</div>
       </div>
     `).join('');
   } catch (e) {
