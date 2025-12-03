@@ -1,18 +1,33 @@
 /**
  * Brain Layer - Reply Logic
  * Handles rule matching, rate limiting, and decision making
+ * Now supports AI-powered replies when enabled
  */
 
 import { IncomingMessage, ReplyRule, Configuration, DEFAULT_CONFIG } from '../types';
+import { AIBrain } from './aiBrain';
 
 let config: Configuration = DEFAULT_CONFIG;
 let logCallback: ((message: string) => void) | null = null;
+let aiBrain: AIBrain | null = null;
 
 /**
  * Set the configuration for the brain layer
  */
 function setConfig(newConfig: Configuration): void {
   config = newConfig;
+  
+  // Initialize or update AI Brain if AI config is present
+  if (config.ai) {
+    if (!aiBrain) {
+      aiBrain = new AIBrain(config.ai);
+      if (logCallback) {
+        aiBrain.testConnection(); // Test connection on init
+      }
+    } else {
+      aiBrain.updateConfig(config.ai);
+    }
+  }
 }
 
 /**
@@ -89,9 +104,38 @@ function shouldRandomlySkip(): boolean {
 /**
  * Main decision function - determines if and what to reply
  * Returns the reply text or null if no reply should be sent
+ * 
+ * Now supports async AI-powered replies when AI is enabled
  */
-function decideReply(message: IncomingMessage): string | null {
+async function decideReply(message: IncomingMessage): Promise<string | null> {
   log(`Evaluating message from ${message.sender}: "${message.messageText.substring(0, 50)}..."`);
+  
+  // Check if AI is enabled and available
+  if (config.ai && config.ai.enabled && aiBrain) {
+    log('Using AI Brain for reply decision');
+    
+    // Check random skip before AI call
+    if (shouldRandomlySkip()) {
+      log('Decision: Skip (random)');
+      return null;
+    }
+    
+    try {
+      const reply = await aiBrain.decideReply(message);
+      if (reply) {
+        log(`Decision: AI reply with "${reply.substring(0, 50)}..."`);
+        return limitReplyLength(reply);
+      }
+      log('Decision: AI returned no reply');
+      return null;
+    } catch (error) {
+      log(`AI Brain error: ${error}`);
+      // Fall through to rule-based logic on error
+    }
+  }
+  
+  // Fall back to rule-based logic when AI is disabled or unavailable
+  log('Using rule-based logic for reply decision');
   
   // Check random skip
   if (shouldRandomlySkip()) {
@@ -130,6 +174,13 @@ function getConfig(): Configuration {
   return config;
 }
 
+/**
+ * Get the AI Brain instance (for testing/debugging)
+ */
+function getAIBrain(): AIBrain | null {
+  return aiBrain;
+}
+
 export {
   setConfig,
   setLogCallback,
@@ -138,5 +189,6 @@ export {
   ruleMatches,
   shouldRandomlySkip,
   limitReplyLength,
-  getConfig
+  getConfig,
+  getAIBrain
 };
