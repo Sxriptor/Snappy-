@@ -212,6 +212,60 @@ export function setupIPCHandlers(): void {
       console.log('[Updater] Manual check failed:', err.message);
     });
   });
+
+  // AI Settings handlers
+  ipcMain.handle('ai:getSettings', () => {
+    return config.ai || null;
+  });
+
+  ipcMain.handle('ai:saveSettings', (event, aiSettings) => {
+    try {
+      config.ai = aiSettings;
+      saveConfiguration(config);
+      console.log('[Shell] AI settings saved');
+      return true;
+    } catch (error) {
+      console.error('[Shell] Error saving AI settings:', error);
+      return false;
+    }
+  });
+
+  ipcMain.handle('ai:testConnection', async () => {
+    try {
+      const ai = config.ai;
+      if (!ai) {
+        return { success: false, error: 'AI not configured' };
+      }
+
+      const url = `http://${ai.llmEndpoint}:${ai.llmPort}/v1/chat/completions`;
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 5000);
+
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          model: ai.modelName,
+          messages: [{ role: 'user', content: 'Hi' }],
+          max_tokens: 10
+        }),
+        signal: controller.signal
+      });
+
+      clearTimeout(timeoutId);
+
+      if (response.ok) {
+        return { success: true, modelName: ai.modelName };
+      } else {
+        return { success: false, error: `HTTP ${response.status}` };
+      }
+    } catch (error: any) {
+      if (error.name === 'AbortError') {
+        return { success: false, error: 'Connection timed out' };
+      }
+      return { success: false, error: error.message || 'Connection failed' };
+    }
+  });
   
   console.log('[Shell] IPC handlers set up');
 }

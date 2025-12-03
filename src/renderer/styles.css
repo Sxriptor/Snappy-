@@ -470,3 +470,97 @@ input[type="number"] {
   text-align: center;
   padding: 10px;
 }
+
+
+/* AI Settings */
+.input-sm-wide {
+  width: 70px;
+}
+
+.slider {
+  width: 60px;
+  height: 4px;
+  -webkit-appearance: none;
+  background: #1a1a1a;
+  border-radius: 2px;
+  cursor: pointer;
+}
+
+.slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 10px;
+  height: 10px;
+  background: #444;
+  border-radius: 50%;
+  cursor: pointer;
+}
+
+.slider::-webkit-slider-thumb:hover {
+  background: #666;
+}
+
+#ai-temp-val {
+  font-size: 9px;
+  color: #555;
+  width: 24px;
+  text-align: right;
+}
+
+.ai-status {
+  font-size: 10px;
+}
+
+.ai-status.connected {
+  color: #5a8;
+}
+
+.ai-status.disconnected {
+  color: #a55;
+}
+
+.ai-status.testing {
+  color: #aa8;
+}
+
+.ai-prompt-section {
+  margin-top: 8px;
+}
+
+.ai-prompt-section .section-header {
+  margin-bottom: 4px;
+}
+
+#ai-prompt {
+  width: 100%;
+  padding: 6px;
+  background: #111;
+  border: 1px solid #1a1a1a;
+  color: #888;
+  font-family: inherit;
+  font-size: 9px;
+  resize: vertical;
+  min-height: 50px;
+  outline: none;
+}
+
+#ai-prompt:focus {
+  border-color: #2a2a2a;
+  color: #ccc;
+}
+
+
+/* Memory AI Context Preview */
+.memory-context {
+  margin-top: 4px;
+  padding-top: 4px;
+  border-top: 1px solid #1a1a1a;
+}
+
+.context-msg {
+  font-size: 8px;
+  color: #444;
+  line-height: 1.4;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}

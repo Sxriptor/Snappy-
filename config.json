@@ -1,44 +1,26 @@
 {
   "initialUrl": "https://web.snapchat.com",
   "autoInject": false,
-  "replyRules": [
-    {
-      "match": "?",
-      "reply": "I'll check and get back to you soon!",
-      "priority": 0
-    },
-    {
-      "match": "hello",
-      "reply": "Hey! How's it going?",
-      "priority": 1
-    },
-    {
-      "match": "hi",
-      "reply": "Hi there! 👋",
-      "priority": 2
-    },
-    {
-      "match": "thanks",
-      "reply": "You're welcome!",
-      "priority": 3
-    },
-    {
-      "match": "bye",
-      "reply": "Talk to you later!",
-      "priority": 4
-    }
-  ],
-  "typingDelayRangeMs": [
-    50,
-    150
-  ],
-  "preReplyDelayRangeMs": [
-    2000,
-    6000
-  ],
+  "replyRules": [],
+  "typingDelayRangeMs": [50, 150],
+  "preReplyDelayRangeMs": [2000, 6000],
   "maxRepliesPerMinute": 5,
   "maxRepliesPerHour": 30,
   "maxReplyLength": 500,
   "siteMode": "universal",
-  "randomSkipProbability": 0.15
+  "randomSkipProbability": 0.15,
+  "ai": {
+    "enabled": true,
+    "llmEndpoint": "localhost",
+    "llmPort": 8080,
+    "modelName": "local-model",
+    "systemPrompt": "You are a friendly person chatting casually. Keep responses brief and natural. Match the tone of the conversation. Don't be overly formal or use excessive punctuation.",
+    "temperature": 0.7,
+    "maxTokens": 150,
+    "contextHistoryEnabled": true,
+    "maxContextMessages": 10,
+    "requestTimeoutMs": 30000,
+    "maxRetries": 3,
+    "retryBackoffMs": 1000
+  }
 }

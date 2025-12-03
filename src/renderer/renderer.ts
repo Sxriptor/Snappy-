@@ -8,6 +8,18 @@ interface ReplyRule {
   priority?: number;
 }
 
+interface AIConfig {
+  enabled: boolean;
+  llmEndpoint: string;
+  llmPort: number;
+  modelName: string;
+  systemPrompt: string;
+  temperature: number;
+  maxTokens: number;
+  contextHistoryEnabled: boolean;
+  maxContextMessages: number;
+}
+
 interface Config {
   initialUrl: string;
   autoInject: boolean;
@@ -17,6 +29,7 @@ interface Config {
   maxRepliesPerMinute: number;
   maxRepliesPerHour: number;
   randomSkipProbability: number;
+  ai?: AIConfig;
 }
 
 let isPanelOpen = false;
@@ -56,6 +69,72 @@ const logHeader = document.getElementById('log-header')!;
 // Memories elements
 const memoriesContainer = document.getElementById('memories-container')!;
 const refreshMemoriesBtn = document.getElementById('refresh-memories')!;
+
+// AI Settings elements
+const aiEnabled = document.getElementById('ai-enabled') as HTMLInputElement;
+const aiStatus = document.getElementById('ai-status')!;
+const aiEndpoint = document.getElementById('ai-endpoint') as HTMLInputElement;
+const aiPort = document.getElementById('ai-port') as HTMLInputElement;
+const aiModel = document.getElementById('ai-model') as HTMLInputElement;
+const aiTemp = document.getElementById('ai-temp') as HTMLInputElement;
+const aiTempVal = document.getElementById('ai-temp-val')!;
+const aiTokens = document.getElementById('ai-tokens') as HTMLInputElement;
+const aiContext = document.getElementById('ai-context') as HTMLInputElement;
+const aiHistory = document.getElementById('ai-history') as HTMLInputElement;
+const aiPrompt = document.getElementById('ai-prompt') as HTMLTextAreaElement;
+const testConnectionBtn = document.getElementById('test-connection')!;
+
+// AI temperature slider update
+aiTemp?.addEventListener('input', () => {
+  aiTempVal.textContent = aiTemp.value;
+});
+
+// Test AI connection
+testConnectionBtn?.addEventListener('click', async () => {
+  aiStatus.textContent = '●';
+  aiStatus.className = 'ai-status testing';
+  addLog('Testing AI connection...', 'info');
+  
+  try {
+    const endpoint = aiEndpoint?.value || 'localhost';
+    const port = parseInt(aiPort?.value) || 8080;
+    const url = `http://${endpoint}:${port}/v1/chat/completions`;
+    
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 5000);
+    
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: aiModel?.value || 'local-model',
+        messages: [{ role: 'user', content: 'Hi' }],
+        max_tokens: 10
+      }),
+      signal: controller.signal
+    });
+    
+    clearTimeout(timeoutId);
+    
+    if (response.ok) {
+      aiStatus.textContent = '●';
+      aiStatus.className = 'ai-status connected';
+      addLog('AI connection successful!', 'success');
+    } else {
+      aiStatus.textContent = '●';
+      aiStatus.className = 'ai-status disconnected';
+      addLog(`AI connection failed: HTTP ${response.status}`, 'error');
+    }
+  } catch (e: any) {
+    aiStatus.textContent = '●';
+    aiStatus.className = 'ai-status disconnected';
+    if (e.name === 'AbortError') {
+      addLog('AI connection timed out', 'error');
+    } else {
+      addLog(`AI connection failed: ${e.message}`, 'error');
+    }
+  }
+});
 
 // Log functions
 function addLog(message: string, type: 'info' | 'success' | 'error' | 'highlight' = 'info') {
@@ -222,10 +301,22 @@ saveBtn.addEventListener('click', async () => {
     preReplyDelayRangeMs: [parseInt(delayMin.value) || 2000, parseInt(delayMax.value) || 6000],
     maxRepliesPerMinute: parseInt(rateMinute.value) || 5,
     maxRepliesPerHour: parseInt(rateHour.value) || 30,
-    randomSkipProbability: (parseInt(skipRate.value) || 15) / 100
+    randomSkipProbability: (parseInt(skipRate.value) || 15) / 100,
+    ai: {
+      enabled: aiEnabled?.checked || false,
+      llmEndpoint: aiEndpoint?.value || 'localhost',
+      llmPort: parseInt(aiPort?.value) || 8080,
+      modelName: aiModel?.value || 'local-model',
+      systemPrompt: aiPrompt?.value || '',
+      temperature: parseFloat(aiTemp?.value) || 0.7,
+      maxTokens: parseInt(aiTokens?.value) || 150,
+      contextHistoryEnabled: aiContext?.checked || true,
+      maxContextMessages: parseInt(aiHistory?.value) || 10
+    }
   };
   await (window as any).bot.saveConfig(config);
   saveBtn.textContent = 'Saved';
+  addLog('Configuration saved', 'success');
   setTimeout(() => { saveBtn.textContent = 'Save'; }, 1000);
 });
 
@@ -245,6 +336,23 @@ async function loadConfig() {
     skipRate.value = String(Math.round((config.randomSkipProbability || 0.15) * 100));
     rulesContainer.innerHTML = '';
     (config.replyRules || []).forEach((r: ReplyRule) => addRule(String(r.match), r.reply));
+    
+    // Load AI settings
+    if (config.ai) {
+      if (aiEnabled) aiEnabled.checked = config.ai.enabled || false;
+      if (aiEndpoint) aiEndpoint.value = config.ai.llmEndpoint || 'localhost';
+      if (aiPort) aiPort.value = String(config.ai.llmPort || 8080);
+      if (aiModel) aiModel.value = config.ai.modelName || 'local-model';
+      if (aiPrompt) aiPrompt.value = config.ai.systemPrompt || '';
+      if (aiTemp) {
+        aiTemp.value = String(config.ai.temperature || 0.7);
+        aiTempVal.textContent = String(config.ai.temperature || 0.7);
+      }
+      if (aiTokens) aiTokens.value = String(config.ai.maxTokens || 150);
+      if (aiContext) aiContext.checked = config.ai.contextHistoryEnabled !== false;
+      if (aiHistory) aiHistory.value = String(config.ai.maxContextMessages || 10);
+    }
+    
     if (config.initialUrl) webview.src = config.initialUrl;
   } catch (e) {
     console.error('Load failed:', e);
@@ -1003,12 +1111,18 @@ async function refreshMemories() {
           const mem = allMems[username];
           const fromThem = mem.messages.filter(m => m.from === 'them').length;
           const fromMe = mem.messages.filter(m => m.from === 'me').length;
+          // Get last 3 messages for AI context preview
+          const recentMsgs = mem.messages.slice(-3).map(m => ({
+            from: m.from,
+            text: m.text.substring(0, 40)
+          }));
           result.push({
             username: username,
             total: mem.messages.length,
             fromThem: fromThem,
             fromMe: fromMe,
-            lastSeen: mem.lastSeen
+            lastSeen: mem.lastSeen,
+            recent: recentMsgs
           });
         }
         // Sort by lastSeen (most recent first)
@@ -1022,12 +1136,27 @@ async function refreshMemories() {
       return;
     }
     
-    memoriesContainer.innerHTML = memories.map((m: {username: string, total: number, fromThem: number, fromMe: number}) => `
-      <div class="memory-item">
-        <div class="memory-sender">${escapeHtml(m.username)}</div>
-        <div class="memory-summary">${m.total} msgs (${m.fromThem} them, ${m.fromMe} me)</div>
-      </div>
-    `).join('');
+    const isAIEnabled = aiEnabled?.checked || false;
+    
+    memoriesContainer.innerHTML = memories.map((m: {username: string, total: number, fromThem: number, fromMe: number, recent: Array<{from: string, text: string}>}) => {
+      let html = `
+        <div class="memory-item">
+          <div class="memory-sender">${escapeHtml(m.username)}</div>
+          <div class="memory-summary">${m.total} msgs (${m.fromThem} them, ${m.fromMe} me)</div>`;
+      
+      // Show AI context preview if AI is enabled
+      if (isAIEnabled && m.recent && m.recent.length > 0) {
+        html += `<div class="memory-context">`;
+        m.recent.forEach(msg => {
+          const prefix = msg.from === 'them' ? '→' : '←';
+          html += `<div class="context-msg">${prefix} ${escapeHtml(msg.text)}...</div>`;
+        });
+        html += `</div>`;
+      }
+      
+      html += `</div>`;
+      return html;
+    }).join('');
   } catch (e) {
     // Bot not running or no memories
   }

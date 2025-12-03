@@ -86,8 +86,8 @@ async function handleIncomingMessage(message: IncomingMessage): Promise<void> {
     return;
   }
   
-  // Get reply decision from brain
-  const reply = decideReply(message);
+  // Get reply decision from brain (now async for AI support)
+  const reply = await decideReply(message);
   
   if (!reply) {
     log('No reply decided');

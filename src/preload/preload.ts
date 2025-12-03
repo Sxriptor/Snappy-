@@ -49,6 +49,27 @@ const botAPI = {
    */
   loadUrl: (url: string): void => {
     ipcRenderer.send('bot:loadUrl', url);
+  },
+
+  /**
+   * Get AI settings
+   */
+  getAISettings: async (): Promise<unknown> => {
+    return await ipcRenderer.invoke('ai:getSettings');
+  },
+
+  /**
+   * Save AI settings
+   */
+  saveAISettings: async (settings: unknown): Promise<boolean> => {
+    return await ipcRenderer.invoke('ai:saveSettings', settings);
+  },
+
+  /**
+   * Test LLM connection
+   */
+  testLLMConnection: async (): Promise<{ success: boolean; modelName?: string; error?: string }> => {
+    return await ipcRenderer.invoke('ai:testConnection');
   }
 };
 
