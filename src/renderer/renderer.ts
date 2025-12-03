@@ -267,8 +267,16 @@ function getBotScript(config: Config): string {
   const conversationMemories = window.conversationMemories;
   let pollInterval = null;
   
+  // Log storage for polling
+  window.__SNAPPY_LOGS__ = window.__SNAPPY_LOGS__ || [];
+  
   function log(msg) {
     console.log('[Snappy] ' + msg);
+    window.__SNAPPY_LOGS__.push(msg);
+    // Keep only last 50 logs
+    if (window.__SNAPPY_LOGS__.length > 50) {
+      window.__SNAPPY_LOGS__ = window.__SNAPPY_LOGS__.slice(-50);
+    }
   }
   
   function sleep(ms) {
@@ -668,17 +676,34 @@ webview.addEventListener('console-message', (e) => {
   
   if (msg.includes('[Snappy]')) {
     const cleanMsg = msg.replace(/\[Snappy\]\s*/g, '');
-    if (msg.includes('✓')) {
+    if (msg.includes('SUCCESS') || msg.includes('FOUND')) {
       addLog(cleanMsg, 'success');
-    } else if (msg.includes('Error') || msg.includes('not found')) {
+    } else if (msg.includes('ERROR') || msg.includes('NOT FOUND')) {
       addLog(cleanMsg, 'error');
-    } else if (msg.includes('🚀') || msg.includes('🛑')) {
-      addLog(cleanMsg, 'highlight');
     } else {
       addLog(cleanMsg, 'info');
     }
   }
 });
+
+// Poll for logs from the webview (backup method)
+setInterval(async () => {
+  if (!isBotActive) return;
+  try {
+    const logs = await webview.executeJavaScript(`
+      (function() {
+        if (!window.__SNAPPY_LOGS__) return [];
+        const logs = window.__SNAPPY_LOGS__.splice(0);
+        return logs;
+      })();
+    `);
+    if (logs && logs.length > 0) {
+      logs.forEach((log: string) => addLog(log, 'info'));
+    }
+  } catch (e) {
+    // Ignore errors
+  }
+}, 1000);
 
 // Webview ready handler
 webview.addEventListener('dom-ready', () => {
