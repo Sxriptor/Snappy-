@@ -21,28 +21,29 @@ const MIN_MESSAGE_LENGTH = 5; // Minimum message length to process
 // Snapchat-specific selectors (updated for current Snapchat Web)
 const SNAPCHAT_SELECTORS = {
   // Chat list items (conversations in sidebar)
-  chatListItem: '[class*="ChatListItem"], [class*="conversationListItem"], [data-testid*="conversation"]',
-  chatListContainer: '[class*="ChatList"], [class*="conversationList"]',
-  
-  // Unread indicator
-  unreadBadge: '[class*="unread"], [class*="Unread"], [class*="badge"], [class*="Badge"]',
-  
-  // Active conversation
-  messageContainer: '[class*="MessageList"], [class*="messageList"], [class*="ChatMessages"]',
-  messageBubble: '[class*="Message"], [class*="message"], [class*="ChatMessage"]',
-  messageText: '[class*="MessageContent"], [class*="messageContent"], [class*="text"]',
-  
+  chatListItem: '.O4POs, [class*="ChatListItem"], [class*="conversationListItem"], [class*="conversation-"]',
+  chatListContainer: '[class*="ChatList"], [class*="conversationList"], [class*="chat-list"]',
+
+  // Unread indicator - more specific based on actual HTML
+  unreadBadge: '.HEkDJ.DEp5Z.UW13F, .HEkDJ.DEp5Z, [class*="unread"], [class*="badge"]',
+
+  // Active conversation - MORE SPECIFIC to actual message groups with headers
+  messageContainer: '[class*="MessageList"], [class*="messageList"], main[class*="chat"], [role="main"]',
+  // NEW: Target elements that have a header sibling or parent (actual messages)
+  messageBubble: 'div:has(> header.R1ne3), article:has(header), [class*="message"]:has(header)',
+  messageText: '[class*="MessageContent"], [class*="messageContent"], [class*="text"], [class*="content"]',
+
   // Sender info
-  senderName: '[class*="FriendName"], [class*="friendName"], [class*="Username"], [class*="username"]',
-  conversationHeader: '[class*="ConversationHeader"], [class*="chatHeader"]',
-  
+  senderName: 'header.R1ne3 span.nonIntl, [class*="FriendName"], [class*="username"]',
+  conversationHeader: '[class*="ConversationHeader"], [class*="chatHeader"], header[class*="conversation"]',
+
   // Input and send
-  inputField: '[contenteditable="true"], textarea[class*="Input"], textarea[class*="input"], [class*="MessageInput"] textarea',
+  inputField: '[contenteditable="true"], textarea[class*="Input"], [placeholder*="Send"], [role="textbox"]',
   sendButton: 'button[class*="Send"], button[aria-label*="Send"], [class*="sendButton"]',
-  
-  // Incoming vs outgoing
-  incomingMessage: '[class*="received"], [class*="Received"], [class*="incoming"], [class*="other"]',
-  outgoingMessage: '[class*="sent"], [class*="Sent"], [class*="outgoing"], [class*="self"]'
+
+  // Incoming vs outgoing - expanded with more variations
+  incomingMessage: '[class*="received"], [class*="incoming"], [class*="other"], [class*="left"]',
+  outgoingMessage: '[class*="sent"], [class*="outgoing"], [class*="self"], [class*="right"]'
 };
 
 let isRunning = false;
@@ -233,48 +234,115 @@ function isStatusOrUIText(text: string): boolean {
 
 /**
  * Get all messages in current conversation
+ * NEW APPROACH: Messages are in <li> elements, grouped by sender
  */
 function getConversationMessages(): { text: string; isIncoming: boolean }[] {
   const messages: { text: string; isIncoming: boolean }[] = [];
-  const bubbles = findAllElements(SNAPCHAT_SELECTORS.messageBubble);
-  
-  snapLog(`Found ${bubbles.length} message bubbles`);
-  
-  for (const bubble of bubbles) {
-    const text = bubble.textContent?.trim();
-    if (!text) continue;
-    
-    // Skip status/UI text
-    if (isStatusOrUIText(text)) {
-      continue;
+
+  // Find ALL ul.ujRzj elements (there's one per conversation)
+  const allMessageLists = Array.from(document.querySelectorAll('ul.ujRzj'));
+  snapLog(`Found ${allMessageLists.length} ul.ujRzj elements`);
+
+  // Find the VISIBLE one (the active conversation)
+  // Look for the one with the most visible content or that's currently scrollable
+  let messageList: Element | null = null;
+
+  for (const ul of allMessageLists) {
+    const rect = ul.getBoundingClientRect();
+    // Check if this ul is visible (has dimensions and is in viewport)
+    if (rect.width > 0 && rect.height > 100) {
+      messageList = ul;
+      snapLog(`Found visible message list: width=${rect.width.toFixed(0)}px, height=${rect.height.toFixed(0)}px`);
+      break;
     }
-    
-    // Determine if incoming or outgoing based on class names
-    const classList = bubble.className.toLowerCase() + ' ' + (bubble.parentElement?.className.toLowerCase() || '');
-    
-    // Log the class names for debugging
-    snapLog(`Message classes: "${classList.substring(0, 100)}..."`);
-    
-    const isIncoming = classList.includes('received') || classList.includes('incoming') || 
-                       classList.includes('other') || classList.includes('left');
-    const isOutgoing = classList.includes('sent') || classList.includes('outgoing') || 
-                       classList.includes('self') || classList.includes('right');
-    
-    // Log classification result
-    const direction = isIncoming ? 'INCOMING' : (isOutgoing ? 'OUTGOING' : 'UNKNOWN');
-    snapLog(`  -> Classified as ${direction}: "${text.substring(0, 30)}..."`);
-    
-    // If we can't determine direction, assume it's incoming to be safe
-    // (better to reply to our own message once than miss incoming messages)
-    if (!isIncoming && !isOutgoing) {
-      snapLog('  -> Direction unknown, defaulting to INCOMING');
-      messages.push({ text, isIncoming: true });
-      continue;
-    }
-    
-    messages.push({ text, isIncoming });
   }
-  
+
+  // Fallback: Just use the first one with messages
+  if (!messageList && allMessageLists.length > 0) {
+    for (const ul of allMessageLists) {
+      if (ul.querySelectorAll('li').length > 0) {
+        messageList = ul;
+        snapLog(`Using first ul.ujRzj with messages as fallback`);
+        break;
+      }
+    }
+  }
+
+  if (!messageList) {
+    snapLog('ERROR: Could not find any visible message list');
+    return messages;
+  }
+
+  // Get all top-level <li> elements (each represents a message group)
+  const messageGroups = Array.from(messageList.querySelectorAll(':scope > li'));
+  snapLog(`Found ${messageGroups.length} message groups in active conversation`);
+
+  for (const group of messageGroups) {
+    // Check if this group has a header (indicates sender)
+    const header = group.querySelector('header.R1ne3');
+
+    let isOutgoing = false;
+    let isIncoming = false;
+
+    if (header) {
+      // Has header - determine sender
+      // Check if header contains a span with class "nonIntl" that says exactly "Me"
+      const meSpan = header.querySelector('span.nonIntl');
+      const senderName = meSpan?.textContent?.trim() || '';
+
+      // HARDCODED: If sender is exactly "Me", it's our message (outgoing)
+      // Otherwise, it's from someone else (incoming)
+      if (senderName === 'Me') {
+        isOutgoing = true;
+        isIncoming = false;
+        snapLog(`Message group from: "Me" [OUTGOING]`);
+      } else {
+        isOutgoing = false;
+        isIncoming = true;
+        snapLog(`Message group from: "${senderName}" [INCOMING]`);
+      }
+    }
+
+    // Now find all individual messages in this group
+    // Messages are in <div class="KB4Aq"> elements
+    const messageDivs = Array.from(group.querySelectorAll('div.KB4Aq'));
+
+    for (const msgDiv of messageDivs) {
+      // Get the actual text content from span.ogn1z
+      const textSpan = msgDiv.querySelector('span.ogn1z');
+      if (!textSpan) continue;
+
+      const text = textSpan.textContent?.trim() || '';
+      if (!text || text.length < MIN_MESSAGE_LENGTH) continue;
+
+      // Skip status/UI text
+      if (isStatusOrUIText(text)) continue;
+
+      // If we still don't know direction, use visual positioning
+      if (!isIncoming && !isOutgoing) {
+        const rect = msgDiv.getBoundingClientRect();
+        const windowWidth = window.innerWidth;
+        const messageCenter = (rect.left + rect.right) / 2;
+        const screenCenter = windowWidth / 2;
+        const threshold = windowWidth * 0.1;
+
+        if (messageCenter < screenCenter - threshold) {
+          isIncoming = true;
+        } else if (messageCenter > screenCenter + threshold) {
+          isOutgoing = true;
+        } else {
+          snapLog(`  -> Skipping message with unknown direction: "${text.substring(0, 30)}..."`);
+          continue;
+        }
+      }
+
+      const direction = isIncoming ? 'INCOMING' : 'OUTGOING';
+      snapLog(`  -> ${direction}: "${text}"`);
+      messages.push({ text, isIncoming });
+    }
+  }
+
+  snapLog(`Total messages collected: ${messages.length}`);
   return messages;
 }
 
@@ -933,29 +1001,143 @@ function debugMessageClassification(): void {
   snapLog('=== DEBUG: Message Classification ===');
   const bubbles = findAllElements(SNAPCHAT_SELECTORS.messageBubble);
   snapLog(`Total bubbles found: ${bubbles.length}`);
-  
+
   bubbles.forEach((bubble, idx) => {
     const text = bubble.textContent?.trim() || '';
-    const classList = bubble.className.toLowerCase() + ' ' + (bubble.parentElement?.className.toLowerCase() || '');
-    
+
+    // Collect all classes from bubble and parents
+    let classList = bubble.className.toLowerCase();
+    let currentElement: HTMLElement | null = bubble;
+    for (let i = 0; i < 3 && currentElement?.parentElement; i++) {
+      currentElement = currentElement.parentElement as HTMLElement;
+      classList += ' ' + currentElement.className.toLowerCase();
+    }
+
+    // Check data attributes
+    const dataAttrs = Array.from(bubble.attributes)
+      .filter(attr => attr.name.startsWith('data-'))
+      .map(attr => `${attr.name}=${attr.value}`.toLowerCase())
+      .join(' ');
+
+    // Get position info
+    const rect = bubble.getBoundingClientRect();
+    const windowWidth = window.innerWidth;
+    const isOnLeft = rect.left < windowWidth / 2;
+    const isOnRight = rect.right > windowWidth / 2;
+
     snapLog(`\n[${idx}] Text: "${text.substring(0, 50)}..."`);
-    snapLog(`    Classes: ${classList.substring(0, 150)}`);
-    
-    const isIncoming = classList.includes('received') || classList.includes('incoming') || 
+    snapLog(`    Classes: ${classList.substring(0, 150)}...`);
+    snapLog(`    Data attrs: ${dataAttrs || 'none'}`);
+    snapLog(`    Position: left=${rect.left.toFixed(0)}px, right=${rect.right.toFixed(0)}px (window=${windowWidth}px)`);
+    snapLog(`    Visual position: ${isOnLeft ? 'LEFT' : ''} ${isOnRight ? 'RIGHT' : ''}`);
+
+    const isIncoming = classList.includes('received') || classList.includes('incoming') ||
                        classList.includes('other') || classList.includes('left');
-    const isOutgoing = classList.includes('sent') || classList.includes('outgoing') || 
+    const isOutgoing = classList.includes('sent') || classList.includes('outgoing') ||
                        classList.includes('self') || classList.includes('right');
-    
+
     snapLog(`    isIncoming: ${isIncoming}, isOutgoing: ${isOutgoing}`);
     snapLog(`    isStatusText: ${isStatusOrUIText(text)}`);
   });
-  
+
   snapLog('\n=== END DEBUG ===');
+  snapLog('Tip: Check the console for visual highlighting of messages');
+
+  // Visually highlight messages for 5 seconds
+  bubbles.forEach((bubble, idx) => {
+    const originalBorder = bubble.style.border;
+    const text = bubble.textContent?.trim() || '';
+    let classList = bubble.className.toLowerCase();
+    let currentElement: HTMLElement | null = bubble;
+    for (let i = 0; i < 3 && currentElement?.parentElement; i++) {
+      currentElement = currentElement.parentElement as HTMLElement;
+      classList += ' ' + currentElement.className.toLowerCase();
+    }
+
+    const isIncoming = classList.includes('received') || classList.includes('incoming') ||
+                       classList.includes('other') || classList.includes('left');
+    const isOutgoing = classList.includes('sent') || classList.includes('outgoing') ||
+                       classList.includes('self') || classList.includes('right');
+
+    if (isStatusOrUIText(text)) {
+      bubble.style.border = '3px solid orange'; // Status text
+    } else if (isIncoming) {
+      bubble.style.border = '3px solid green'; // Incoming
+    } else if (isOutgoing) {
+      bubble.style.border = '3px solid blue'; // Outgoing
+    } else {
+      bubble.style.border = '3px solid red'; // Unknown
+    }
+
+    setTimeout(() => {
+      bubble.style.border = originalBorder;
+    }, 5000);
+  });
+
+  console.log('%cColor codes: 🟢 Green=Incoming | 🔵 Blue=Outgoing | 🔴 Red=Unknown | 🟠 Orange=Status/UI', 'font-size: 14px; font-weight: bold;');
 }
 
-// Expose debug function to window
+/**
+ * Debug function to inspect chat list and unread detection
+ * Call from console: window.__snapDebugChats()
+ */
+function debugChatList(): void {
+  snapLog('=== DEBUG: Chat List Detection ===');
+  const chatItems = findAllElements(SNAPCHAT_SELECTORS.chatListItem);
+  snapLog(`Total chat items found: ${chatItems.length}`);
+
+  chatItems.forEach((item, idx) => {
+    const text = item.textContent?.trim().substring(0, 80) || '';
+    const hasUnreadBadge = item.querySelector('[class*="unread"], [class*="Unread"], [class*="badge"], [class*="Badge"], [class*="dot"], [class*="Dot"]') !== null;
+    const hasUnreadClass = item.className.toLowerCase().includes('unread');
+    const isNew = isNewIncomingChat(item);
+
+    snapLog(`\n[${idx}] Chat: "${text}"`);
+    snapLog(`    Has unread badge: ${hasUnreadBadge}`);
+    snapLog(`    Has unread class: ${hasUnreadClass}`);
+    snapLog(`    Detected as new incoming: ${isNew}`);
+    snapLog(`    Classes: ${item.className.substring(0, 100)}...`);
+
+    // Visual highlight
+    const originalBorder = item.style.border;
+    item.style.border = isNew ? '3px solid lime' : '2px solid gray';
+    setTimeout(() => {
+      item.style.border = originalBorder;
+    }, 5000);
+  });
+
+  const unreadChats = findUnreadChats();
+  snapLog(`\n✓ Total unread chats detected: ${unreadChats.length}`);
+  snapLog('=== END DEBUG ===');
+  console.log('%c🟢 Lime border = New incoming chat detected | Gray border = No new messages', 'font-size: 14px; font-weight: bold;');
+}
+
+/**
+ * Debug function to show all current selectors
+ * Call from console: window.__snapSelectors()
+ */
+function debugSelectors(): void {
+  console.log('=== SNAPCHAT SELECTORS ===');
+  console.log(JSON.stringify(SNAPCHAT_SELECTORS, null, 2));
+  console.log('\n=== TESTING SELECTORS ===');
+
+  for (const [key, selector] of Object.entries(SNAPCHAT_SELECTORS)) {
+    const elements = findAllElements(selector);
+    console.log(`${key}: ${elements.length} elements found`);
+    if (elements.length > 0 && elements.length < 5) {
+      elements.forEach((el, i) => {
+        console.log(`  [${i}] ${el.tagName} - "${el.textContent?.substring(0, 40)}..."`);
+      });
+    }
+  }
+  console.log('=== END SELECTORS ===');
+}
+
+// Expose debug functions to window
 if (typeof window !== 'undefined') {
   (window as any).__snapDebug = debugMessageClassification;
+  (window as any).__snapDebugChats = debugChatList;
+  (window as any).__snapSelectors = debugSelectors;
 }
 
 /**
