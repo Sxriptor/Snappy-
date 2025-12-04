@@ -7,7 +7,7 @@ import { app, BrowserWindow, ipcMain, session } from 'electron';
 import { autoUpdater } from 'electron-updater';
 import * as path from 'path';
 import * as fs from 'fs';
-import { Configuration, DEFAULT_CONFIG, SessionConfig, ProxyConfig, IncomingMessage } from '../types';
+import { Configuration, DEFAULT_CONFIG, DEFAULT_AI_CONFIG, SessionConfig, ProxyConfig, IncomingMessage } from '../types';
 import { SessionManager } from './sessionManager';
 import { ProxyManager } from './proxyManager';
 import { FingerprintGenerator } from './fingerprintGenerator';
@@ -19,6 +19,7 @@ let config: Configuration = DEFAULT_CONFIG;
 let injectionScript: string = '';
 let isInjected: boolean = false;
 let aiBrain: AIBrain | null = null;
+let isProcessingReply: boolean = false;
 
 // Multi-session managers
 const fingerprintGenerator = new FingerprintGenerator();
@@ -39,15 +40,22 @@ export function loadConfiguration(): Configuration {
     if (fs.existsSync(configPath)) {
       const fileContent = fs.readFileSync(configPath, 'utf-8');
       const loadedConfig = JSON.parse(fileContent);
+      // Merge top-level config with defaults
       config = { ...DEFAULT_CONFIG, ...loadedConfig };
+      // Deep merge AI config with defaults to ensure all fields are present
+      if (loadedConfig.ai) {
+        config.ai = { ...DEFAULT_AI_CONFIG, ...loadedConfig.ai };
+      } else {
+        config.ai = DEFAULT_AI_CONFIG;
+      }
       console.log('[Shell] Configuration loaded from config.json');
     } else {
-      config = DEFAULT_CONFIG;
+      config = { ...DEFAULT_CONFIG, ai: DEFAULT_AI_CONFIG };
       console.log('[Shell] Using default configuration');
     }
   } catch (error) {
     console.error('[Shell] Error loading configuration:', error);
-    config = DEFAULT_CONFIG;
+    config = { ...DEFAULT_CONFIG, ai: DEFAULT_AI_CONFIG };
   }
   
   return config;
@@ -314,12 +322,22 @@ export function setupIPCHandlers(): void {
   });
 
   // AI Brain reply generation - called from injection layer via webview
+  // Uses a lock to ensure only one message is processed at a time
   ipcMain.handle('ai:generateReply', async (event, messageData: { sender: string; messageText: string; conversationId?: string }) => {
     try {
+      // Check if already processing - skip if busy
+      if (isProcessingReply) {
+        console.log('[Shell] Already processing a reply, skipping this request');
+        return { reply: null, busy: true };
+      }
+
       if (!aiBrain || !aiBrain.isEnabled()) {
         console.log('[Shell] AI Brain not enabled, skipping');
         return { reply: null };
       }
+
+      // Acquire lock
+      isProcessingReply = true;
 
       const message: IncomingMessage = {
         messageId: `msg-${Date.now()}`,
@@ -333,8 +351,13 @@ export function setupIPCHandlers(): void {
       const reply = await aiBrain.decideReply(message);
       console.log(`[Shell] AI reply: ${reply ? reply.substring(0, 50) + '...' : 'null'}`);
       
+      // Release lock
+      isProcessingReply = false;
+      
       return { reply };
     } catch (error: any) {
+      // Release lock on error
+      isProcessingReply = false;
       console.error('[Shell] AI reply generation error:', error);
       return { reply: null, error: error.message };
     }

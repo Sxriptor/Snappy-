@@ -48,6 +48,7 @@ const SNAPCHAT_SELECTORS = {
 let isRunning = false;
 let pollInterval: ReturnType<typeof setInterval> | null = null;
 let config: Configuration;
+let isProcessing = false; // Lock to prevent concurrent processing
 
 /**
  * Log with visual feedback to console and UI
@@ -94,11 +95,23 @@ function findAllElements(selectors: string): HTMLElement[] {
 
 
 /**
- * Clean username by removing status suffixes like "typing", "delivered", "read", etc.
+ * Clean username by removing status suffixes, emojis, and corrupted unicode
  */
 function cleanUsername(rawName: string): string {
   if (!rawName) return 'Unknown';
-  
+
+  let cleaned = rawName.trim();
+
+  // Remove emojis and unicode symbols (including corrupted ones like ≡ƒÿè)
+  // This regex removes most emoji ranges and special unicode characters
+  cleaned = cleaned
+    .replace(/[\u{1F300}-\u{1F9FF}]/gu, '') // Emojis
+    .replace(/[\u{2600}-\u{26FF}]/gu, '')   // Misc symbols
+    .replace(/[\u{2700}-\u{27BF}]/gu, '')   // Dingbats
+    .replace(/[≡ƒÿè]+/g, '')                // Common corrupted emoji patterns
+    .replace(/[\x00-\x1F\x7F]/g, '')        // Control characters
+    .trim();
+
   // Status suffixes to remove (case-insensitive)
   const statusSuffixes = [
     'typing',
@@ -115,26 +128,24 @@ function cleanUsername(rawName: string): string {
     'active now',
     'just now',
     'new chat',
-    'new snap'
+    'new snap',
   ];
-  
-  let cleaned = rawName.trim();
-  
+
   // Remove status suffixes from the end
   for (const suffix of statusSuffixes) {
     const regex = new RegExp(`\\s+${suffix}\\s*$`, 'i');
     cleaned = cleaned.replace(regex, '');
   }
-  
-  // Also handle cases where status might be separated by newline or multiple spaces
+
+  // Handle cases where status might be separated by newline
   const parts = cleaned.split(/[\n\r]+/);
   if (parts.length > 0) {
     cleaned = parts[0].trim();
   }
-  
+
   // Remove any trailing timestamps like "2m", "5h", "1d"
   cleaned = cleaned.replace(/\s+\d+[smhd]\s*$/i, '');
-  
+
   return cleaned || 'Unknown';
 }
 
@@ -735,6 +746,12 @@ async function processConversation(chatElement: HTMLElement): Promise<void> {
 async function pollForMessages(): Promise<void> {
   if (!isRunning) return;
   
+  // Skip if already processing a message
+  if (isProcessing) {
+    snapLog('Still processing previous message, skipping poll');
+    return;
+  }
+  
   try {
     snapLog('Scanning for unread messages...');
     
@@ -751,12 +768,21 @@ async function pollForMessages(): Promise<void> {
     for (const chat of unreadChats) {
       if (!isRunning) break;
       
-      await processConversation(chat);
+      // Set processing lock before starting
+      isProcessing = true;
+      
+      try {
+        await processConversation(chat);
+      } finally {
+        // Always release lock when done
+        isProcessing = false;
+      }
       
       // Wait between processing conversations
       await sleep(2000);
     }
   } catch (error) {
+    isProcessing = false; // Release lock on error
     snapLog(`Error in poll loop: ${error}`);
   }
 }

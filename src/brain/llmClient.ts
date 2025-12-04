@@ -89,7 +89,8 @@ export class LLMClient {
    */
   async generateReply(messages: ChatMessage[]): Promise<string | null> {
     if (!this.errorTracker.shouldRetry()) {
-      this.log('Too many consecutive errors, skipping request');
+      const timeUntilRecovery = this.errorTracker.getTimeUntilRecovery();
+      this.log(`Too many consecutive errors, skipping request. Will auto-recover in ${Math.ceil(timeUntilRecovery / 1000)}s`);
       return null;
     }
 
@@ -382,11 +383,13 @@ export class ErrorTracker {
   private readonly baseDelayMs: number;
   private readonly maxDelayMs: number;
   private readonly maxErrors: number;
+  private readonly recoveryTimeMs: number;
 
-  constructor(baseDelayMs: number = 1000, maxDelayMs: number = 60000, maxErrors: number = 10) {
+  constructor(baseDelayMs: number = 1000, maxDelayMs: number = 60000, maxErrors: number = 10, recoveryTimeMs: number = 120000) {
     this.baseDelayMs = baseDelayMs;
     this.maxDelayMs = maxDelayMs;
     this.maxErrors = maxErrors;
+    this.recoveryTimeMs = recoveryTimeMs; // Time after which errors reset (default 2 minutes)
   }
 
   /**
@@ -422,8 +425,18 @@ export class ErrorTracker {
 
   /**
    * Check if we should retry after errors
+   * Auto-recovers after recoveryTimeMs has passed since last error
    */
   shouldRetry(): boolean {
+    // Auto-recovery: if enough time has passed since last error, reset and allow retry
+    if (this.consecutiveErrors >= this.maxErrors && this.lastErrorTime > 0) {
+      const timeSinceLastError = Date.now() - this.lastErrorTime;
+      if (timeSinceLastError >= this.recoveryTimeMs) {
+        console.log(`[LLMClient] Auto-recovery: ${timeSinceLastError}ms since last error, resetting error count`);
+        this.consecutiveErrors = 0;
+        return true;
+      }
+    }
     return this.consecutiveErrors < this.maxErrors;
   }
 
@@ -447,6 +460,17 @@ export class ErrorTracker {
   reset(): void {
     this.consecutiveErrors = 0;
     this.lastErrorTime = 0;
+  }
+
+  /**
+   * Get time remaining until auto-recovery (0 if already can retry)
+   */
+  getTimeUntilRecovery(): number {
+    if (this.consecutiveErrors < this.maxErrors) {
+      return 0;
+    }
+    const timeSinceLastError = Date.now() - this.lastErrorTime;
+    return Math.max(0, this.recoveryTimeMs - timeSinceLastError);
   }
 }
 

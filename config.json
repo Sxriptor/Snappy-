@@ -10,7 +10,7 @@
     2000,
     6000
   ],
-  "maxRepliesPerMinute": 5,
+  "maxRepliesPerMinute": 50,
   "maxRepliesPerHour": 30,
   "maxReplyLength": 500,
   "siteMode": "universal",
