@@ -361,17 +361,96 @@ function findMatchingReply(messageText: string): string | null {
 
 /**
  * Generate a contextual reply based on conversation memory
+ * Uses AI Brain via direct fetch to LLM server for intelligent responses
  */
-function generateContextualReply(sender: string, latestMessage: string): string | null {
-  // First try rule-based matching
+async function generateContextualReply(sender: string, latestMessage: string): Promise<string | null> {
+  // Skip UI elements that aren't real messages
+  const lowerMsg = latestMessage.toLowerCase();
+  const uiElements = ['spotlight', 'drag & drop', 'upload', 'type a message', 'send a chat', 'new chat', 'add friends', 'stories', 'discover', 'map', 'chat'];
+  if (uiElements.some(ui => lowerMsg === ui || (lowerMsg.length < 20 && lowerMsg.includes(ui)))) {
+    snapLog(`Skipping UI element: "${latestMessage}"`);
+    return null;
+  }
+  
+  // First try rule-based matching (fast path)
   const ruleReply = findMatchingReply(latestMessage);
   if (ruleReply) return ruleReply;
   
-  // Get conversation memory for context
-  const memory = getConversationMemory(sender);
+  // Try AI if config has AI enabled
+  const aiConfig = config?.ai;
+  if (aiConfig?.enabled) {
+    try {
+      snapLog(`Requesting AI reply for: "${latestMessage.substring(0, 30)}..."`);
+      
+      // Build conversation context from memory
+      const memory = getConversationMemory(sender);
+      const messages: Array<{role: string; content: string}> = [];
+      
+      // Add system prompt
+      messages.push({
+        role: 'system',
+        content: aiConfig.systemPrompt || 'You are a friendly person chatting casually. Keep responses brief and natural.'
+      });
+      
+      // Add conversation history from memory
+      if (aiConfig.contextHistoryEnabled && memory?.messages?.length) {
+        const historyLimit = aiConfig.maxContextMessages || 10;
+        const recentMsgs = memory.messages.slice(-historyLimit);
+        recentMsgs.forEach(m => {
+          messages.push({
+            role: m.isIncoming ? 'user' : 'assistant',
+            content: m.text
+          });
+        });
+      }
+      
+      // Add current message
+      messages.push({ role: 'user', content: latestMessage });
+      
+      // Call LLM server directly
+      const url = `http://${aiConfig.llmEndpoint || 'localhost'}:${aiConfig.llmPort || 8080}/v1/chat/completions`;
+      snapLog(`Calling AI at: ${url}`);
+      
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), aiConfig.requestTimeoutMs || 30000);
+      
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          model: aiConfig.modelName || 'local-model',
+          messages: messages,
+          temperature: aiConfig.temperature || 0.7,
+          max_tokens: aiConfig.maxTokens || 150
+        }),
+        signal: controller.signal
+      });
+      
+      clearTimeout(timeoutId);
+      
+      if (response.ok) {
+        const data = await response.json();
+        if (data.choices?.[0]?.message?.content) {
+          const aiReply = data.choices[0].message.content.trim();
+          snapLog(`AI reply received: "${aiReply.substring(0, 30)}..."`);
+          return aiReply;
+        }
+      } else {
+        snapLog(`AI request failed: HTTP ${response.status}`);
+      }
+    } catch (error: any) {
+      if (error.name === 'AbortError') {
+        snapLog('AI request timed out');
+      } else {
+        snapLog(`AI error: ${error.message}`);
+      }
+    }
+    
+    snapLog('AI returned no reply, falling back to defaults');
+  }
   
-  // Default responses based on message patterns
-  const lowerMsg = latestMessage.toLowerCase();
+  // Fallback to simple pattern matching if AI unavailable
+  const memory = getConversationMemory(sender);
   
   if (lowerMsg.includes('?')) {
     return "Let me think about that and get back to you!";
@@ -453,8 +532,8 @@ async function processConversation(chatElement: HTMLElement): Promise<void> {
   
   snapLog(`Latest message from ${sender}: "${latestMessage.substring(0, 50)}..."`);
   
-  // Generate reply
-  const reply = generateContextualReply(sender, latestMessage);
+  // Generate reply (now async with AI support)
+  const reply = await generateContextualReply(sender, latestMessage);
   
   if (!reply) {
     snapLog('No matching reply rule, skipping');

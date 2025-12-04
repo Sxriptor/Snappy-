@@ -70,6 +70,20 @@ const botAPI = {
    */
   testLLMConnection: async (): Promise<{ success: boolean; modelName?: string; error?: string }> => {
     return await ipcRenderer.invoke('ai:testConnection');
+  },
+
+  /**
+   * Generate AI reply for a message
+   */
+  generateAIReply: async (sender: string, messageText: string, conversationId?: string): Promise<{ reply: string | null; error?: string }> => {
+    return await ipcRenderer.invoke('ai:generateReply', { sender, messageText, conversationId });
+  },
+
+  /**
+   * Reset AI conversation context
+   */
+  resetAIConversation: async (conversationId: string): Promise<boolean> => {
+    return await ipcRenderer.invoke('ai:resetConversation', conversationId);
   }
 };
 

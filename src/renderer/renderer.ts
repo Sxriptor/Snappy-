@@ -1232,11 +1232,19 @@ function getBotScript(config: Config): string {
     return input !== null;
   }
   
-  // Find reply based on message
-  function findReply(text) {
+  // Find reply based on message - now async with AI support
+  async function findReply(text, username) {
     const rules = CONFIG.replyRules || [];
     const lower = text.toLowerCase();
     
+    // Skip UI elements that aren't real messages
+    const uiElements = ['spotlight', 'drag & drop', 'upload', 'type a message', 'send a chat', 'new chat', 'add friends'];
+    if (uiElements.some(ui => lower.includes(ui))) {
+      log('Skipping UI element: ' + text.substring(0, 30));
+      return null;
+    }
+    
+    // First try rule-based matching (fast path)
     for (const rule of rules) {
       const match = (rule.caseSensitive ? rule.match : rule.match.toLowerCase());
       if (lower.includes(match)) {
@@ -1245,7 +1253,74 @@ function getBotScript(config: Config): string {
       }
     }
     
-    // Default responses
+    // Try AI if enabled - use pending request system for renderer to handle
+    if (CONFIG.ai && CONFIG.ai.enabled) {
+      log('Requesting AI reply for: "' + text.substring(0, 30) + '..."');
+      
+      // Build conversation context from memory
+      const memory = getUserMemory(username);
+      const messages = [];
+      
+      // Add system prompt
+      messages.push({
+        role: 'system',
+        content: CONFIG.ai.systemPrompt || 'You are a friendly person chatting casually. Keep responses brief and natural.'
+      });
+      
+      // Add conversation history from memory (last N messages)
+      if (CONFIG.ai.contextHistoryEnabled && memory.messages.length > 0) {
+        const historyLimit = CONFIG.ai.maxContextMessages || 10;
+        const recentMsgs = memory.messages.slice(-historyLimit);
+        recentMsgs.forEach(m => {
+          messages.push({
+            role: m.from === 'them' ? 'user' : 'assistant',
+            content: m.text
+          });
+        });
+      }
+      
+      // Add current message
+      messages.push({ role: 'user', content: text });
+      
+      // Store pending AI request for renderer to pick up
+      const requestId = 'ai-' + Date.now();
+      window.__SNAPPY_AI_REQUEST__ = {
+        id: requestId,
+        username: username,
+        messages: messages,
+        config: CONFIG.ai
+      };
+      
+      // Wait for response (renderer will poll and fill this)
+      log('Waiting for AI response...');
+      const maxWait = 30000;
+      const pollInterval = 100;
+      let waited = 0;
+      
+      while (waited < maxWait) {
+        await sleep(pollInterval);
+        waited += pollInterval;
+        
+        if (window.__SNAPPY_AI_RESPONSE__ && window.__SNAPPY_AI_RESPONSE__.id === requestId) {
+          const reply = window.__SNAPPY_AI_RESPONSE__.reply;
+          window.__SNAPPY_AI_RESPONSE__ = null;
+          window.__SNAPPY_AI_REQUEST__ = null;
+          
+          if (reply) {
+            log('AI reply received: "' + reply.substring(0, 30) + '..."');
+            return reply;
+          } else {
+            log('AI returned empty reply');
+            break;
+          }
+        }
+      }
+      
+      window.__SNAPPY_AI_REQUEST__ = null;
+      log('AI request timed out, falling back to defaults');
+    }
+    
+    // Default responses (fallback)
     if (lower.includes('?')) return "Let me check and get back to you!";
     if (lower.includes('hi') || lower.includes('hey') || lower.includes('hello')) return "Hey! Whats up?";
     if (lower.includes('how are') || lower.includes('whats up')) return "I am good, thanks! How about you?";
@@ -1368,8 +1443,8 @@ function getBotScript(config: Config): string {
       return;
     }
     
-    // Find reply
-    const reply = findReply(lastIncoming);
+    // Find reply (now async with AI support)
+    const reply = await findReply(lastIncoming, username);
     if (!reply) {
       log('No matching reply');
       seenMessages.add(msgId);
@@ -1502,6 +1577,7 @@ function setupWebviewListeners(wv: Electron.WebviewTag) {
       }
     }
   });
+
 }
 
 // Set up listeners for initial webview if it exists
@@ -1529,6 +1605,61 @@ setInterval(async () => {
     // Ignore errors
   }
 }, 1000);
+
+// Poll for pending AI requests from webview and handle via IPC
+setInterval(async () => {
+  if (!isBotActive) return;
+  const currentWebview = getActiveWebview();
+  if (!currentWebview) return;
+  
+  try {
+    // Check if there's a pending AI request
+    const request = await currentWebview.executeJavaScript(`
+      (function() {
+        if (window.__SNAPPY_AI_REQUEST__) {
+          const req = window.__SNAPPY_AI_REQUEST__;
+          return req;
+        }
+        return null;
+      })();
+    `);
+    
+    if (request && request.id) {
+      // Make the AI call via IPC (which goes through main process - no CORS)
+      addLog(`Processing AI request for ${request.username}`, 'info');
+      
+      try {
+        const result = await (window as any).bot.generateAIReply(
+          request.username,
+          request.messages[request.messages.length - 1].content, // last message is the user's
+          request.username
+        );
+        
+        // Send response back to webview
+        await currentWebview.executeJavaScript(`
+          window.__SNAPPY_AI_RESPONSE__ = {
+            id: '${request.id}',
+            reply: ${result?.reply ? JSON.stringify(result.reply) : 'null'}
+          };
+          window.__SNAPPY_AI_REQUEST__ = null;
+        `);
+        
+        if (result?.reply) {
+          addLog(`AI reply: "${result.reply.substring(0, 40)}..."`, 'success');
+        }
+      } catch (err: any) {
+        addLog(`AI IPC error: ${err.message}`, 'error');
+        // Clear the request so bot doesn't hang
+        await currentWebview.executeJavaScript(`
+          window.__SNAPPY_AI_RESPONSE__ = { id: '${request.id}', reply: null };
+          window.__SNAPPY_AI_REQUEST__ = null;
+        `);
+      }
+    }
+  } catch (e) {
+    // Ignore errors
+  }
+}, 200); // Poll every 200ms for quick response
 
 // Webview ready handler - set up for any webview
 function setupWebviewReadyHandler(wv: Electron.WebviewTag) {

@@ -7,16 +7,18 @@ import { app, BrowserWindow, ipcMain, session } from 'electron';
 import { autoUpdater } from 'electron-updater';
 import * as path from 'path';
 import * as fs from 'fs';
-import { Configuration, DEFAULT_CONFIG, SessionConfig, ProxyConfig } from '../types';
+import { Configuration, DEFAULT_CONFIG, SessionConfig, ProxyConfig, IncomingMessage } from '../types';
 import { SessionManager } from './sessionManager';
 import { ProxyManager } from './proxyManager';
 import { FingerprintGenerator } from './fingerprintGenerator';
 import { createFingerprintInjectorScript } from '../injection/fingerprintInjector';
+import { AIBrain } from '../brain/aiBrain';
 
 let mainWindow: BrowserWindow | null = null;
 let config: Configuration = DEFAULT_CONFIG;
 let injectionScript: string = '';
 let isInjected: boolean = false;
+let aiBrain: AIBrain | null = null;
 
 // Multi-session managers
 const fingerprintGenerator = new FingerprintGenerator();
@@ -336,6 +338,42 @@ export function setupIPCHandlers(): void {
       return { success: false, error: error.message || 'Connection failed' };
     }
   });
+
+  // AI Brain reply generation - called from injection layer via webview
+  ipcMain.handle('ai:generateReply', async (event, messageData: { sender: string; messageText: string; conversationId?: string }) => {
+    try {
+      if (!aiBrain || !aiBrain.isEnabled()) {
+        console.log('[Shell] AI Brain not enabled, skipping');
+        return { reply: null };
+      }
+
+      const message: IncomingMessage = {
+        messageId: `msg-${Date.now()}`,
+        sender: messageData.sender,
+        messageText: messageData.messageText,
+        timestamp: Date.now(),
+        conversationId: messageData.conversationId || messageData.sender
+      };
+
+      console.log(`[Shell] AI generating reply for message from ${message.sender}: "${message.messageText.substring(0, 50)}..."`);
+      const reply = await aiBrain.decideReply(message);
+      console.log(`[Shell] AI reply: ${reply ? reply.substring(0, 50) + '...' : 'null'}`);
+      
+      return { reply };
+    } catch (error: any) {
+      console.error('[Shell] AI reply generation error:', error);
+      return { reply: null, error: error.message };
+    }
+  });
+
+  // Reset AI conversation context
+  ipcMain.handle('ai:resetConversation', async (event, conversationId: string) => {
+    if (aiBrain) {
+      aiBrain.resetConversation(conversationId);
+      return true;
+    }
+    return false;
+  });
   
   // ============================================================================
   // Session Management IPC Handlers
@@ -536,6 +574,12 @@ function setupAutoUpdater(): void {
 async function initializeApp(): Promise<void> {
   // Load configuration
   loadConfiguration();
+  
+  // Initialize AI Brain if configured
+  if (config.ai) {
+    aiBrain = new AIBrain(config.ai);
+    console.log(`[Shell] AI Brain initialized (enabled: ${config.ai.enabled})`);
+  }
   
   // Load injection script
   loadInjectionScript();

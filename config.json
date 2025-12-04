@@ -12,7 +12,7 @@
   "ai": {
     "enabled": true,
     "llmEndpoint": "localhost",
-    "llmPort": 8080,
+    "llmPort": 8081,
     "modelName": "local-model",
     "systemPrompt": "You are a friendly person chatting casually. Keep responses brief and natural. Match the tone of the conversation. Don't be overly formal or use excessive punctuation.",
     "temperature": 0.7,
