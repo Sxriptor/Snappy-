@@ -943,55 +943,78 @@ function getBotScript(config: Config): string {
     return candidates;
   }
   
-  // Find unread indicators
-  function hasUnreadIndicator(element) {
-    const cls = (element.className || '').toLowerCase();
-    const allClasses = element.innerHTML.toLowerCase();
-    
-    // Check element and all children class names for unread-related words
-    const unreadKeywords = ['unread', 'unseen', 'new', 'badge', 'notification', 'dot', 'indicator', 'pending', 'alert'];
-    for (const keyword of unreadKeywords) {
-      if (cls.includes(keyword) || allClasses.includes(keyword)) {
-        return true;
+  // Check if a chat has a new INCOMING message (not our outgoing "Delivered" messages)
+  function isNewIncomingChat(element) {
+    const chatText = (element.textContent || '').toLowerCase();
+
+    // Check for explicit "new chat" or "new snap" text indicators
+    if (chatText.includes('new chat') || chatText.includes('new snap')) {
+      log('Found "new chat" text indicator');
+      // Still need to verify it's not an outgoing message
+    }
+
+    // Check for unread badge/dot indicators
+    const hasUnreadBadge = element.querySelector('[class*="unread"], [class*="Unread"], [class*="badge"], [class*="Badge"], [class*="dot"], [class*="Dot"]') !== null;
+    const hasUnreadClass = element.className.toLowerCase().includes('unread');
+
+    // Check for blue SVG indicator (common in Snapchat)
+    const svgs = element.querySelectorAll('svg');
+    let hasBlueIndicator = false;
+    for (const svg of svgs) {
+      const fill = svg.getAttribute('fill') || '';
+      const svgHTML = svg.outerHTML.toLowerCase();
+      // Check for blue color or specific classes that indicate unread
+      if (fill.includes('blue') || fill.includes('#0') || fill.includes('rgb(0') ||
+          svgHTML.includes('blue') || svgHTML.includes('unread')) {
+        hasBlueIndicator = true;
+        log('Found blue SVG indicator');
+        break;
       }
     }
-    
-    // Check for any small circular elements (dots/badges)
+
+    // Check for small circular elements (notification dots)
+    let hasNotificationDot = false;
     const smallElements = element.querySelectorAll('div, span');
     for (const el of smallElements) {
       const style = window.getComputedStyle(el);
       const width = parseInt(style.width);
       const height = parseInt(style.height);
       const borderRadius = style.borderRadius;
-      
-      // Small circular element (likely a dot indicator)
-      if (width > 0 && width < 20 && height > 0 && height < 20 && 
+
+      // Small circular element (likely a notification dot)
+      if (width > 0 && width < 20 && height > 0 && height < 20 &&
           (borderRadius.includes('50%') || borderRadius.includes('100%') || parseInt(borderRadius) > 5)) {
         const bgColor = style.backgroundColor;
         // Check if it has a visible background color (not transparent)
         if (bgColor && bgColor !== 'transparent' && bgColor !== 'rgba(0, 0, 0, 0)') {
-          return true;
+          hasNotificationDot = true;
+          log('Found notification dot');
+          break;
         }
       }
     }
-    
-    // Check for bold/emphasized text (unread messages often have bold names)
-    const boldElements = element.querySelectorAll('strong, b, [style*="font-weight"]');
-    if (boldElements.length > 0) {
-      // Has bold text - might be unread
-      // But this is less reliable, so we'll use it as a secondary check
+
+    // If no unread indicators at all, skip this chat
+    if (!hasUnreadBadge && !hasUnreadClass && !hasBlueIndicator && !hasNotificationDot &&
+        !chatText.includes('new chat') && !chatText.includes('new snap')) {
+      return false;
     }
-    
-    // Check for SVG icons that might indicate unread
-    const svgs = element.querySelectorAll('svg');
-    for (const svg of svgs) {
-      const fill = svg.getAttribute('fill') || '';
-      if (fill.includes('blue') || fill.includes('#0') || fill.includes('rgb(0')) {
-        return true;
+
+    log('Found unread indicator on chat');
+
+    // CRITICAL: Check if the preview shows it's from US (outgoing) - MUST CHECK THIS BEFORE ANYTHING ELSE
+    // Snapchat shows "You:", "Delivered", "Sent", "Opened", "Viewed" for messages WE sent
+    const outgoingIndicators = ['you:', 'delivered', 'sent', 'opened', 'viewed'];
+    for (const indicator of outgoingIndicators) {
+      if (chatText.includes(indicator)) {
+        log('Skipping - preview shows outgoing indicator: "' + indicator + '"');
+        return false; // This is showing our last message, not theirs
       }
     }
-    
-    return false;
+
+    // Has unread indicator and doesn't show outgoing message status
+    log('Chat appears to have new incoming message');
+    return true;
   }
   
   // Debug function to analyze a chat element
@@ -1155,11 +1178,11 @@ function getBotScript(config: Config): string {
     // Find chat-like elements
     const chats = findClickableChats();
     log('Potential chat items: ' + chats.length);
-    
+
     // Check for unread
     let unreadCount = 0;
     chats.forEach(c => {
-      if (hasUnreadIndicator(c)) unreadCount++;
+      if (isNewIncomingChat(c)) unreadCount++;
     });
     log('Items with unread indicators: ' + unreadCount);
     
@@ -1654,11 +1677,11 @@ function getBotScript(config: Config): string {
     // Find chats with unread
     const unreadChats = [];
     for (const chat of chats) {
-      if (hasUnreadIndicator(chat)) {
+      if (isNewIncomingChat(chat)) {
         unreadChats.push(chat);
       }
     }
-    
+
     log('Unread chats: ' + unreadChats.length);
     
     // Only process chats with actual unread indicators
