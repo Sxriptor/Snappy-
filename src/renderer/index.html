@@ -9,8 +9,57 @@
 </head>
 <body>
   <div id="app">
+    <!-- Tab Bar for Multi-Session -->
+    <div id="tab-bar">
+      <div id="tabs-container">
+        <!-- Tabs will be dynamically added here -->
+      </div>
+      <button id="new-session-btn" title="New Session">+</button>
+    </div>
+
+    <!-- Tab Context Menu -->
+    <div id="tab-context-menu" class="context-menu hidden">
+      <div class="context-menu-item" data-action="rename">Rename</div>
+      <div class="context-menu-item" data-action="duplicate">Duplicate</div>
+      <div class="context-menu-item" data-action="hibernate">Hibernate</div>
+      <div class="context-menu-divider"></div>
+      <div class="context-menu-item danger" data-action="close">Close</div>
+    </div>
+
+    <!-- New Session Modal -->
+    <div id="new-session-modal" class="modal hidden">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h2>New Session</h2>
+          <button class="modal-close">&times;</button>
+        </div>
+        <div class="modal-body">
+          <div class="form-group">
+            <label for="session-name">Session Name</label>
+            <input type="text" id="session-name" placeholder="My Session">
+          </div>
+          <div class="form-group">
+            <label for="session-url">Initial URL</label>
+            <input type="url" id="session-url" placeholder="https://web.snapchat.com">
+          </div>
+          <div class="form-group">
+            <label for="session-proxy">Proxy (optional)</label>
+            <select id="session-proxy">
+              <option value="">No Proxy</option>
+              <!-- Proxy options will be populated dynamically -->
+            </select>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary modal-cancel">Cancel</button>
+          <button class="btn btn-primary" id="create-session-btn">Create</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Webview Container (holds multiple webviews) -->
     <div id="webview-container">
-      <webview id="site-view" allowpopups useragent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" partition="persist:snapchat"></webview>
+      <!-- Webviews will be dynamically created for each session -->
     </div>
     
     <!-- Activity Log Panel -->

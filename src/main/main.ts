@@ -3,16 +3,29 @@
  * Responsible for window management, script injection, and configuration
  */
 
-import { app, BrowserWindow, ipcMain } from 'electron';
+import { app, BrowserWindow, ipcMain, session } from 'electron';
 import { autoUpdater } from 'electron-updater';
 import * as path from 'path';
 import * as fs from 'fs';
-import { Configuration, DEFAULT_CONFIG } from '../types';
+import { Configuration, DEFAULT_CONFIG, SessionConfig, ProxyConfig } from '../types';
+import { SessionManager } from './sessionManager';
+import { ProxyManager } from './proxyManager';
+import { FingerprintGenerator } from './fingerprintGenerator';
+import { createFingerprintInjectorScript } from '../injection/fingerprintInjector';
 
 let mainWindow: BrowserWindow | null = null;
 let config: Configuration = DEFAULT_CONFIG;
 let injectionScript: string = '';
 let isInjected: boolean = false;
+
+// Multi-session managers
+const fingerprintGenerator = new FingerprintGenerator();
+const proxyManager = new ProxyManager();
+const sessionManager = new SessionManager(
+  path.join(app.getPath('userData'), 'sessions.json'),
+  fingerprintGenerator,
+  proxyManager
+);
 
 /**
  * Load configuration from config.json or use defaults
@@ -77,13 +90,19 @@ export function createWindow(): BrowserWindow {
 }
 
 /**
- * Set up webview handling for user agent spoofing
+ * Set up webview handling for user agent spoofing and fingerprint injection
  */
 function setupWebviewHandling(): void {
   app.on('web-contents-created', (_event, contents) => {
     if (contents.getType() === 'webview') {
-      // Set Chrome user agent
-      contents.setUserAgent(CHROME_USER_AGENT);
+      // Get the partition to find the associated session
+      const partition = contents.session.storagePath?.split('Partitions/')[1] || '';
+      const sessions = sessionManager.getAllSessions();
+      const matchingSession = sessions.find(s => s.partition.includes(partition));
+      
+      // Use session fingerprint or default Chrome UA
+      const userAgent = matchingSession?.fingerprint.userAgent || CHROME_USER_AGENT;
+      contents.setUserAgent(userAgent);
       
       // Allow all permissions
       contents.session.setPermissionRequestHandler((_wc, _permission, callback) => {
@@ -92,12 +111,63 @@ function setupWebviewHandling(): void {
 
       // Spoof user agent in requests
       contents.session.webRequest.onBeforeSendHeaders((details, callback) => {
-        details.requestHeaders['User-Agent'] = CHROME_USER_AGENT;
+        details.requestHeaders['User-Agent'] = userAgent;
         delete details.requestHeaders['X-Electron-Version'];
         callback({ requestHeaders: details.requestHeaders });
       });
 
-      console.log('[Shell] Webview configured with Chrome user agent');
+      // Inject fingerprint script on DOM ready
+      contents.on('dom-ready', async () => {
+        if (matchingSession) {
+          try {
+            const fingerprintScript = createFingerprintInjectorScript({
+              fingerprint: matchingSession.fingerprint,
+              disableWebRTC: matchingSession.proxy !== null
+            });
+            await contents.executeJavaScript(fingerprintScript);
+            console.log(`[Shell] Fingerprint injected for session ${matchingSession.name}`);
+          } catch (error) {
+            console.error('[Shell] Error injecting fingerprint:', error);
+          }
+        }
+      });
+
+      console.log('[Shell] Webview configured with fingerprint spoofing');
+    }
+  });
+}
+
+/**
+ * Apply proxy to a session partition
+ */
+async function applyProxyToSession(sessionId: string, proxy: ProxyConfig): Promise<void> {
+  const sessionData = sessionManager.getSession(sessionId);
+  if (!sessionData) return;
+
+  const ses = session.fromPartition(sessionData.partition);
+  const proxyRules = `${proxy.protocol}://${proxy.host}:${proxy.port}`;
+  
+  await ses.setProxy({ proxyRules });
+  console.log(`[Shell] Proxy applied to session ${sessionData.name}: ${proxyRules}`);
+}
+
+/**
+ * Handle proxy authentication
+ */
+function setupProxyAuth(): void {
+  app.on('login', (event, webContents, details, authInfo, callback) => {
+    if (authInfo.isProxy) {
+      event.preventDefault();
+      proxyManager.handleProxyAuth(
+        { host: authInfo.host, port: authInfo.port },
+        (username, password) => {
+          if (username && password) {
+            callback(username, password);
+          } else {
+            callback();
+          }
+        }
+      );
     }
   });
 }
@@ -267,7 +337,123 @@ export function setupIPCHandlers(): void {
     }
   });
   
-  console.log('[Shell] IPC handlers set up');
+  // ============================================================================
+  // Session Management IPC Handlers
+  // ============================================================================
+
+  ipcMain.handle('session:create', async (event, { name, proxyId, config: sessionConfig }) => {
+    try {
+      let proxy: ProxyConfig | undefined;
+      if (proxyId) {
+        const available = proxyManager.getAvailableProxies();
+        proxy = available.find(p => p.id === proxyId);
+      }
+      
+      const session = sessionManager.createSession(sessionConfig, name, proxy);
+      
+      // Assign proxy if provided
+      if (proxy) {
+        proxyManager.assignProxy(session.id, proxy.id);
+      }
+      
+      // Notify renderer
+      if (mainWindow) {
+        mainWindow.webContents.send('session:created', session);
+      }
+      
+      return session;
+    } catch (error: any) {
+      console.error('[Shell] Error creating session:', error);
+      return null;
+    }
+  });
+
+  ipcMain.handle('session:delete', async (event, sessionId: string) => {
+    try {
+      const result = sessionManager.deleteSession(sessionId);
+      if (result && mainWindow) {
+        mainWindow.webContents.send('session:deleted', sessionId);
+      }
+      return result;
+    } catch (error: any) {
+      console.error('[Shell] Error deleting session:', error);
+      return false;
+    }
+  });
+
+  ipcMain.handle('session:getAll', async () => {
+    return sessionManager.getAllSessions();
+  });
+
+  ipcMain.handle('session:get', async (event, sessionId: string) => {
+    return sessionManager.getSession(sessionId);
+  });
+
+  ipcMain.handle('session:updateConfig', async (event, { sessionId, config: newConfig }) => {
+    return sessionManager.updateSessionConfig(sessionId, newConfig);
+  });
+
+  ipcMain.handle('session:rename', async (event, { sessionId, name }) => {
+    return sessionManager.renameSession(sessionId, name);
+  });
+
+  ipcMain.handle('session:hibernate', async (event, sessionId: string) => {
+    const result = sessionManager.hibernateSession(sessionId);
+    if (result && mainWindow) {
+      mainWindow.webContents.send('session:stateChanged', { sessionId, state: 'hibernated' });
+    }
+    return result;
+  });
+
+  ipcMain.handle('session:restore', async (event, sessionId: string) => {
+    const result = sessionManager.restoreSession(sessionId);
+    if (result && mainWindow) {
+      mainWindow.webContents.send('session:stateChanged', { sessionId, state: 'active' });
+    }
+    return result;
+  });
+
+  ipcMain.handle('session:duplicate', async (event, { sessionId, newName }) => {
+    return sessionManager.duplicateSession(sessionId, newName);
+  });
+
+  // ============================================================================
+  // Proxy Management IPC Handlers
+  // ============================================================================
+
+  ipcMain.handle('proxy:getPool', async () => {
+    return proxyManager.getPool();
+  });
+
+  ipcMain.handle('proxy:add', async (event, proxy) => {
+    try {
+      return proxyManager.addProxy(proxy);
+    } catch (error: any) {
+      console.error('[Shell] Error adding proxy:', error);
+      return null;
+    }
+  });
+
+  ipcMain.handle('proxy:remove', async (event, proxyId: string) => {
+    return proxyManager.removeProxy(proxyId);
+  });
+
+  ipcMain.handle('proxy:import', async (event, proxyList: string) => {
+    return proxyManager.importProxies(proxyList);
+  });
+
+  ipcMain.handle('proxy:getAvailable', async () => {
+    return proxyManager.getAvailableProxies();
+  });
+
+  // Proxy pool events
+  proxyManager.on('poolLow', ({ unassignedCount }) => {
+    if (mainWindow) {
+      mainWindow.webContents.send('proxy:poolLow', unassignedCount);
+    }
+  });
+
+  console.log('[Shell] IPC handlers set up with multi-session support');
 }
 
 /**
@@ -354,8 +540,19 @@ async function initializeApp(): Promise<void> {
   // Load injection script
   loadInjectionScript();
   
+  // Load saved sessions
+  try {
+    await sessionManager.load();
+    console.log(`[Shell] Loaded ${sessionManager.getSessionCount()} sessions`);
+  } catch (error) {
+    console.log('[Shell] No saved sessions found, starting fresh');
+  }
+  
   // Set up webview handling before creating window
   setupWebviewHandling();
+  
+  // Set up proxy authentication
+  setupProxyAuth();
   
   // Create window
   createWindow();

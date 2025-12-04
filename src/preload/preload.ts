@@ -97,8 +97,144 @@ const updaterAPI = {
   }
 };
 
+/**
+ * Session API for multi-session management
+ */
+const sessionAPI = {
+  /**
+   * Create a new session
+   */
+  createSession: async (name?: string, proxyId?: string, config?: unknown): Promise<unknown> => {
+    return await ipcRenderer.invoke('session:create', { name, proxyId, config });
+  },
+
+  /**
+   * Delete a session
+   */
+  deleteSession: async (sessionId: string): Promise<boolean> => {
+    return await ipcRenderer.invoke('session:delete', sessionId);
+  },
+
+  /**
+   * Get all sessions
+   */
+  getAllSessions: async (): Promise<unknown[]> => {
+    return await ipcRenderer.invoke('session:getAll');
+  },
+
+  /**
+   * Get a specific session
+   */
+  getSession: async (sessionId: string): Promise<unknown> => {
+    return await ipcRenderer.invoke('session:get', sessionId);
+  },
+
+  /**
+   * Update session configuration
+   */
+  updateSessionConfig: async (sessionId: string, config: unknown): Promise<boolean> => {
+    return await ipcRenderer.invoke('session:updateConfig', { sessionId, config });
+  },
+
+  /**
+   * Rename a session
+   */
+  renameSession: async (sessionId: string, name: string): Promise<boolean> => {
+    return await ipcRenderer.invoke('session:rename', { sessionId, name });
+  },
+
+  /**
+   * Hibernate a session
+   */
+  hibernateSession: async (sessionId: string): Promise<boolean> => {
+    return await ipcRenderer.invoke('session:hibernate', sessionId);
+  },
+
+  /**
+   * Restore a hibernated session
+   */
+  restoreSession: async (sessionId: string): Promise<boolean> => {
+    return await ipcRenderer.invoke('session:restore', sessionId);
+  },
+
+  /**
+   * Duplicate a session
+   */
+  duplicateSession: async (sessionId: string, newName?: string): Promise<unknown> => {
+    return await ipcRenderer.invoke('session:duplicate', { sessionId, newName });
+  },
+
+  /**
+   * Listen for session events
+   */
+  onSessionCreated: (callback: (session: unknown) => void): void => {
+    ipcRenderer.on('session:created', (_, session) => callback(session));
+  },
+
+  onSessionDeleted: (callback: (sessionId: string) => void): void => {
+    ipcRenderer.on('session:deleted', (_, sessionId) => callback(sessionId));
+  },
+
+  onSessionStateChanged: (callback: (data: { sessionId: string; state: string }) => void): void => {
+    ipcRenderer.on('session:stateChanged', (_, data) => callback(data));
+  }
+};
+
+/**
+ * Proxy API for proxy pool management
+ */
+const proxyAPI = {
+  /**
+   * Get all proxies in the pool
+   */
+  getProxyPool: async (): Promise<unknown[]> => {
+    return await ipcRenderer.invoke('proxy:getPool');
+  },
+
+  /**
+   * Add a proxy to the pool
+   */
+  addProxy: async (proxy: unknown): Promise<unknown> => {
+    return await ipcRenderer.invoke('proxy:add', proxy);
+  },
+
+  /**
+   * Remove a proxy from the pool
+   */
+  removeProxy: async (proxyId: string): Promise<boolean> => {
+    return await ipcRenderer.invoke('proxy:remove', proxyId);
+  },
+
+  /**
+   * Import proxies from a list
+   */
+  importProxies: async (proxyList: string): Promise<unknown[]> => {
+    return await ipcRenderer.invoke('proxy:import', proxyList);
+  },
+
+  /**
+   * Get available (unassigned) proxies
+   */
+  getAvailableProxies: async (): Promise<unknown[]> => {
+    return await ipcRenderer.invoke('proxy:getAvailable');
+  },
+
+  /**
+   * Listen for proxy pool updates
+   */
+  onPoolUpdated: (callback: (data: { pool: unknown[]; unassignedCount: number }) => void): void => {
+    ipcRenderer.on('proxy:poolUpdated', (_, data) => callback(data));
+  },
+
+  onPoolLow: (callback: (unassignedCount: number) => void): void => {
+    ipcRenderer.on('proxy:poolLow', (_, count) => callback(count));
+  }
+};
+
 // Expose the APIs to the renderer
 contextBridge.exposeInMainWorld('bot', botAPI);
 contextBridge.exposeInMainWorld('updater', updaterAPI);
+contextBridge.exposeInMainWorld('session', sessionAPI);
+contextBridge.exposeInMainWorld('proxy', proxyAPI);
 
-console.log('[Preload] Bridge initialized');
+console.log('[Preload] Bridge initialized with multi-session support');

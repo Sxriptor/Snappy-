@@ -39,7 +39,29 @@ let isLogCollapsed = false;
 const panel = document.getElementById('settings-panel')!;
 const toggleBtn = document.getElementById('settings-toggle')!;
 const closeBtn = document.getElementById('panel-close')!;
-const webview = document.getElementById('site-view') as Electron.WebviewTag;
+
+// Multi-session: webview is now dynamically created per session
+// Get the active webview or null if none exists
+function getActiveWebview(): Electron.WebviewTag | null {
+  // First try to find any webview in the container
+  const container = document.getElementById('webview-container');
+  if (container) {
+    const webviews = container.querySelectorAll('webview:not(.hidden)');
+    if (webviews.length > 0) {
+      return webviews[0] as Electron.WebviewTag;
+    }
+    // Fall back to any webview
+    const anyWebview = container.querySelector('webview');
+    if (anyWebview) {
+      return anyWebview as Electron.WebviewTag;
+    }
+  }
+  // Legacy: try old single webview
+  return document.getElementById('site-view') as Electron.WebviewTag | null;
+}
+
+// For backwards compatibility, get webview (may be null initially)
+let webview = getActiveWebview();
 
 const statusDot = document.getElementById('status-dot')!;
 const statusText = document.getElementById('status-text')!;
@@ -182,8 +204,13 @@ function loadUrl() {
   let url = urlInput.value.trim();
   if (!url) return;
   if (!url.startsWith('http')) url = 'https://' + url;
-  webview.src = url;
-  addLog(`Navigating to: ${url}`, 'info');
+  const currentWebview = getActiveWebview();
+  if (currentWebview) {
+    currentWebview.src = url;
+    addLog(`Navigating to: ${url}`, 'info');
+  } else {
+    addLog('No active webview', 'error');
+  }
 }
 
 goBtn.addEventListener('click', loadUrl);
@@ -191,6 +218,12 @@ urlInput.addEventListener('keypress', e => { if (e.key === 'Enter') loadUrl(); }
 
 // Bot injection into webview
 async function injectBotIntoWebview() {
+  const currentWebview = getActiveWebview();
+  if (!currentWebview) {
+    addLog('No active webview for injection', 'error');
+    return false;
+  }
+  
   try {
     const { config } = await (window as any).bot.getStatus();
     
@@ -199,17 +232,19 @@ async function injectBotIntoWebview() {
     
     // Try injection with error details
     try {
-      await webview.executeJavaScript(botScript);
+      await currentWebview.executeJavaScript(botScript);
       addLog('Bot injected successfully', 'success');
       
       // Verify bot is running
       setTimeout(async () => {
+        const wv = getActiveWebview();
+        if (!wv) return;
         try {
-          const isRunning = await webview.executeJavaScript('window.__SNAPPY_RUNNING__ === true');
+          const isRunning = await wv.executeJavaScript('window.__SNAPPY_RUNNING__ === true');
           addLog(`Bot running: ${isRunning}`, isRunning ? 'success' : 'error');
           
           // Force a log message
-          await webview.executeJavaScript('console.log("[Snappy] Verification ping")');
+          await wv.executeJavaScript('console.log("[Snappy] Verification ping")');
         } catch (e) {
           addLog('Could not verify bot status', 'error');
         }
@@ -220,7 +255,7 @@ async function injectBotIntoWebview() {
       addLog(`Script error: ${injErr.message || injErr}`, 'error');
       // Try a simpler test script
       try {
-        await webview.executeJavaScript('console.log("[Snappy] Test injection works")');
+        await currentWebview.executeJavaScript('console.log("[Snappy] Test injection works")');
         addLog('Basic injection works - bot script has syntax error', 'error');
       } catch {
         addLog('Webview not ready for injection', 'error');
@@ -234,8 +269,10 @@ async function injectBotIntoWebview() {
 }
 
 async function stopBotInWebview() {
+  const currentWebview = getActiveWebview();
+  if (!currentWebview) return;
   try {
-    await webview.executeJavaScript('if(window.__SNAPPY_STOP__) window.__SNAPPY_STOP__();');
+    await currentWebview.executeJavaScript('if(window.__SNAPPY_STOP__) window.__SNAPPY_STOP__();');
     addLog('Bot stopped', 'info');
   } catch (e) {
     addLog(`Stop failed: ${e}`, 'error');
@@ -353,7 +390,8 @@ async function loadConfig() {
       if (aiHistory) aiHistory.value = String(config.ai.maxContextMessages || 10);
     }
     
-    if (config.initialUrl) webview.src = config.initialUrl;
+    const currentWebview = getActiveWebview();
+    if (config.initialUrl && currentWebview) currentWebview.src = config.initialUrl;
   } catch (e) {
     console.error('Load failed:', e);
   }
@@ -1041,28 +1079,37 @@ function getBotScript(config: Config): string {
 }
 
 // Listen for console messages from webview
-webview.addEventListener('console-message', (e) => {
-  const msg = e.message;
-  // Log ALL messages for debugging
-  console.log('[Webview Console]', msg);
-  
-  if (msg.includes('[Snappy]')) {
-    const cleanMsg = msg.replace(/\[Snappy\]\s*/g, '');
-    if (msg.includes('SUCCESS') || msg.includes('FOUND')) {
-      addLog(cleanMsg, 'success');
-    } else if (msg.includes('ERROR') || msg.includes('NOT FOUND')) {
-      addLog(cleanMsg, 'error');
-    } else {
-      addLog(cleanMsg, 'info');
+function setupWebviewListeners(wv: Electron.WebviewTag) {
+  wv.addEventListener('console-message', (e) => {
+    const msg = e.message;
+    // Log ALL messages for debugging
+    console.log('[Webview Console]', msg);
+    
+    if (msg.includes('[Snappy]')) {
+      const cleanMsg = msg.replace(/\[Snappy\]\s*/g, '');
+      if (msg.includes('SUCCESS') || msg.includes('FOUND')) {
+        addLog(cleanMsg, 'success');
+      } else if (msg.includes('ERROR') || msg.includes('NOT FOUND')) {
+        addLog(cleanMsg, 'error');
+      } else {
+        addLog(cleanMsg, 'info');
+      }
     }
-  }
-});
+  });
+}
+
+// Set up listeners for initial webview if it exists
+if (webview) {
+  setupWebviewListeners(webview);
+}
 
 // Poll for logs from the webview (backup method)
 setInterval(async () => {
   if (!isBotActive) return;
+  const currentWebview = getActiveWebview();
+  if (!currentWebview) return;
   try {
-    const logs = await webview.executeJavaScript(`
+    const logs = await currentWebview.executeJavaScript(`
       (function() {
         if (!window.__SNAPPY_LOGS__) return [];
         const logs = window.__SNAPPY_LOGS__.splice(0);
@@ -1077,32 +1124,44 @@ setInterval(async () => {
   }
 }, 1000);
 
-// Webview ready handler
-webview.addEventListener('dom-ready', () => {
-  addLog('Page loaded: ' + webview.getURL(), 'info');
+// Webview ready handler - set up for any webview
+function setupWebviewReadyHandler(wv: Electron.WebviewTag) {
+  wv.addEventListener('dom-ready', () => {
+    addLog('Page loaded: ' + wv.getURL(), 'info');
   
-  // Inject compatibility fixes (wrapped in try-catch to avoid errors)
-  webview.executeJavaScript(`
-    try {
-      if (typeof window.dragEvent === 'undefined') window.dragEvent = null;
-      if (!navigator.webdriver) {
-        try { Object.defineProperty(navigator, 'webdriver', { get: () => false }); } catch(e) {}
-      }
-      window.chrome = window.chrome || { runtime: {} };
-      console.log('[Snappy] Compatibility fixes applied');
-    } catch(e) { console.log('[Snappy] Compat fix skipped'); }
-  `).catch(() => {});
-});
+    // Inject compatibility fixes (wrapped in try-catch to avoid errors)
+    wv.executeJavaScript(`
+      try {
+        if (typeof window.dragEvent === 'undefined') window.dragEvent = null;
+        if (!navigator.webdriver) {
+          try { Object.defineProperty(navigator, 'webdriver', { get: () => false }); } catch(e) {}
+        }
+        window.chrome = window.chrome || { runtime: {} };
+        console.log('[Snappy] Compatibility fixes applied');
+      } catch(e) { console.log('[Snappy] Compat fix skipped'); }
+    `).catch(() => {});
+  });
 
-// Handle webview errors
-webview.addEventListener('did-fail-load', (e) => {
-  addLog('Load failed: ' + e.errorDescription, 'error');
-});
+  // Handle webview errors
+  wv.addEventListener('did-fail-load', (e) => {
+    addLog('Load failed: ' + e.errorDescription, 'error');
+  });
+}
+
+// Set up ready handler for initial webview
+if (webview) {
+  setupWebviewReadyHandler(webview);
+}
 
 // Refresh memories from webview (now using localStorage)
 async function refreshMemories() {
+  const currentWebview = getActiveWebview();
+  if (!currentWebview) {
+    console.log('[Renderer] No active webview for memories');
+    return;
+  }
   try {
-    const memories = await webview.executeJavaScript(`
+    const memories = await currentWebview.executeJavaScript(`
       (function() {
         if (!window.__SNAPPY_MEMORY__) return [];
         const allMems = window.__SNAPPY_MEMORY__.loadAll();
@@ -1172,7 +1231,33 @@ setInterval(() => {
 document.addEventListener('DOMContentLoaded', () => {
   loadConfig();
   addLog('Snappy initialized', 'highlight');
-  if (!webview.src || webview.src === 'about:blank') {
-    webview.src = 'https://web.snapchat.com';
+  
+  // Update webview reference after DOM is ready
+  webview = getActiveWebview();
+  
+  // Set up listeners for any webview that gets created
+  const observer = new MutationObserver((mutations) => {
+    mutations.forEach((mutation) => {
+      mutation.addedNodes.forEach((node) => {
+        if (node.nodeName === 'WEBVIEW') {
+          const wv = node as Electron.WebviewTag;
+          setupWebviewListeners(wv);
+          setupWebviewReadyHandler(wv);
+          // Update current webview reference
+          webview = wv;
+        }
+      });
+    });
+  });
+  
+  const container = document.getElementById('webview-container');
+  if (container) {
+    observer.observe(container, { childList: true });
+  }
+  
+  // Load initial URL if webview exists
+  const currentWebview = getActiveWebview();
+  if (currentWebview && (!currentWebview.src || currentWebview.src === 'about:blank')) {
+    currentWebview.src = 'https://web.snapchat.com';
   }
 });
