@@ -304,37 +304,11 @@ export function setupIPCHandlers(): void {
 
   ipcMain.handle('ai:testConnection', async () => {
     try {
-      const ai = config.ai;
-      if (!ai) {
-        return { success: false, error: 'AI not configured' };
+      if (!aiBrain) {
+        return { success: false, error: 'AI Brain not initialized' };
       }
-
-      const url = `http://${ai.llmEndpoint}:${ai.llmPort}/v1/chat/completions`;
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 5000);
-
-      const response = await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          model: ai.modelName,
-          messages: [{ role: 'user', content: 'Hi' }],
-          max_tokens: 10
-        }),
-        signal: controller.signal
-      });
-
-      clearTimeout(timeoutId);
-
-      if (response.ok) {
-        return { success: true, modelName: ai.modelName };
-      } else {
-        return { success: false, error: `HTTP ${response.status}` };
-      }
+      return await aiBrain.testConnection();
     } catch (error: any) {
-      if (error.name === 'AbortError') {
-        return { success: false, error: 'Connection timed out' };
-      }
       return { success: false, error: error.message || 'Connection failed' };
     }
   });

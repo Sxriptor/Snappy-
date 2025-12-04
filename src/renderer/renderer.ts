@@ -524,43 +524,21 @@ testConnectionBtn?.addEventListener('click', async () => {
   addLog('Testing AI connection...', 'info');
   
   try {
-    const endpoint = aiEndpoint?.value || 'localhost';
-    const port = parseInt(aiPort?.value) || 8080;
-    const url = `http://${endpoint}:${port}/v1/chat/completions`;
+    const result = await (window as any).bot.testLLMConnection();
     
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 5000);
-    
-    const response = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        model: aiModel?.value || 'local-model',
-        messages: [{ role: 'user', content: 'Hi' }],
-        max_tokens: 10
-      }),
-      signal: controller.signal
-    });
-    
-    clearTimeout(timeoutId);
-    
-    if (response.ok) {
+    if (result.success) {
       aiStatus.textContent = '●';
       aiStatus.className = 'ai-status connected';
-      addLog('AI connection successful!', 'success');
+      addLog(`AI connection successful! Model: ${result.modelName}`, 'success');
     } else {
       aiStatus.textContent = '●';
       aiStatus.className = 'ai-status disconnected';
-      addLog(`AI connection failed: HTTP ${response.status}`, 'error');
+      addLog(`AI connection failed: ${result.error}`, 'error');
     }
   } catch (e: any) {
     aiStatus.textContent = '●';
     aiStatus.className = 'ai-status disconnected';
-    if (e.name === 'AbortError') {
-      addLog('AI connection timed out', 'error');
-    } else {
-      addLog(`AI connection failed: ${e.message}`, 'error');
-    }
+    addLog(`AI connection failed: ${e.message}`, 'error');
   }
 });
 
@@ -1606,11 +1584,17 @@ setInterval(async () => {
   }
 }, 1000);
 
+// Track currently processing AI request to prevent duplicates
+let processingAIRequest: string | null = null;
+
 // Poll for pending AI requests from webview and handle via IPC
 setInterval(async () => {
   if (!isBotActive) return;
   const currentWebview = getActiveWebview();
   if (!currentWebview) return;
+  
+  // Don't process if we're already handling a request
+  if (processingAIRequest) return;
   
   try {
     // Check if there's a pending AI request
@@ -1624,7 +1608,13 @@ setInterval(async () => {
       })();
     `);
     
-    if (request && request.id) {
+    if (request && request.id && request.id !== processingAIRequest) {
+      // Mark as processing to prevent duplicates
+      processingAIRequest = request.id;
+      
+      // Clear the request immediately in the webview
+      await currentWebview.executeJavaScript(`window.__SNAPPY_AI_REQUEST__ = null;`);
+      
       // Make the AI call via IPC (which goes through main process - no CORS)
       addLog(`Processing AI request for ${request.username}`, 'info');
       
@@ -1641,7 +1631,6 @@ setInterval(async () => {
             id: '${request.id}',
             reply: ${result?.reply ? JSON.stringify(result.reply) : 'null'}
           };
-          window.__SNAPPY_AI_REQUEST__ = null;
         `);
         
         if (result?.reply) {
@@ -1649,15 +1638,18 @@ setInterval(async () => {
         }
       } catch (err: any) {
         addLog(`AI IPC error: ${err.message}`, 'error');
-        // Clear the request so bot doesn't hang
+        // Send error response
         await currentWebview.executeJavaScript(`
           window.__SNAPPY_AI_RESPONSE__ = { id: '${request.id}', reply: null };
-          window.__SNAPPY_AI_REQUEST__ = null;
         `);
+      } finally {
+        // Clear processing flag
+        processingAIRequest = null;
       }
     }
   } catch (e) {
-    // Ignore errors
+    // Ignore errors and clear processing flag
+    processingAIRequest = null;
   }
 }, 200); // Poll every 200ms for quick response
 

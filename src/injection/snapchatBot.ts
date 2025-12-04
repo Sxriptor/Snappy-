@@ -120,9 +120,23 @@ function getConversationMessages(): { text: string; isIncoming: boolean }[] {
   const messages: { text: string; isIncoming: boolean }[] = [];
   const bubbles = findAllElements(SNAPCHAT_SELECTORS.messageBubble);
   
+  // Status keywords to filter out
+  const statusKeywords = ['opened', 'typing', 'received', 'delivered', 'viewed', 'sent', 'new chat', 'snap', 'screenshot'];
+  
   for (const bubble of bubbles) {
     const text = bubble.textContent?.trim();
-    if (!text || text.length < 1) continue;
+    if (!text || text.length < 3) continue;
+    
+    // Skip status messages
+    const lowerText = text.toLowerCase();
+    if (statusKeywords.some(keyword => lowerText === keyword || (text.length < 20 && lowerText.includes(keyword)))) {
+      continue;
+    }
+    
+    // Skip if it looks like a timestamp or status (contains only emoji/symbols)
+    if (/^[\d:]+$/.test(text) || /^[^\w\s]+$/.test(text)) {
+      continue;
+    }
     
     // Determine if incoming or outgoing
     const classList = bubble.className.toLowerCase() + ' ' + (bubble.parentElement?.className.toLowerCase() || '');
@@ -366,9 +380,15 @@ function findMatchingReply(messageText: string): string | null {
 async function generateContextualReply(sender: string, latestMessage: string): Promise<string | null> {
   // Skip UI elements that aren't real messages
   const lowerMsg = latestMessage.toLowerCase();
-  const uiElements = ['spotlight', 'drag & drop', 'upload', 'type a message', 'send a chat', 'new chat', 'add friends', 'stories', 'discover', 'map', 'chat'];
-  if (uiElements.some(ui => lowerMsg === ui || (lowerMsg.length < 20 && lowerMsg.includes(ui)))) {
+  const uiElements = ['spotlight', 'drag & drop', 'upload', 'type a message', 'send a chat', 'new chat', 'add friends', 'stories', 'discover', 'map', 'chat', 'opened', 'typing', 'received', 'delivered', 'viewed'];
+  if (uiElements.some(ui => lowerMsg === ui || lowerMsg.includes(ui))) {
     snapLog(`Skipping UI element: "${latestMessage}"`);
+    return null;
+  }
+  
+  // Skip very short messages that are likely UI elements
+  if (latestMessage.length < 3) {
+    snapLog(`Skipping too short: "${latestMessage}"`);
     return null;
   }
   
@@ -565,6 +585,10 @@ async function processConversation(chatElement: HTMLElement): Promise<void> {
   if (sent) {
     snapLog(`✓ Reply sent to ${sender}: "${reply}"`);
     markMessageSeen(msgId);
+    
+    // Mark our own reply as seen to avoid replying to it
+    const botMsgId = generateMessageId(sender, reply, Date.now());
+    markMessageSeen(botMsgId);
     
     // Update memory with our reply
     const memory = getConversationMemory(sender);

@@ -13,13 +13,13 @@
     "enabled": true,
     "llmEndpoint": "localhost",
     "llmPort": 8081,
-    "modelName": "local-model",
+    "modelName": "mythomax.gguf",
     "systemPrompt": "You are a friendly person chatting casually. Keep responses brief and natural. Match the tone of the conversation. Don't be overly formal or use excessive punctuation.",
     "temperature": 0.7,
     "maxTokens": 150,
     "contextHistoryEnabled": true,
     "maxContextMessages": 10,
-    "requestTimeoutMs": 30000,
+    "requestTimeoutMs": 60000,
     "maxRetries": 3,
     "retryBackoffMs": 1000
   }

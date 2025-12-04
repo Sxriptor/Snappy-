@@ -77,13 +77,13 @@ export interface ChatMessage {
 }
 
 /**
- * LLM request body (OpenAI-compatible format)
+ * LLM request body (llama.cpp /completion format)
  */
 export interface LLMRequestBody {
-  model: string;
-  messages: ChatMessage[];
+  prompt: string;
   temperature?: number;
   max_tokens?: number;
+  cache_prompt?: boolean;
 }
 
 /**

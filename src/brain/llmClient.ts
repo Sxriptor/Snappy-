@@ -51,18 +51,36 @@ export class LLMClient {
    * Get the full LLM endpoint URL
    */
   getEndpointUrl(): string {
-    return `http://${this.config.llmEndpoint}:${this.config.llmPort}/v1/chat/completions`;
+    return `http://${this.config.llmEndpoint}:${this.config.llmPort}/completion`;
   }
 
   /**
-   * Build the request body in OpenAI-compatible format
+   * Build the request body for llama.cpp /completion endpoint
+   * Formats messages into a single prompt string with system instructions
    */
-  buildRequestBody(messages: ChatMessage[]): LLMRequestBody {
+  buildRequestBody(messages: ChatMessage[], cachePrompt: boolean = true): { prompt: string; temperature?: number; max_tokens?: number; cache_prompt?: boolean } {
+    // Format messages into a single prompt
+    let prompt = '';
+    
+    for (const msg of messages) {
+      if (msg.role === 'system') {
+        // Add system prompt at the beginning
+        prompt += `<SYSTEM>\n${msg.content}\n</SYSTEM>\n\n`;
+      } else if (msg.role === 'user') {
+        prompt += `User: ${msg.content}\n`;
+      } else if (msg.role === 'assistant') {
+        prompt += `Assistant: ${msg.content}\n`;
+      }
+    }
+    
+    // Add final prompt for assistant to respond
+    prompt += 'Assistant:';
+    
     return {
-      model: this.config.modelName,
-      messages: messages,
+      prompt: prompt,
       temperature: this.config.temperature,
-      max_tokens: this.config.maxTokens
+      max_tokens: this.config.maxTokens,
+      cache_prompt: cachePrompt  // Enable prompt caching for faster responses
     };
   }
 
@@ -88,51 +106,89 @@ export class LLMClient {
     this.log(`Sending request to ${url}`);
     
     try {
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), this.config.requestTimeoutMs);
+      // Use Electron's net module for better compatibility
+      const { net } = require('electron');
       
-      const response = await fetch(url, {
+      const request = net.request({
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify(body),
-        signal: controller.signal
+        url: url
       });
       
-      clearTimeout(timeoutId);
+      request.setHeader('Content-Type', 'application/json');
       
-      if (!response.ok) {
-        this.log(`HTTP error: ${response.status} ${response.statusText}`);
-        this.errorTracker.recordError();
-        return null;
-      }
+      const responsePromise = new Promise<string | null>((resolve, reject) => {
+        let responseData = '';
+        let timedOut = false;
+        
+        const timeoutId = setTimeout(() => {
+          timedOut = true;
+          request.abort();
+          reject(new Error('Request timed out'));
+        }, this.config.requestTimeoutMs);
+        
+        request.on('response', (response: any) => {
+          if (timedOut) return;
+          
+          response.on('data', (chunk: any) => {
+            responseData += chunk.toString();
+          });
+          
+          response.on('end', () => {
+            clearTimeout(timeoutId);
+            
+            if (response.statusCode !== 200) {
+              this.log(`HTTP error: ${response.statusCode}`);
+              this.errorTracker.recordError();
+              resolve(null);
+              return;
+            }
+            
+            try {
+              const data: { content?: string } = JSON.parse(responseData);
+              
+              if (!data.content) {
+                this.log('No content in response');
+                this.errorTracker.recordError();
+                resolve(null);
+                return;
+              }
+              
+              const reply = data.content.trim();
+              this.log(`Got reply: ${reply.substring(0, 50)}...`);
+              this.errorTracker.recordSuccess();
+              resolve(reply);
+            } catch (parseError: any) {
+              this.log(`JSON parse error: ${parseError.message}`);
+              this.errorTracker.recordError();
+              resolve(null);
+            }
+          });
+          
+          response.on('error', (error: any) => {
+            clearTimeout(timeoutId);
+            this.log(`Response error: ${error.message}`);
+            this.errorTracker.recordError();
+            resolve(null);
+          });
+        });
+        
+        request.on('error', (error: any) => {
+          if (!timedOut) {
+            clearTimeout(timeoutId);
+            this.log(`Request error: ${error.message}`);
+            this.errorTracker.recordError();
+            resolve(null);
+          }
+        });
+        
+        request.write(JSON.stringify(body));
+        request.end();
+      });
       
-      const data: LLMResponse = await response.json();
-      
-      if (!data.choices || data.choices.length === 0) {
-        this.log('No choices in response');
-        this.errorTracker.recordError();
-        return null;
-      }
-      
-      const reply = data.choices[0].message?.content;
-      if (!reply) {
-        this.log('No content in response');
-        this.errorTracker.recordError();
-        return null;
-      }
-      
-      this.log(`Got reply: ${reply.substring(0, 50)}...`);
-      this.errorTracker.recordSuccess();
-      return reply.trim();
+      return await responsePromise;
       
     } catch (error: any) {
-      if (error.name === 'AbortError') {
-        this.log(`Request timed out after ${this.config.requestTimeoutMs}ms`);
-      } else {
-        this.log(`Request failed: ${error.message}`);
-      }
+      this.log(`Request failed: ${error.message}`);
       this.errorTracker.recordError();
       return null;
     }
@@ -147,45 +203,80 @@ export class LLMClient {
     this.log(`Testing connection to ${url}`);
     
     try {
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 5000); // 5 second timeout for test
+      const { net } = require('electron');
       
       const testMessages: ChatMessage[] = [
         { role: 'user', content: 'Hi' }
       ];
       
-      const response = await fetch(url, {
+      const body = this.buildRequestBody(testMessages);
+      
+      const request = net.request({
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify(this.buildRequestBody(testMessages)),
-        signal: controller.signal
+        url: url
       });
       
-      clearTimeout(timeoutId);
+      request.setHeader('Content-Type', 'application/json');
       
-      if (!response.ok) {
-        return {
-          success: false,
-          error: `HTTP ${response.status}: ${response.statusText}`
-        };
-      }
+      const result = await new Promise<ConnectionTestResult>((resolve) => {
+        let responseData = '';
+        let timedOut = false;
+        
+        const timeoutId = setTimeout(() => {
+          timedOut = true;
+          request.abort();
+          resolve({ success: false, error: 'Connection timed out' });
+        }, 5000);
+        
+        request.on('response', (response: any) => {
+          if (timedOut) return;
+          
+          response.on('data', (chunk: any) => {
+            responseData += chunk.toString();
+          });
+          
+          response.on('end', () => {
+            clearTimeout(timeoutId);
+            
+            if (response.statusCode !== 200) {
+              resolve({ success: false, error: `HTTP ${response.statusCode}` });
+              return;
+            }
+            
+            try {
+              const data: { content?: string } = JSON.parse(responseData);
+              
+              if (!data.content) {
+                resolve({ success: false, error: 'No content in response' });
+                return;
+              }
+              
+              resolve({ success: true, modelName: this.config.modelName });
+            } catch (parseError: any) {
+              resolve({ success: false, error: 'Invalid JSON response' });
+            }
+          });
+          
+          response.on('error', (error: any) => {
+            clearTimeout(timeoutId);
+            resolve({ success: false, error: error.message });
+          });
+        });
+        
+        request.on('error', (error: any) => {
+          if (!timedOut) {
+            clearTimeout(timeoutId);
+            resolve({ success: false, error: error.message });
+          }
+        });
+        
+        request.write(JSON.stringify(body));
+        request.end();
+      });
       
-      const data: LLMResponse = await response.json();
-      
-      return {
-        success: true,
-        modelName: this.config.modelName
-      };
+      return result;
       
     } catch (error: any) {
-      if (error.name === 'AbortError') {
-        return {
-          success: false,
-          error: 'Connection timed out'
-        };
-      }
       return {
         success: false,
         error: error.message || 'Connection failed'
