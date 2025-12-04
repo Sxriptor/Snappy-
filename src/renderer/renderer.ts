@@ -63,6 +63,334 @@ function getActiveWebview(): Electron.WebviewTag | null {
 // For backwards compatibility, get webview (may be null initially)
 let webview = getActiveWebview();
 
+// ============================================================================
+// Multi-Session Tab Management
+// ============================================================================
+
+interface SessionData {
+  id: string;
+  name: string;
+  partition: string;
+  fingerprint: { userAgent: string };
+  proxy: { id: string } | null;
+  config: { initialUrl: string };
+  state: string;
+}
+
+// Track sessions and their webviews
+const sessionWebviews = new Map<string, Electron.WebviewTag>();
+let activeSessionId: string | null = null;
+
+// Create a webview for a session
+function createSessionWebview(session: SessionData): Electron.WebviewTag {
+  const container = document.getElementById('webview-container');
+  if (!container) throw new Error('No webview container');
+  
+  const wv = document.createElement('webview') as Electron.WebviewTag;
+  wv.id = `webview-${session.id}`;
+  wv.className = 'session-webview hidden';
+  wv.setAttribute('allowpopups', '');
+  wv.setAttribute('partition', session.partition);
+  wv.setAttribute('useragent', session.fingerprint.userAgent);
+  wv.src = session.config.initialUrl || 'https://web.snapchat.com';
+  
+  wv.style.width = '100%';
+  wv.style.height = '100%';
+  wv.style.border = 'none';
+  wv.style.position = 'absolute';
+  wv.style.top = '0';
+  wv.style.left = '0';
+  
+  container.appendChild(wv);
+  sessionWebviews.set(session.id, wv);
+  
+  // Set up listeners
+  setupWebviewListeners(wv);
+  setupWebviewReadyHandler(wv);
+  
+  return wv;
+}
+
+// Create a tab element for a session
+function createSessionTab(session: SessionData): HTMLElement {
+  const tab = document.createElement('div');
+  tab.id = `tab-${session.id}`;
+  tab.className = 'session-tab';
+  tab.dataset.sessionId = session.id;
+  
+  const status = document.createElement('span');
+  status.className = `tab-status ${session.proxy ? 'connected' : 'none'}`;
+  
+  const name = document.createElement('span');
+  name.className = 'tab-name';
+  name.textContent = session.name;
+  
+  const closeBtn = document.createElement('button');
+  closeBtn.className = 'tab-close';
+  closeBtn.innerHTML = '&times;';
+  closeBtn.title = 'Close';
+  closeBtn.onclick = (e) => {
+    e.stopPropagation();
+    if (confirm(`Close session "${session.name}"?`)) {
+      deleteSession(session.id);
+    }
+  };
+  
+  tab.appendChild(status);
+  tab.appendChild(name);
+  tab.appendChild(closeBtn);
+  
+  tab.onclick = () => activateSession(session.id);
+  
+  tab.oncontextmenu = (e) => {
+    e.preventDefault();
+    showTabContextMenu(session.id, e.clientX, e.clientY);
+  };
+  
+  return tab;
+}
+
+// Activate a session (show its webview, highlight tab)
+function activateSession(sessionId: string) {
+  // Hide all webviews
+  sessionWebviews.forEach((wv, id) => {
+    wv.classList.add('hidden');
+    const tab = document.getElementById(`tab-${id}`);
+    if (tab) tab.classList.remove('active');
+  });
+  
+  // Show selected webview
+  const wv = sessionWebviews.get(sessionId);
+  if (wv) {
+    wv.classList.remove('hidden');
+    webview = wv; // Update global reference
+  }
+  
+  // Highlight tab
+  const tab = document.getElementById(`tab-${sessionId}`);
+  if (tab) tab.classList.add('active');
+  
+  activeSessionId = sessionId;
+  addLog(`Switched to session: ${sessionId.substring(0, 8)}...`, 'info');
+}
+
+// Delete a session
+async function deleteSession(sessionId: string) {
+  try {
+    await (window as any).session.deleteSession(sessionId);
+    
+    // Remove webview
+    const wv = sessionWebviews.get(sessionId);
+    if (wv) {
+      wv.remove();
+      sessionWebviews.delete(sessionId);
+    }
+    
+    // Remove tab
+    const tab = document.getElementById(`tab-${sessionId}`);
+    if (tab) tab.remove();
+    
+    // If this was active, activate another
+    if (activeSessionId === sessionId) {
+      const remaining = Array.from(sessionWebviews.keys());
+      if (remaining.length > 0) {
+        activateSession(remaining[0]);
+      } else {
+        activeSessionId = null;
+        webview = null;
+      }
+    }
+    
+    addLog(`Session deleted`, 'info');
+  } catch (e) {
+    addLog(`Failed to delete session: ${e}`, 'error');
+  }
+}
+
+// Show context menu for tab
+function showTabContextMenu(sessionId: string, x: number, y: number) {
+  const menu = document.getElementById('tab-context-menu');
+  if (!menu) return;
+  
+  menu.style.left = `${x}px`;
+  menu.style.top = `${y}px`;
+  menu.classList.remove('hidden');
+  menu.dataset.sessionId = sessionId;
+}
+
+// Hide context menu
+function hideTabContextMenu() {
+  const menu = document.getElementById('tab-context-menu');
+  if (menu) menu.classList.add('hidden');
+}
+
+// Handle context menu actions
+function setupContextMenu() {
+  const menu = document.getElementById('tab-context-menu');
+  if (!menu) return;
+  
+  menu.querySelectorAll('.context-menu-item').forEach(item => {
+    item.addEventListener('click', async () => {
+      const action = (item as HTMLElement).dataset.action;
+      const sessionId = menu.dataset.sessionId;
+      if (!sessionId) return;
+      
+      hideTabContextMenu();
+      
+      switch (action) {
+        case 'rename':
+          const newName = prompt('Enter new name:');
+          if (newName) {
+            await (window as any).session.renameSession(sessionId, newName);
+            const tab = document.getElementById(`tab-${sessionId}`);
+            const nameEl = tab?.querySelector('.tab-name');
+            if (nameEl) nameEl.textContent = newName;
+          }
+          break;
+        case 'duplicate':
+          const dup = await (window as any).session.duplicateSession(sessionId);
+          if (dup) addSessionToUI(dup);
+          break;
+        case 'hibernate':
+          await (window as any).session.hibernateSession(sessionId);
+          const tab = document.getElementById(`tab-${sessionId}`);
+          if (tab) tab.classList.add('hibernated');
+          break;
+        case 'close':
+          if (confirm('Close this session?')) {
+            deleteSession(sessionId);
+          }
+          break;
+      }
+    });
+  });
+  
+  // Hide on click outside
+  document.addEventListener('click', (e) => {
+    if (!menu.contains(e.target as Node)) {
+      hideTabContextMenu();
+    }
+  });
+}
+
+// Add a session to the UI (tab + webview)
+function addSessionToUI(session: SessionData) {
+  const tabsContainer = document.getElementById('tabs-container');
+  if (!tabsContainer) return;
+  
+  // Create tab
+  const tab = createSessionTab(session);
+  tabsContainer.appendChild(tab);
+  
+  // Create webview
+  createSessionWebview(session);
+  
+  // Activate it
+  activateSession(session.id);
+}
+
+// Create new session via modal
+async function createNewSession() {
+  const nameInput = document.getElementById('session-name') as HTMLInputElement;
+  const urlInput = document.getElementById('session-url') as HTMLInputElement;
+  const proxySelect = document.getElementById('session-proxy') as HTMLSelectElement;
+  
+  const name = nameInput?.value || `Session ${sessionWebviews.size + 1}`;
+  const url = urlInput?.value || 'https://web.snapchat.com';
+  const proxyId = proxySelect?.value || undefined;
+  
+  try {
+    const session = await (window as any).session.createSession(name, proxyId, { initialUrl: url });
+    if (session) {
+      addSessionToUI(session);
+      hideNewSessionModal();
+      addLog(`Created session: ${name}`, 'success');
+    }
+  } catch (e) {
+    addLog(`Failed to create session: ${e}`, 'error');
+  }
+}
+
+// Show/hide new session modal
+function showNewSessionModal() {
+  const modal = document.getElementById('new-session-modal');
+  if (modal) {
+    modal.classList.remove('hidden');
+    // Load available proxies
+    loadProxiesIntoSelect();
+  }
+}
+
+function hideNewSessionModal() {
+  const modal = document.getElementById('new-session-modal');
+  if (modal) modal.classList.add('hidden');
+}
+
+// Load proxies into the select dropdown
+async function loadProxiesIntoSelect() {
+  const select = document.getElementById('session-proxy') as HTMLSelectElement;
+  if (!select) return;
+  
+  try {
+    const proxies = await (window as any).proxy.getAvailableProxies();
+    select.innerHTML = '<option value="">No Proxy</option>';
+    proxies.forEach((p: any) => {
+      const opt = document.createElement('option');
+      opt.value = p.id;
+      opt.textContent = `${p.host}:${p.port}`;
+      select.appendChild(opt);
+    });
+  } catch (e) {
+    console.log('Could not load proxies:', e);
+  }
+}
+
+// Load existing sessions on startup
+async function loadExistingSessions() {
+  try {
+    const sessions = await (window as any).session.getAllSessions();
+    if (sessions && sessions.length > 0) {
+      sessions.forEach((s: SessionData) => addSessionToUI(s));
+      addLog(`Loaded ${sessions.length} session(s)`, 'info');
+    }
+  } catch (e) {
+    console.log('Could not load sessions:', e);
+  }
+}
+
+// Wire up the new session button and modal
+function setupMultiSessionUI() {
+  // New session button
+  const newBtn = document.getElementById('new-session-btn');
+  if (newBtn) {
+    newBtn.onclick = showNewSessionModal;
+  }
+  
+  // Modal close buttons
+  document.querySelectorAll('.modal-close, .modal-cancel').forEach(btn => {
+    btn.addEventListener('click', hideNewSessionModal);
+  });
+  
+  // Create session button
+  const createBtn = document.getElementById('create-session-btn');
+  if (createBtn) {
+    createBtn.onclick = createNewSession;
+  }
+  
+  // Context menu
+  setupContextMenu();
+  
+  // Close modal on backdrop click
+  const modal = document.getElementById('new-session-modal');
+  if (modal) {
+    modal.addEventListener('click', (e) => {
+      if (e.target === modal) hideNewSessionModal();
+    });
+  }
+}
+
+// ============================================================================
+
 const statusDot = document.getElementById('status-dot')!;
 const statusText = document.getElementById('status-text')!;
 const botBtn = document.getElementById('toggle-bot')!;
@@ -1228,36 +1556,69 @@ setInterval(() => {
   if (isBotActive) refreshMemories();
 }, 10000);
 
-document.addEventListener('DOMContentLoaded', () => {
+// Create a default webview for backwards compatibility
+function createDefaultWebview(url: string = 'https://web.snapchat.com'): Electron.WebviewTag {
+  const container = document.getElementById('webview-container');
+  if (!container) throw new Error('No webview container');
+  
+  const wv = document.createElement('webview') as Electron.WebviewTag;
+  wv.id = 'default-webview';
+  wv.className = 'session-webview';
+  wv.setAttribute('allowpopups', '');
+  wv.setAttribute('partition', 'persist:default');
+  wv.setAttribute('useragent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
+  wv.src = url;
+  
+  // Add styles to make it fill the container
+  wv.style.width = '100%';
+  wv.style.height = '100%';
+  wv.style.border = 'none';
+  
+  container.appendChild(wv);
+  return wv;
+}
+
+document.addEventListener('DOMContentLoaded', async () => {
   loadConfig();
   addLog('Snappy initialized', 'highlight');
   
-  // Update webview reference after DOM is ready
+  // Set up multi-session UI (tabs, modal, context menu)
+  setupMultiSessionUI();
+  
+  // Try to load existing sessions from main process
+  try {
+    const sessions = await (window as any).session.getAllSessions();
+    if (sessions && sessions.length > 0) {
+      // Load saved sessions
+      sessions.forEach((s: SessionData) => addSessionToUI(s));
+      addLog(`Loaded ${sessions.length} session(s)`, 'info');
+    } else {
+      // No saved sessions - create a default one
+      addLog('Creating default session...', 'info');
+      const defaultSession = await (window as any).session.createSession(
+        'Default Session',
+        undefined,
+        { initialUrl: 'https://web.snapchat.com' }
+      );
+      if (defaultSession) {
+        addSessionToUI(defaultSession);
+      } else {
+        // Fallback: create local webview if IPC fails
+        const wv = createDefaultWebview('https://web.snapchat.com');
+        setupWebviewListeners(wv);
+        setupWebviewReadyHandler(wv);
+        webview = wv;
+      }
+    }
+  } catch (e) {
+    // IPC not available - create fallback webview
+    console.log('Session API not available, using fallback:', e);
+    const wv = createDefaultWebview('https://web.snapchat.com');
+    setupWebviewListeners(wv);
+    setupWebviewReadyHandler(wv);
+    webview = wv;
+  }
+  
+  // Update webview reference
   webview = getActiveWebview();
-  
-  // Set up listeners for any webview that gets created
-  const observer = new MutationObserver((mutations) => {
-    mutations.forEach((mutation) => {
-      mutation.addedNodes.forEach((node) => {
-        if (node.nodeName === 'WEBVIEW') {
-          const wv = node as Electron.WebviewTag;
-          setupWebviewListeners(wv);
-          setupWebviewReadyHandler(wv);
-          // Update current webview reference
-          webview = wv;
-        }
-      });
-    });
-  });
-  
-  const container = document.getElementById('webview-container');
-  if (container) {
-    observer.observe(container, { childList: true });
-  }
-  
-  // Load initial URL if webview exists
-  const currentWebview = getActiveWebview();
-  if (currentWebview && (!currentWebview.src || currentWebview.src === 'about:blank')) {
-    currentWebview.src = 'https://web.snapchat.com';
-  }
 });
