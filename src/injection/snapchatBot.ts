@@ -94,6 +94,51 @@ function findAllElements(selectors: string): HTMLElement[] {
 
 
 /**
+ * Clean username by removing status suffixes like "typing", "delivered", "read", etc.
+ */
+function cleanUsername(rawName: string): string {
+  if (!rawName) return 'Unknown';
+  
+  // Status suffixes to remove (case-insensitive)
+  const statusSuffixes = [
+    'typing',
+    'typing...',
+    'typing…',
+    'delivered',
+    'read',
+    'received',
+    'opened',
+    'sent',
+    'viewed',
+    'online',
+    'offline',
+    'active now',
+    'just now',
+    'new chat',
+    'new snap'
+  ];
+  
+  let cleaned = rawName.trim();
+  
+  // Remove status suffixes from the end
+  for (const suffix of statusSuffixes) {
+    const regex = new RegExp(`\\s+${suffix}\\s*$`, 'i');
+    cleaned = cleaned.replace(regex, '');
+  }
+  
+  // Also handle cases where status might be separated by newline or multiple spaces
+  const parts = cleaned.split(/[\n\r]+/);
+  if (parts.length > 0) {
+    cleaned = parts[0].trim();
+  }
+  
+  // Remove any trailing timestamps like "2m", "5h", "1d"
+  cleaned = cleaned.replace(/\s+\d+[smhd]\s*$/i, '');
+  
+  return cleaned || 'Unknown';
+}
+
+/**
  * Get current conversation's sender name
  */
 function getCurrentSender(): string {
@@ -102,14 +147,14 @@ function getCurrentSender(): string {
   if (header) {
     const nameEl = header.querySelector(SNAPCHAT_SELECTORS.senderName.split(', ').join(', '));
     if (nameEl?.textContent) {
-      return nameEl.textContent.trim();
+      return cleanUsername(nameEl.textContent);
     }
   }
   
   // Fallback: look for any visible username
   const nameEl = findElement(SNAPCHAT_SELECTORS.senderName);
   if (nameEl?.textContent) {
-    return nameEl.textContent.trim();
+    return cleanUsername(nameEl.textContent);
   }
   
   return 'Unknown';
