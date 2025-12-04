@@ -387,6 +387,84 @@ function setupMultiSessionUI() {
       if (e.target === modal) hideNewSessionModal();
     });
   }
+  
+  // Proxy import button
+  const importBtn = document.getElementById('import-proxies-btn');
+  if (importBtn) {
+    importBtn.onclick = importProxies;
+  }
+  
+  // Load proxy list on startup
+  refreshProxyList();
+}
+
+// ============================================================================
+// Proxy Pool Management
+// ============================================================================
+
+// Import proxies from textarea
+async function importProxies() {
+  const textarea = document.getElementById('proxy-import') as HTMLTextAreaElement;
+  if (!textarea || !textarea.value.trim()) {
+    addLog('No proxies to import', 'error');
+    return;
+  }
+  
+  try {
+    const imported = await (window as any).proxy.importProxies(textarea.value);
+    if (imported && imported.length > 0) {
+      addLog(`Imported ${imported.length} proxy(ies)`, 'success');
+      textarea.value = '';
+      refreshProxyList();
+    } else {
+      addLog('No valid proxies found', 'error');
+    }
+  } catch (e) {
+    addLog(`Import failed: ${e}`, 'error');
+  }
+}
+
+// Refresh the proxy list display
+async function refreshProxyList() {
+  const listEl = document.getElementById('proxy-list');
+  const countEl = document.getElementById('proxy-count');
+  if (!listEl) return;
+  
+  try {
+    const pool = await (window as any).proxy.getProxyPool();
+    
+    if (!pool || pool.length === 0) {
+      listEl.innerHTML = '<div class="proxy-empty">No proxies added</div>';
+      if (countEl) countEl.textContent = '0 proxies';
+      return;
+    }
+    
+    if (countEl) countEl.textContent = `${pool.length} proxy(ies)`;
+    
+    listEl.innerHTML = pool.map((entry: any) => `
+      <div class="proxy-item" data-proxy-id="${entry.proxy.id}">
+        <span class="proxy-status ${entry.status}"></span>
+        <span class="proxy-info">${entry.proxy.host}:${entry.proxy.port}</span>
+        <button class="proxy-delete" title="Remove">&times;</button>
+      </div>
+    `).join('');
+    
+    // Add delete handlers
+    listEl.querySelectorAll('.proxy-delete').forEach(btn => {
+      btn.addEventListener('click', async (e) => {
+        const item = (e.target as HTMLElement).closest('.proxy-item') as HTMLElement;
+        const proxyId = item?.dataset.proxyId;
+        if (proxyId) {
+          await (window as any).proxy.removeProxy(proxyId);
+          refreshProxyList();
+          addLog('Proxy removed', 'info');
+        }
+      });
+    });
+  } catch (e) {
+    console.log('Could not load proxy pool:', e);
+    listEl.innerHTML = '<div class="proxy-empty">Could not load proxies</div>';
+  }
 }
 
 // ============================================================================

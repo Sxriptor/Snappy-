@@ -862,3 +862,93 @@ input[type="number"] {
 .session-webview.hidden {
   display: none;
 }
+
+
+/* Proxy Pool Styles */
+.proxy-count {
+  font-size: 9px;
+  color: #555;
+}
+
+.proxy-list {
+  max-height: 80px;
+  overflow-y: auto;
+  margin-bottom: 8px;
+}
+
+.proxy-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 4px 6px;
+  background: #111;
+  border: 1px solid #1a1a1a;
+  margin-bottom: 2px;
+  font-size: 9px;
+}
+
+.proxy-item .proxy-info {
+  color: #666;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+}
+
+.proxy-item .proxy-status {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  margin-right: 6px;
+  flex-shrink: 0;
+}
+
+.proxy-item .proxy-status.available {
+  background: #5a8;
+}
+
+.proxy-item .proxy-status.assigned {
+  background: #aa8;
+}
+
+.proxy-item .proxy-delete {
+  background: none;
+  border: none;
+  color: #444;
+  cursor: pointer;
+  font-size: 12px;
+  padding: 0 4px;
+}
+
+.proxy-item .proxy-delete:hover {
+  color: #a55;
+}
+
+.proxy-empty {
+  color: #333;
+  font-size: 9px;
+  text-align: center;
+  padding: 8px;
+}
+
+.proxy-import-section {
+  margin-top: 8px;
+}
+
+.proxy-import-section textarea {
+  width: 100%;
+  padding: 6px;
+  background: #111;
+  border: 1px solid #1a1a1a;
+  color: #888;
+  font-family: inherit;
+  font-size: 9px;
+  resize: vertical;
+  min-height: 50px;
+  margin-bottom: 6px;
+}
+
+.proxy-import-section textarea:focus {
+  border-color: #2a2a2a;
+  outline: none;
+}
