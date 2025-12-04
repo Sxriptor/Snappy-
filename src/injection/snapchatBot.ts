@@ -238,6 +238,8 @@ function getConversationMessages(): { text: string; isIncoming: boolean }[] {
   const messages: { text: string; isIncoming: boolean }[] = [];
   const bubbles = findAllElements(SNAPCHAT_SELECTORS.messageBubble);
   
+  snapLog(`Found ${bubbles.length} message bubbles`);
+  
   for (const bubble of bubbles) {
     const text = bubble.textContent?.trim();
     if (!text) continue;
@@ -249,13 +251,26 @@ function getConversationMessages(): { text: string; isIncoming: boolean }[] {
     
     // Determine if incoming or outgoing based on class names
     const classList = bubble.className.toLowerCase() + ' ' + (bubble.parentElement?.className.toLowerCase() || '');
+    
+    // Log the class names for debugging
+    snapLog(`Message classes: "${classList.substring(0, 100)}..."`);
+    
     const isIncoming = classList.includes('received') || classList.includes('incoming') || 
                        classList.includes('other') || classList.includes('left');
     const isOutgoing = classList.includes('sent') || classList.includes('outgoing') || 
                        classList.includes('self') || classList.includes('right');
     
-    // If we can't determine direction, skip (likely UI element)
-    if (!isIncoming && !isOutgoing) continue;
+    // Log classification result
+    const direction = isIncoming ? 'INCOMING' : (isOutgoing ? 'OUTGOING' : 'UNKNOWN');
+    snapLog(`  -> Classified as ${direction}: "${text.substring(0, 30)}..."`);
+    
+    // If we can't determine direction, assume it's incoming to be safe
+    // (better to reply to our own message once than miss incoming messages)
+    if (!isIncoming && !isOutgoing) {
+      snapLog('  -> Direction unknown, defaulting to INCOMING');
+      messages.push({ text, isIncoming: true });
+      continue;
+    }
     
     messages.push({ text, isIncoming });
   }
@@ -264,8 +279,8 @@ function getConversationMessages(): { text: string; isIncoming: boolean }[] {
 }
 
 /**
- * Get the latest incoming message - ONLY if it's actually the last message
- * Returns null if the last message is outgoing (from us)
+ * Get the latest incoming message that we haven't replied to yet
+ * Looks for the most recent incoming message, even if we've sent messages after it
  */
 function getLatestIncomingMessage(): string | null {
   const messages = getConversationMessages();
@@ -274,17 +289,25 @@ function getLatestIncomingMessage(): string | null {
     return null;
   }
   
-  // Check if the LAST message is incoming
-  // If the last message is outgoing (from us), we shouldn't reply
-  const lastMessage = messages[messages.length - 1];
-  
-  if (!lastMessage.isIncoming) {
-    // Last message is from us - don't reply to ourselves
-    snapLog('Last message is outgoing (from us), skipping');
-    return null;
+  // Find the last incoming message
+  // We iterate backwards to find the most recent one
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const msg = messages[i];
+    if (msg.isIncoming) {
+      // Found an incoming message - check if we've already processed it
+      const msgId = `${getCurrentSender()}-${msg.text.substring(0, 100)}`;
+      if (isMessageSeen(msgId)) {
+        snapLog('Latest incoming message already processed');
+        return null;
+      }
+      
+      snapLog(`Found latest incoming message: "${msg.text.substring(0, 50)}..."`);
+      return msg.text;
+    }
   }
   
-  return lastMessage.text;
+  snapLog('No incoming messages found in conversation');
+  return null;
 }
 
 /**
@@ -385,6 +408,7 @@ function isNewIncomingChat(chatElement: HTMLElement): boolean {
   
   // Check for explicit "new chat" or "new snap" indicators
   if (chatText.includes('new chat') || chatText.includes('new snap')) {
+    snapLog('Found "new chat" indicator');
     return true;
   }
   
@@ -396,16 +420,20 @@ function isNewIncomingChat(chatElement: HTMLElement): boolean {
     return false; // No unread indicator at all
   }
   
+  snapLog('Found unread indicator on chat');
+  
   // Check if the preview shows it's from US (outgoing) - skip these
   // Snapchat shows "You:" or "Delivered" or "Sent" for outgoing messages
   const outgoingIndicators = ['you:', 'delivered', 'sent', 'opened', 'viewed'];
   for (const indicator of outgoingIndicators) {
     if (chatText.includes(indicator)) {
+      snapLog(`Skipping - preview shows outgoing indicator: "${indicator}"`);
       return false; // This is showing our last message, not theirs
     }
   }
   
   // Has unread indicator and doesn't look like our outgoing message
+  snapLog('Chat appears to have new incoming message');
   return true;
 }
 
@@ -715,18 +743,29 @@ async function processConversation(chatElement: HTMLElement): Promise<void> {
   
   // Get all messages and update memory
   const messages = getConversationMessages();
+  snapLog(`Found ${messages.length} total messages in conversation`);
+  
+  // Log last few messages for debugging
+  const lastFew = messages.slice(-3);
+  lastFew.forEach((msg, idx) => {
+    const direction = msg.isIncoming ? 'INCOMING' : 'OUTGOING';
+    snapLog(`  [${idx}] ${direction}: "${msg.text.substring(0, 40)}..."`);
+  });
+  
   updateConversationMemory(sender, messages);
   
   // Get the latest incoming message
   const latestMessage = getLatestIncomingMessage();
   if (!latestMessage) {
-    snapLog('No incoming message found');
+    snapLog('No new incoming message to process');
     return;
   }
   
   // Generate message ID to avoid duplicates - use message content only, not timestamp
   // This ensures the same message always gets the same ID
   const msgId = `${sender}-${latestMessage.substring(0, 100)}`;
+  snapLog(`Message ID: ${msgId.substring(0, 60)}...`);
+  
   if (isMessageSeen(msgId)) {
     snapLog('Message already processed, skipping');
     return;
@@ -741,7 +780,7 @@ async function processConversation(chatElement: HTMLElement): Promise<void> {
   const reply = await generateContextualReply(sender, latestMessage);
   
   if (!reply) {
-    snapLog('No matching reply rule, skipping');
+    snapLog('No reply generated (no matching rule or AI returned nothing)');
     return;
   }
   
@@ -887,6 +926,39 @@ function getAllMemories(): Map<string, ConversationMemory> {
 }
 
 /**
+ * Debug function to inspect message classification
+ * Call from console: window.__snapDebug()
+ */
+function debugMessageClassification(): void {
+  snapLog('=== DEBUG: Message Classification ===');
+  const bubbles = findAllElements(SNAPCHAT_SELECTORS.messageBubble);
+  snapLog(`Total bubbles found: ${bubbles.length}`);
+  
+  bubbles.forEach((bubble, idx) => {
+    const text = bubble.textContent?.trim() || '';
+    const classList = bubble.className.toLowerCase() + ' ' + (bubble.parentElement?.className.toLowerCase() || '');
+    
+    snapLog(`\n[${idx}] Text: "${text.substring(0, 50)}..."`);
+    snapLog(`    Classes: ${classList.substring(0, 150)}`);
+    
+    const isIncoming = classList.includes('received') || classList.includes('incoming') || 
+                       classList.includes('other') || classList.includes('left');
+    const isOutgoing = classList.includes('sent') || classList.includes('outgoing') || 
+                       classList.includes('self') || classList.includes('right');
+    
+    snapLog(`    isIncoming: ${isIncoming}, isOutgoing: ${isOutgoing}`);
+    snapLog(`    isStatusText: ${isStatusOrUIText(text)}`);
+  });
+  
+  snapLog('\n=== END DEBUG ===');
+}
+
+// Expose debug function to window
+if (typeof window !== 'undefined') {
+  (window as any).__snapDebug = debugMessageClassification;
+}
+
+/**
  * Export for use
  */
 export {
@@ -898,5 +970,6 @@ export {
   getCurrentSender,
   getConversationMessages,
   findUnreadChats,
+  debugMessageClassification,
   SNAPCHAT_SELECTORS
 };

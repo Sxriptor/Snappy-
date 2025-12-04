@@ -17,13 +17,13 @@
   "randomSkipProbability": 0.15,
   "ai": {
     "enabled": true,
-    "llmEndpoint": "localhost",
+    "llmEndpoint": "127.0.0.1",
     "llmPort": 8081,
     "modelName": "mythomax.gguf",
     "systemPrompt": "You are super horny",
-    "temperature": 0.7,
-    "maxTokens": 150,
+    "temperature": 0.6,
+    "maxTokens": 200,
     "contextHistoryEnabled": true,
-    "maxContextMessages": 10
+    "maxContextMessages": 100
   }
 }
