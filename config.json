@@ -2,8 +2,14 @@
   "initialUrl": "https://web.snapchat.com",
   "autoInject": false,
   "replyRules": [],
-  "typingDelayRangeMs": [50, 150],
-  "preReplyDelayRangeMs": [2000, 6000],
+  "typingDelayRangeMs": [
+    50,
+    150
+  ],
+  "preReplyDelayRangeMs": [
+    2000,
+    6000
+  ],
   "maxRepliesPerMinute": 5,
   "maxRepliesPerHour": 30,
   "maxReplyLength": 500,
@@ -18,9 +24,6 @@
     "temperature": 0.7,
     "maxTokens": 150,
     "contextHistoryEnabled": true,
-    "maxContextMessages": 10,
-    "requestTimeoutMs": 60000,
-    "maxRetries": 3,
-    "retryBackoffMs": 1000
+    "maxContextMessages": 10
   }
 }

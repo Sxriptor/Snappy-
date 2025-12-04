@@ -3,7 +3,7 @@
  * Handles Snapchat Web's unique DOM structure with conversation memory
  */
 
-import { log, getConfig, markMessageSeen, isMessageSeen, generateMessageId } from './bot';
+import { log, getConfig, markMessageSeen, isMessageSeen } from './bot';
 import { Configuration } from '../types';
 
 // Conversation memory - stores summaries per user
@@ -15,6 +15,8 @@ interface ConversationMemory {
 }
 
 const conversationMemories: Map<string, ConversationMemory> = new Map();
+
+const MIN_MESSAGE_LENGTH = 5; // Minimum message length to process
 
 // Snapchat-specific selectors (updated for current Snapchat Web)
 const SNAPCHAT_SELECTORS = {
@@ -114,38 +116,89 @@ function getCurrentSender(): string {
 }
 
 /**
+ * Check if text is a Snapchat UI/status element (not a real message)
+ */
+function isStatusOrUIText(text: string): boolean {
+  const lowerText = text.toLowerCase().trim();
+  
+  // Exact match status keywords
+  const exactStatusKeywords = [
+    'opened', 'typing', 'typing...', 'received', 'delivered', 'viewed', 'sent',
+    'new chat', 'snap', 'screenshot', 'chat', 'opened snap', 'new snap',
+    'streaks', 'streak', 'tap to chat', 'tap to view', 'double tap to like',
+    'say something...', 'send a message', 'type a message', 'send a chat',
+    'spotlight', 'stories', 'discover', 'map', 'memories', 'camera',
+    'add friends', 'my ai', 'team snapchat', 'just now', 'today', 'yesterday'
+  ];
+  
+  if (exactStatusKeywords.includes(lowerText)) {
+    return true;
+  }
+  
+  // Partial match patterns for status text
+  const statusPatterns = [
+    /^typing\.{0,3}$/i,           // "Typing", "Typing...", "Typing..."
+    /^opened\s/i,                  // "Opened 2m ago"
+    /^delivered\s/i,               // "Delivered 5m ago"
+    /^received\s/i,                // "Received just now"
+    /^sent\s/i,                    // "Sent 1h ago"
+    /^viewed\s/i,                  // "Viewed"
+    /^\d+[smhd]\s*(ago)?$/i,       // "2m ago", "5h", "1d ago"
+    /^\d+:\d+\s*(am|pm)?$/i,       // "2:30 PM", "14:30"
+    /^(mon|tue|wed|thu|fri|sat|sun)/i,  // Day names
+    /^(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)/i,  // Month names
+    /^new\s+(chat|snap|message)/i, // "New chat", "New snap"
+    /^tap\s+to\s+/i,               // "Tap to view", "Tap to chat"
+    /^double\s+tap/i,              // "Double tap to..."
+    /^swipe\s+/i,                  // "Swipe to..."
+    /^reply\s+to\s+/i,             // "Reply to..."
+    /^\d+\s*(new\s+)?(message|chat|snap)/i,  // "3 new messages"
+    /^(chat|snap)\s+opened/i,      // "Chat opened"
+    /screenshot/i,                 // Any screenshot mention
+    /streak/i,                     // Any streak mention
+  ];
+  
+  for (const pattern of statusPatterns) {
+    if (pattern.test(lowerText)) {
+      return true;
+    }
+  }
+  
+  // Skip if it's just timestamps, emojis, or very short
+  if (/^[\d:.\s]+$/.test(text)) return true;  // Only numbers/time
+  if (/^[^\w\s]*$/.test(text)) return true;   // Only symbols/emoji
+  if (text.length < 2) return true;            // Too short
+  
+  // Skip partial/incomplete messages (ends with "..." and is short)
+  if (text.endsWith('...') && text.length < 25) return true;
+  
+  return false;
+}
+
+/**
  * Get all messages in current conversation
  */
 function getConversationMessages(): { text: string; isIncoming: boolean }[] {
   const messages: { text: string; isIncoming: boolean }[] = [];
   const bubbles = findAllElements(SNAPCHAT_SELECTORS.messageBubble);
   
-  // Status keywords to filter out
-  const statusKeywords = ['opened', 'typing', 'received', 'delivered', 'viewed', 'sent', 'new chat', 'snap', 'screenshot'];
-  
   for (const bubble of bubbles) {
     const text = bubble.textContent?.trim();
-    if (!text || text.length < 3) continue;
+    if (!text) continue;
     
-    // Skip status messages
-    const lowerText = text.toLowerCase();
-    if (statusKeywords.some(keyword => lowerText === keyword || (text.length < 20 && lowerText.includes(keyword)))) {
+    // Skip status/UI text
+    if (isStatusOrUIText(text)) {
       continue;
     }
     
-    // Skip if it looks like a timestamp or status (contains only emoji/symbols)
-    if (/^[\d:]+$/.test(text) || /^[^\w\s]+$/.test(text)) {
-      continue;
-    }
-    
-    // Determine if incoming or outgoing
+    // Determine if incoming or outgoing based on class names
     const classList = bubble.className.toLowerCase() + ' ' + (bubble.parentElement?.className.toLowerCase() || '');
     const isIncoming = classList.includes('received') || classList.includes('incoming') || 
                        classList.includes('other') || classList.includes('left');
     const isOutgoing = classList.includes('sent') || classList.includes('outgoing') || 
                        classList.includes('self') || classList.includes('right');
     
-    // If we can't determine, skip
+    // If we can't determine direction, skip (likely UI element)
     if (!isIncoming && !isOutgoing) continue;
     
     messages.push({ text, isIncoming });
@@ -209,10 +262,29 @@ function updateConversationMemory(sender: string, messages: { text: string; isIn
     };
   }
   
-  // Add new messages
+  // Filter and deduplicate messages before adding
   const now = Date.now();
+  const existingTexts = new Set(memory.messages.map(m => m.text.toLowerCase().trim()));
+  
   for (const msg of messages) {
+    // Skip status/UI text
+    if (isStatusOrUIText(msg.text)) {
+      continue;
+    }
+    
+    // Skip duplicates
+    const normalizedText = msg.text.toLowerCase().trim();
+    if (existingTexts.has(normalizedText)) {
+      continue;
+    }
+    
+    // Skip very short messages
+    if (msg.text.length < MIN_MESSAGE_LENGTH) {
+      continue;
+    }
+    
     memory.messages.push({ ...msg, timestamp: now });
+    existingTexts.add(normalizedText);
   }
   
   // Keep only last 50 messages
@@ -225,7 +297,7 @@ function updateConversationMemory(sender: string, messages: { text: string; isIn
   memory.lastUpdated = now;
   
   conversationMemories.set(sender, memory);
-  snapLog(`Memory updated for ${sender}: ${memory.summary}`);
+  snapLog(`Memory updated for ${sender}: ${memory.messages.length} valid messages`);
 }
 
 /**
@@ -244,6 +316,12 @@ function findUnreadChats(): HTMLElement[] {
   const unreadChats: HTMLElement[] = [];
   
   for (const item of chatItems) {
+    // Skip chats that look like My AI or system accounts
+    const chatText = item.textContent?.toLowerCase() || '';
+    if (chatText.includes('my ai') || chatText.includes('team snapchat') || chatText.includes('snapchat')) {
+      continue;
+    }
+    
     // Check for unread indicator
     const hasUnread = item.querySelector(SNAPCHAT_SELECTORS.unreadBadge.split(', ').join(', ')) ||
                       item.className.toLowerCase().includes('unread');
@@ -378,17 +456,21 @@ function findMatchingReply(messageText: string): string | null {
  * Uses AI Brain via direct fetch to LLM server for intelligent responses
  */
 async function generateContextualReply(sender: string, latestMessage: string): Promise<string | null> {
-  // Skip UI elements that aren't real messages
-  const lowerMsg = latestMessage.toLowerCase();
-  const uiElements = ['spotlight', 'drag & drop', 'upload', 'type a message', 'send a chat', 'new chat', 'add friends', 'stories', 'discover', 'map', 'chat', 'opened', 'typing', 'received', 'delivered', 'viewed'];
-  if (uiElements.some(ui => lowerMsg === ui || lowerMsg.includes(ui))) {
-    snapLog(`Skipping UI element: "${latestMessage}"`);
+  // Use the comprehensive status/UI filter
+  if (isStatusOrUIText(latestMessage)) {
+    snapLog(`Skipping status/UI text: "${latestMessage}"`);
     return null;
   }
   
-  // Skip very short messages that are likely UI elements
-  if (latestMessage.length < 3) {
-    snapLog(`Skipping too short: "${latestMessage}"`);
+  // Skip very short messages that are likely UI elements or incomplete
+  if (latestMessage.length < MIN_MESSAGE_LENGTH) {
+    snapLog(`Skipping too short (${latestMessage.length} chars): "${latestMessage}"`);
+    return null;
+  }
+  
+  // Skip messages that look like partial/truncated text (preview snippets)
+  if (latestMessage.endsWith('...') && latestMessage.length < 30) {
+    snapLog(`Skipping truncated preview: "${latestMessage}"`);
     return null;
   }
   
@@ -471,6 +553,7 @@ async function generateContextualReply(sender: string, latestMessage: string): P
   
   // Fallback to simple pattern matching if AI unavailable
   const memory = getConversationMemory(sender);
+  const lowerMsg = latestMessage.toLowerCase();
   
   if (lowerMsg.includes('?')) {
     return "Let me think about that and get back to you!";
@@ -543,12 +626,16 @@ async function processConversation(chatElement: HTMLElement): Promise<void> {
     return;
   }
   
-  // Generate message ID to avoid duplicates
-  const msgId = generateMessageId(sender, latestMessage, Date.now());
+  // Generate message ID to avoid duplicates - use message content only, not timestamp
+  // This ensures the same message always gets the same ID
+  const msgId = `${sender}-${latestMessage.substring(0, 100)}`;
   if (isMessageSeen(msgId)) {
     snapLog('Message already processed, skipping');
     return;
   }
+  
+  // Mark as seen immediately to prevent duplicate processing
+  markMessageSeen(msgId);
   
   snapLog(`Latest message from ${sender}: "${latestMessage.substring(0, 50)}..."`);
   
@@ -557,7 +644,6 @@ async function processConversation(chatElement: HTMLElement): Promise<void> {
   
   if (!reply) {
     snapLog('No matching reply rule, skipping');
-    markMessageSeen(msgId);
     return;
   }
   
@@ -565,7 +651,6 @@ async function processConversation(chatElement: HTMLElement): Promise<void> {
   const skipProb = config?.randomSkipProbability || 0.15;
   if (Math.random() < skipProb) {
     snapLog(`Randomly skipping (${Math.round(skipProb * 100)}% chance)`);
-    markMessageSeen(msgId);
     return;
   }
   
@@ -584,10 +669,9 @@ async function processConversation(chatElement: HTMLElement): Promise<void> {
   const sent = await clickSend();
   if (sent) {
     snapLog(`✓ Reply sent to ${sender}: "${reply}"`);
-    markMessageSeen(msgId);
     
     // Mark our own reply as seen to avoid replying to it
-    const botMsgId = generateMessageId(sender, reply, Date.now());
+    const botMsgId = `${sender}-${reply.substring(0, 100)}`;
     markMessageSeen(botMsgId);
     
     // Update memory with our reply

@@ -1050,6 +1050,36 @@ function getBotScript(config: Config): string {
     return null;
   }
   
+  // Track messages we've sent to avoid replying to ourselves
+  const sentMessages = new Set();
+  
+  // Check if text looks like a status/UI element
+  function isStatusText(text) {
+    const lower = text.toLowerCase().trim();
+    const statusWords = [
+      'typing', 'delivered', 'opened', 'received', 'sent', 'viewed',
+      'new chat', 'new snap', 'streak', 'screenshot', 'tap to',
+      'swipe', 'double tap', 'just now', 'today', 'yesterday',
+      'spotlight', 'stories', 'discover', 'map', 'camera'
+    ];
+    
+    // Exact matches
+    if (statusWords.includes(lower)) return true;
+    
+    // Partial matches for short text
+    if (text.length < 20) {
+      for (const word of statusWords) {
+        if (lower.includes(word)) return true;
+      }
+    }
+    
+    // Timestamps
+    if (/^\\d{1,2}:\\d{2}/.test(text)) return true;
+    if (/^\\d+[smhd]\\s*(ago)?$/i.test(text)) return true;
+    
+    return false;
+  }
+  
   // Get visible text content from chat area
   function getVisibleMessages() {
     const messages = [];
@@ -1072,12 +1102,37 @@ function getBotScript(config: Config): string {
         document.querySelectorAll(selector).forEach(el => {
           const text = el.textContent?.trim();
           if (text && text.length > 1 && text.length < 1000 && !seen.has(text)) {
+            // Skip status/UI text
+            if (isStatusText(text)) return;
+            
             seen.add(text);
-            // Try to determine if incoming or outgoing based on position
+            
+            // Determine if incoming or outgoing
             const rect = el.getBoundingClientRect();
-            const isLeft = rect.left < window.innerWidth * 0.4;
             const cls = (el.className || '').toLowerCase();
-            const isIncoming = isLeft || cls.includes('received') || cls.includes('incoming') || cls.includes('other');
+            const parentCls = (el.parentElement?.className || '').toLowerCase();
+            const allCls = cls + ' ' + parentCls;
+            
+            // Check class names first (more reliable)
+            const isOutgoingByClass = allCls.includes('sent') || allCls.includes('outgoing') || 
+                                      allCls.includes('self') || allCls.includes('right') || allCls.includes('mine');
+            const isIncomingByClass = allCls.includes('received') || allCls.includes('incoming') || 
+                                      allCls.includes('other') || allCls.includes('left');
+            
+            // Check if we sent this message
+            const normalizedText = text.toLowerCase().trim();
+            const isSentByUs = sentMessages.has(normalizedText);
+            
+            let isIncoming;
+            if (isSentByUs || isOutgoingByClass) {
+              isIncoming = false;
+            } else if (isIncomingByClass) {
+              isIncoming = true;
+            } else {
+              // Fallback to position (less reliable)
+              isIncoming = rect.left < window.innerWidth * 0.4;
+            }
+            
             messages.push({ text, isIncoming });
           }
         });
@@ -1336,17 +1391,28 @@ function getBotScript(config: Config): string {
     // Find the main content area (usually right side of screen)
     const mainArea = document.querySelector('main, [role="main"], [class*="main"], [class*="content"], [class*="chat"]');
     
-    // Get all text elements
+    // Get all text elements - prefer leaf nodes to avoid concatenated text
     const textElements = [];
+    const seen = new Set();
     const selector = 'p, span, div';
     const elements = mainArea ? mainArea.querySelectorAll(selector) : document.querySelectorAll(selector);
     
     elements.forEach(el => {
+      // Skip if this element has child elements with text (to avoid duplicates)
+      const hasTextChildren = Array.from(el.children).some(child => 
+        child.textContent && child.textContent.trim().length > 0
+      );
+      if (hasTextChildren) return;
+      
       const text = el.textContent?.trim();
-      if (text && text.length > 0 && text.length < 500) {
+      if (text && text.length > 2 && text.length < 300 && !seen.has(text)) {
         // Skip if it's a timestamp or UI element
         if (!/^\\d{1,2}:\\d{2}/.test(text) && !/^(Send|Type|Message|Chat)/.test(text)) {
-          textElements.push({ text, element: el });
+          // Skip status text
+          if (!isStatusText(text)) {
+            seen.add(text);
+            textElements.push({ text, element: el });
+          }
         }
       }
     });
@@ -1354,11 +1420,46 @@ function getBotScript(config: Config): string {
     return textElements;
   }
   
+  // Clean username by removing status indicators
+  function cleanUsername(rawText) {
+    // Status words that get appended to usernames in Snapchat
+    const statusPatterns = [
+      /Typing\\.{0,3}$/i,
+      /Delivered$/i,
+      /Opened$/i,
+      /Received$/i,
+      /Sent$/i,
+      /Viewed$/i,
+      /New Chat$/i,
+      /New Snap$/i,
+      /\\d+[smhd]\\s*(ago)?$/i,  // "2m ago", "5h"
+      /\\d+:\\d+\\s*(AM|PM)?$/i,  // timestamps
+      /Just now$/i,
+      /Today$/i,
+      /Yesterday$/i
+    ];
+    
+    let cleaned = rawText.split(/[·\\n]/)[0].trim();
+    
+    // Remove status suffixes
+    for (const pattern of statusPatterns) {
+      cleaned = cleaned.replace(pattern, '').trim();
+    }
+    
+    return cleaned;
+  }
+  
   // Process a chat
   async function processChat(chatEl, chatText) {
-    // Extract username from chatText
-    const username = chatText.split(/[·\\n]/)[0].trim();
+    // Extract and clean username from chatText
+    const username = cleanUsername(chatText);
     log('Opening chat with: ' + username);
+    
+    // Skip if username is empty or looks like a status
+    if (!username || username.length < 2) {
+      log('Invalid username, skipping');
+      return;
+    }
     
     // Load and display memory for this user
     const memory = getUserMemory(username);
@@ -1384,11 +1485,13 @@ function getBotScript(config: Config): string {
       const allText = getAllChatText();
       log('Method 2 found ' + allText.length + ' text elements');
       
-      // Convert to messages format
-      messages = allText.map((t, i) => ({
-        text: t.text,
-        isIncoming: i % 2 === 0 // Alternate as a guess
-      }));
+      // Convert to messages format, filtering out status text and our own messages
+      messages = allText
+        .filter(t => !isStatusText(t.text) && !sentMessages.has(t.text.toLowerCase().trim()))
+        .map((t, i) => ({
+          text: t.text,
+          isIncoming: i % 2 === 0 // Alternate as a guess
+        }));
     }
     
     log('Total messages: ' + messages.length);
@@ -1412,12 +1515,26 @@ function getBotScript(config: Config): string {
       return;
     }
     
+    // Skip if this is actually a message we sent
+    const normalizedIncoming = lastIncoming.toLowerCase().trim();
+    if (sentMessages.has(normalizedIncoming)) {
+      log('Skipping - this is our own message');
+      return;
+    }
+    
     log('Last incoming: ' + lastIncoming.substring(0, 50));
     
-    // Check if already replied
-    const msgId = chatText + '-' + lastIncoming.substring(0, 20);
+    // Check if already replied (use cleaned username + full normalized message for consistent ID)
+    const msgId = username + '::' + normalizedIncoming;
     if (seenMessages.has(msgId)) {
-      log('Already processed');
+      log('Already processed this exact message');
+      return;
+    }
+    
+    // Also check if we recently replied to this user (within last 30 seconds)
+    const recentReplyKey = 'recent::' + username;
+    if (seenMessages.has(recentReplyKey)) {
+      log('Recently replied to this user, waiting...');
       return;
     }
     
@@ -1453,10 +1570,16 @@ function getBotScript(config: Config): string {
       log('SUCCESS: Sent reply: ' + reply);
       seenMessages.add(msgId);
       
-      // Extract username from chatText (remove timestamps, etc.)
-      const username = chatText.split(/[·\\n]/)[0].trim();
+      // Track this message as sent by us (to avoid replying to ourselves)
+      sentMessages.add(reply.toLowerCase().trim());
       
-      // Save their message to memory
+      // Mark that we recently replied to this user (prevents rapid re-replies)
+      const recentReplyKey = 'recent::' + username;
+      seenMessages.add(recentReplyKey);
+      // Clear the recent flag after 30 seconds
+      setTimeout(() => seenMessages.delete(recentReplyKey), 30000);
+      
+      // Save their message to memory (username already cleaned above)
       addToMemory(username, lastIncoming, true);
       
       // Save our reply to memory
@@ -1497,16 +1620,9 @@ function getBotScript(config: Config): string {
     
     log('Unread chats: ' + unreadChats.length);
     
-    // If no unread found but we have chats, try processing the first one anyway (for testing)
-    if (unreadChats.length === 0 && chats.length > 0 && pollCount <= 2) {
-      log('No unread detected - trying first chat for testing');
-      const chat = chats[0];
-      const chatText = chat.textContent?.trim().substring(0, 50) || 'Unknown';
-      await processChat(chat, chatText);
-      return;
-    }
-    
+    // Only process chats with actual unread indicators
     if (unreadChats.length === 0) {
+      log('No unread messages to process');
       return;
     }
     
@@ -1520,12 +1636,15 @@ function getBotScript(config: Config): string {
   log('Bot started!');
   log('Rules: ' + (CONFIG.replyRules?.length || 0));
   
-  // Initial scan
-  setTimeout(scanPage, 3000);
+  // Initial scan after short delay
+  setTimeout(scanPage, 1500);
   
-  // Start polling
-  poll();
-  pollInterval = setInterval(poll, 5000);
+  // Start polling after brief delay
+  setTimeout(() => {
+    log('Starting message polling...');
+    poll();
+    pollInterval = setInterval(poll, 5000);
+  }, 2000);
   
   // Stop function
   window.__SNAPPY_STOP__ = function() {
@@ -1728,8 +1847,11 @@ async function refreshMemories() {
     
     memoriesContainer.innerHTML = memories.map((m: {username: string, total: number, fromThem: number, fromMe: number, recent: Array<{from: string, text: string}>}) => {
       let html = `
-        <div class="memory-item">
-          <div class="memory-sender">${escapeHtml(m.username)}</div>
+        <div class="memory-item" data-username="${escapeHtml(m.username)}">
+          <div class="memory-header">
+            <div class="memory-sender">${escapeHtml(m.username)}</div>
+            <button class="memory-delete" title="Delete memory">&times;</button>
+          </div>
           <div class="memory-summary">${m.total} msgs (${m.fromThem} them, ${m.fromMe} me)</div>`;
       
       // Show AI context preview if AI is enabled
@@ -1745,12 +1867,57 @@ async function refreshMemories() {
       html += `</div>`;
       return html;
     }).join('');
+    
+    // Add delete handlers
+    memoriesContainer.querySelectorAll('.memory-delete').forEach(btn => {
+      btn.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        const item = (e.target as HTMLElement).closest('.memory-item') as HTMLElement;
+        const username = item?.dataset.username;
+        if (username && confirm(`Delete memory for "${username}"?`)) {
+          await deleteMemory(username);
+        }
+      });
+    });
   } catch (e) {
     // Bot not running or no memories
   }
 }
 
 refreshMemoriesBtn.addEventListener('click', refreshMemories);
+
+// Delete a specific user's memory
+async function deleteMemory(username: string) {
+  const currentWebview = getActiveWebview();
+  if (!currentWebview) {
+    addLog('No active webview', 'error');
+    return;
+  }
+  
+  try {
+    await currentWebview.executeJavaScript(`
+      (function() {
+        const MEMORY_KEY = 'snappy_memories';
+        try {
+          const data = localStorage.getItem(MEMORY_KEY);
+          const memories = data ? JSON.parse(data) : {};
+          delete memories['${username.replace(/'/g, "\\'")}'];
+          localStorage.setItem(MEMORY_KEY, JSON.stringify(memories));
+          console.log('[Snappy] Deleted memory for: ${username.replace(/'/g, "\\'")}');
+          return true;
+        } catch (e) {
+          console.error('[Snappy] Error deleting memory:', e);
+          return false;
+        }
+      })();
+    `);
+    
+    addLog(`Deleted memory for ${username}`, 'info');
+    refreshMemories(); // Refresh the list
+  } catch (e) {
+    addLog(`Failed to delete memory: ${e}`, 'error');
+  }
+}
 
 // Auto-refresh memories every 10 seconds when bot is active
 setInterval(() => {

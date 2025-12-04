@@ -453,10 +453,30 @@ input[type="number"] {
   font-size: 9px;
 }
 
+.memory-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 2px;
+}
+
 .memory-sender {
   color: #888;
   font-weight: bold;
-  margin-bottom: 2px;
+}
+
+.memory-delete {
+  background: none;
+  border: none;
+  color: #444;
+  cursor: pointer;
+  font-size: 12px;
+  padding: 0 2px;
+  line-height: 1;
+}
+
+.memory-delete:hover {
+  color: #a55;
 }
 
 .memory-summary {
