@@ -398,6 +398,23 @@ function generateContextualReply(sender: string, latestMessage: string): string 
 }
 
 
+// Senders to ignore (e.g., Snapchat AI, bots)
+const IGNORED_SENDERS = [
+  'my ai',
+  'myai',
+  'snapchat ai',
+  'ai',
+  'team snapchat'
+];
+
+/**
+ * Check if a sender should be ignored
+ */
+function shouldIgnoreSender(sender: string): boolean {
+  const normalized = sender.toLowerCase().trim();
+  return IGNORED_SENDERS.some(ignored => normalized === ignored || normalized.includes(ignored));
+}
+
 /**
  * Process a single conversation
  */
@@ -409,6 +426,12 @@ async function processConversation(chatElement: HTMLElement): Promise<void> {
   // Get sender name
   const sender = getCurrentSender();
   snapLog(`Processing conversation with: ${sender}`);
+  
+  // Skip ignored senders (like Snapchat AI)
+  if (shouldIgnoreSender(sender)) {
+    snapLog(`Skipping ignored sender: ${sender}`);
+    return;
+  }
   
   // Get all messages and update memory
   const messages = getConversationMessages();
