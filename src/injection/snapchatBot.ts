@@ -264,19 +264,27 @@ function getConversationMessages(): { text: string; isIncoming: boolean }[] {
 }
 
 /**
- * Get the latest incoming message
+ * Get the latest incoming message - ONLY if it's actually the last message
+ * Returns null if the last message is outgoing (from us)
  */
 function getLatestIncomingMessage(): string | null {
   const messages = getConversationMessages();
   
-  // Find the last incoming message
-  for (let i = messages.length - 1; i >= 0; i--) {
-    if (messages[i].isIncoming) {
-      return messages[i].text;
-    }
+  if (messages.length === 0) {
+    return null;
   }
   
-  return null;
+  // Check if the LAST message is incoming
+  // If the last message is outgoing (from us), we shouldn't reply
+  const lastMessage = messages[messages.length - 1];
+  
+  if (!lastMessage.isIncoming) {
+    // Last message is from us - don't reply to ourselves
+    snapLog('Last message is outgoing (from us), skipping');
+    return null;
+  }
+  
+  return lastMessage.text;
 }
 
 /**
@@ -365,6 +373,43 @@ function getConversationMemory(sender: string): ConversationMemory | null {
 
 
 /**
+ * Check if a chat preview indicates a NEW incoming message
+ * Returns true only if:
+ * - Shows "New Chat" text
+ * - Has a blue/unread dot indicator
+ * - Preview text suggests incoming (not "You:" or "Delivered")
+ */
+function isNewIncomingChat(chatElement: HTMLElement): boolean {
+  const chatText = chatElement.textContent?.toLowerCase() || '';
+  const chatHtml = chatElement.innerHTML?.toLowerCase() || '';
+  
+  // Check for explicit "new chat" or "new snap" indicators
+  if (chatText.includes('new chat') || chatText.includes('new snap')) {
+    return true;
+  }
+  
+  // Check for unread badge/dot (blue indicator)
+  const hasUnreadBadge = chatElement.querySelector('[class*="unread"], [class*="Unread"], [class*="badge"], [class*="Badge"], [class*="dot"], [class*="Dot"]') !== null;
+  const hasUnreadClass = chatElement.className.toLowerCase().includes('unread');
+  
+  if (!hasUnreadBadge && !hasUnreadClass) {
+    return false; // No unread indicator at all
+  }
+  
+  // Check if the preview shows it's from US (outgoing) - skip these
+  // Snapchat shows "You:" or "Delivered" or "Sent" for outgoing messages
+  const outgoingIndicators = ['you:', 'delivered', 'sent', 'opened', 'viewed'];
+  for (const indicator of outgoingIndicators) {
+    if (chatText.includes(indicator)) {
+      return false; // This is showing our last message, not theirs
+    }
+  }
+  
+  // Has unread indicator and doesn't look like our outgoing message
+  return true;
+}
+
+/**
  * Find chats with unread messages
  */
 function findUnreadChats(): HTMLElement[] {
@@ -378,11 +423,8 @@ function findUnreadChats(): HTMLElement[] {
       continue;
     }
     
-    // Check for unread indicator
-    const hasUnread = item.querySelector(SNAPCHAT_SELECTORS.unreadBadge.split(', ').join(', ')) ||
-                      item.className.toLowerCase().includes('unread');
-    
-    if (hasUnread) {
+    // Only include if it's actually a NEW incoming message
+    if (isNewIncomingChat(item)) {
       unreadChats.push(item);
     }
   }

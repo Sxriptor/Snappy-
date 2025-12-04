@@ -1386,6 +1386,37 @@ function getBotScript(config: Config): string {
     }
   }
   
+  // Check if an element is positioned on the right side (outgoing message)
+  function isOutgoingMessage(el) {
+    // Check class names for outgoing indicators
+    const classChain = (el.className || '') + ' ' + (el.parentElement?.className || '') + ' ' + (el.parentElement?.parentElement?.className || '');
+    const classLower = classChain.toLowerCase();
+    
+    if (classLower.includes('sent') || classLower.includes('outgoing') || 
+        classLower.includes('self') || classLower.includes('right') ||
+        classLower.includes('me') || classLower.includes('own')) {
+      return true;
+    }
+    
+    // Check computed style for right-alignment
+    const style = window.getComputedStyle(el);
+    const parentStyle = el.parentElement ? window.getComputedStyle(el.parentElement) : null;
+    
+    if (style.textAlign === 'right' || style.marginLeft === 'auto' ||
+        (parentStyle && (parentStyle.justifyContent === 'flex-end' || parentStyle.alignItems === 'flex-end'))) {
+      return true;
+    }
+    
+    // Check position - if element is on right half of container, likely outgoing
+    const rect = el.getBoundingClientRect();
+    const containerWidth = el.parentElement?.getBoundingClientRect().width || window.innerWidth;
+    if (rect.left > containerWidth * 0.5) {
+      return true;
+    }
+    
+    return false;
+  }
+
   // Get all text content from the main chat area
   function getAllChatText() {
     // Find the main content area (usually right side of screen)
@@ -1411,7 +1442,8 @@ function getBotScript(config: Config): string {
           // Skip status text
           if (!isStatusText(text)) {
             seen.add(text);
-            textElements.push({ text, element: el });
+            const isOutgoing = isOutgoingMessage(el) || sentMessages.has(text.toLowerCase().trim());
+            textElements.push({ text, element: el, isOutgoing });
           }
         }
       }
@@ -1485,12 +1517,12 @@ function getBotScript(config: Config): string {
       const allText = getAllChatText();
       log('Method 2 found ' + allText.length + ' text elements');
       
-      // Convert to messages format, filtering out status text and our own messages
+      // Convert to messages format, using proper outgoing detection
       messages = allText
-        .filter(t => !isStatusText(t.text) && !sentMessages.has(t.text.toLowerCase().trim()))
-        .map((t, i) => ({
+        .filter(t => !isStatusText(t.text))
+        .map(t => ({
           text: t.text,
-          isIncoming: i % 2 === 0 // Alternate as a guess
+          isIncoming: !t.isOutgoing && !sentMessages.has(t.text.toLowerCase().trim())
         }));
     }
     
@@ -1499,6 +1531,15 @@ function getBotScript(config: Config): string {
     if (messages.length === 0) {
       log('No messages found');
       return;
+    }
+    
+    // Check if the LAST message is from us - if so, don't reply
+    if (messages.length > 0) {
+      const lastMsg = messages[messages.length - 1];
+      if (!lastMsg.isIncoming) {
+        log('Last message is from us, skipping (waiting for their reply)');
+        return;
+      }
     }
     
     // Get last incoming message
