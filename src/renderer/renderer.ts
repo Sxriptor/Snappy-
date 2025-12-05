@@ -986,14 +986,23 @@ function getBotScript(config: Config): string {
       const status = statusSpan.textContent.trim().toLowerCase();
       log('Message status: "' + status + '"');
 
-      // Skip if status indicates OUR outgoing message
+      // Skip if status indicates OUR outgoing message OR a message we already received/read
       const outgoingStatuses = ['delivered', 'sent', 'opened', 'viewed', 'screenshot', 'replayed'];
+      const alreadyReceivedStatuses = ['received']; // Message we already got but may not have opened yet
+
       if (outgoingStatuses.includes(status)) {
         log('Skipping - status "' + status + '" indicates our outgoing message');
         return false;
       }
 
-      // Accept: "received", "typing…", "new chat", or any other non-outgoing status
+      // CRITICAL: Also skip "received" - this means we already got their message
+      // If there's still an unread indicator with "received", it might be a stale indicator
+      if (alreadyReceivedStatuses.includes(status)) {
+        log('Skipping - status "' + status + '" means we already received this message');
+        return false;
+      }
+
+      // Accept: "typing…", "new chat", or any other status (but NOT received/delivered/sent/etc)
       // The key is that we already verified there's an UNREAD indicator above
       log('Status "' + status + '" with unread indicator = incoming message');
       return true;
