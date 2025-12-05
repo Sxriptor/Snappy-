@@ -918,111 +918,92 @@ function getBotScript(config: Config): string {
   // ============ END MEMORY SYSTEM ============
   
   // Scan the DOM to find clickable chat items
+  // SNAPCHAT USES: .O4POs for each chat row
   function findClickableChats() {
-    // Look for any clickable elements that look like chat items
-    const candidates = [];
-    
-    // Method 1: Find elements with role="button" or role="listitem" in sidebar area
-    document.querySelectorAll('[role="button"], [role="listitem"], [role="option"]').forEach(el => {
-      if (el.textContent && el.textContent.length > 0 && el.textContent.length < 200) {
-        candidates.push(el);
-      }
-    });
-    
-    // Method 2: Find divs that look like chat items (have a name-like text)
-    document.querySelectorAll('div[class], span[class]').forEach(el => {
-      const cls = (el.className || '').toLowerCase();
-      if (cls.includes('friend') || cls.includes('chat') || cls.includes('conversation') || 
-          cls.includes('contact') || cls.includes('list') || cls.includes('item')) {
-        if (el.textContent && el.textContent.length > 0 && el.textContent.length < 200) {
-          candidates.push(el);
-        }
-      }
-    });
-    
-    return candidates;
+    // EXACT SELECTOR: .O4POs = every chat row in sidebar
+    const chatRows = Array.from(document.querySelectorAll('.O4POs'));
+    log('Found ' + chatRows.length + ' chat rows (.O4POs)');
+    return chatRows;
   }
   
   // Check if a chat has a new INCOMING message (not our outgoing "Delivered" messages)
+  // SNAPCHAT USES:
+  //   .qFDXZ class on .O4POs = unread message
+  //   .GQKvA span = message status ("Received", "Sent", "Delivered", etc.)
   function isNewIncomingChat(element) {
-    const chatText = (element.textContent || '').toLowerCase();
-
-    // Check for explicit "new chat" or "new snap" text indicators
-    if (chatText.includes('new chat') || chatText.includes('new snap')) {
-      log('Found "new chat" text indicator');
-      // Still need to verify it's not an outgoing message
-    }
-
-    // Check for unread badge/dot indicators
-    const hasUnreadBadge = element.querySelector('[class*="unread"], [class*="Unread"], [class*="badge"], [class*="Badge"], [class*="dot"], [class*="Dot"]') !== null;
-    const hasUnreadClass = element.className.toLowerCase().includes('unread');
-
-    // Check for blue SVG indicator (common in Snapchat)
-    const svgs = element.querySelectorAll('svg');
-    let hasBlueIndicator = false;
-    for (const svg of svgs) {
-      const fill = svg.getAttribute('fill') || '';
-      const svgHTML = svg.outerHTML.toLowerCase();
-      // Check for blue color or specific classes that indicate unread
-      if (fill.includes('blue') || fill.includes('#0') || fill.includes('rgb(0') ||
-          svgHTML.includes('blue') || svgHTML.includes('unread')) {
-        hasBlueIndicator = true;
-        log('Found blue SVG indicator');
-        break;
-      }
-    }
-
-    // Check for small circular elements (notification dots)
-    let hasNotificationDot = false;
-    const smallElements = element.querySelectorAll('div, span');
-    for (const el of smallElements) {
-      const style = window.getComputedStyle(el);
-      const width = parseInt(style.width);
-      const height = parseInt(style.height);
-      const borderRadius = style.borderRadius;
-
-      // Small circular element (likely a notification dot)
-      if (width > 0 && width < 20 && height > 0 && height < 20 &&
-          (borderRadius.includes('50%') || borderRadius.includes('100%') || parseInt(borderRadius) > 5)) {
-        const bgColor = style.backgroundColor;
-        // Check if it has a visible background color (not transparent)
-        if (bgColor && bgColor !== 'transparent' && bgColor !== 'rgba(0, 0, 0, 0)') {
-          hasNotificationDot = true;
-          log('Found notification dot');
-          break;
-        }
-      }
-    }
-
-    // If no unread indicators at all, skip this chat
-    if (!hasUnreadBadge && !hasUnreadClass && !hasBlueIndicator && !hasNotificationDot &&
-        !chatText.includes('new chat') && !chatText.includes('new snap')) {
+    // STEP 0: Skip "My AI" chat - it shows "Received" but we don't want to reply to it
+    const username = getUsernameFromChatRow(element);
+    if (username && username.toLowerCase().includes('my ai')) {
+      log('Skipping "My AI" chat');
       return false;
     }
 
-    log('Found unread indicator on chat');
+    // STEP 1: Check if unread (has .qFDXZ class)
+    const isUnread = element.classList.contains('qFDXZ');
 
-    // CRITICAL: Check if the preview shows it's from US (outgoing) - MUST CHECK THIS BEFORE ANYTHING ELSE
-    // Snapchat shows "You:", "Delivered", "Sent", "Opened", "Viewed" for messages WE sent
-    const outgoingIndicators = ['you:', 'delivered', 'sent', 'opened', 'viewed'];
-    for (const indicator of outgoingIndicators) {
-      if (chatText.includes(indicator)) {
-        log('Skipping - preview shows outgoing indicator: "' + indicator + '"');
-        return false; // This is showing our last message, not theirs
+    // STEP 2: Also check for "New Chat" or "New Snap" text
+    const chatText = (element.textContent || '').toLowerCase();
+    const hasNewChatText = chatText.includes('new chat') || chatText.includes('new snap');
+
+    // STEP 3: Check for blue badge/indicator (some chats show this)
+    const hasUnreadBadge = element.querySelector('.HEkDJ') !== null ||
+                          element.querySelector('[class*="badge"]') !== null ||
+                          element.querySelector('[class*="unread"]') !== null;
+
+    if (!isUnread && !hasNewChatText && !hasUnreadBadge) {
+      // No unread indicator at all, skip
+      return false;
+    }
+
+    if (isUnread) {
+      log('Chat has unread indicator (.qFDXZ)');
+    }
+    if (hasNewChatText) {
+      log('Chat has "new chat" text');
+    }
+    if (hasUnreadBadge) {
+      log('Chat has unread badge element');
+    }
+
+    // STEP 4: Check the message status in .GQKvA > .tGtEY > .nonIntl (nested!)
+    const statusSpan = element.querySelector('.GQKvA .tGtEY .nonIntl') || element.querySelector('.GQKvA');
+    if (statusSpan) {
+      const status = statusSpan.textContent.trim().toLowerCase();
+      log('Message status: "' + status + '"');
+
+      // Skip if status indicates OUR outgoing message
+      const outgoingStatuses = ['delivered', 'sent', 'opened', 'viewed', 'screenshot', 'replayed'];
+      if (outgoingStatuses.includes(status)) {
+        log('Skipping - status "' + status + '" indicates our outgoing message');
+        return false;
+      }
+
+      // "Received" or other incoming status
+      if (status === 'received' || status === 'typing…' || status === 'new chat') {
+        log('Status "' + status + '" indicates incoming message');
+        return true;
       }
     }
 
-    // Has unread indicator and doesn't show outgoing message status
-    log('Chat appears to have new incoming message');
+    // If no status found but has unread indicator, assume incoming
+    log('Has unread indicator but no status - assuming incoming');
     return true;
   }
   
   // Debug function to analyze a chat element
   function debugChatElement(element, index) {
-    const text = (element.textContent || '').substring(0, 30);
+    const text = (element.textContent || '').substring(0, 50);
     const cls = (element.className || '').substring(0, 50);
-    const childCount = element.children.length;
-    log('Chat ' + index + ': "' + text + '" class="' + cls + '" children=' + childCount);
+
+    // Check key indicators
+    const hasQFDXZ = element.classList.contains('qFDXZ');
+    const username = getUsernameFromChatRow(element);
+    const statusSpan = element.querySelector('.GQKvA');
+    const status = statusSpan ? statusSpan.textContent.trim() : 'none';
+
+    log('Chat ' + index + ': user="' + (username || 'unknown') + '" status="' + status + '" unread=' + hasQFDXZ);
+    log('  Text: "' + text + '"');
+    log('  Classes: "' + cls + '"');
   }
   
   // Find the input field
@@ -1104,64 +1085,412 @@ function getBotScript(config: Config): string {
   }
   
   // Get visible text content from chat area
-  function getVisibleMessages() {
+  // expectedSender: The username we expect to see (to verify we're not reading stale cache)
+  function getVisibleMessages(expectedSender) {
     const messages = [];
-    const seen = new Set();
-    
-    // Try multiple selectors for messages
-    const selectors = [
-      '[class*="message" i]',
-      '[class*="Message"]', 
-      '[class*="bubble" i]',
-      '[class*="Bubble"]',
-      '[class*="chat-text"]',
-      '[class*="ChatText"]',
-      '[class*="content" i] p',
-      '[class*="content" i] span'
-    ];
-    
-    for (const selector of selectors) {
-      try {
-        document.querySelectorAll(selector).forEach(el => {
-          const text = el.textContent?.trim();
-          if (text && text.length > 1 && text.length < 1000 && !seen.has(text)) {
-            // Skip status/UI text
-            if (isStatusText(text)) return;
-            
-            seen.add(text);
-            
-            // Determine if incoming or outgoing
-            const rect = el.getBoundingClientRect();
-            const cls = (el.className || '').toLowerCase();
-            const parentCls = (el.parentElement?.className || '').toLowerCase();
-            const allCls = cls + ' ' + parentCls;
-            
-            // Check class names first (more reliable)
-            const isOutgoingByClass = allCls.includes('sent') || allCls.includes('outgoing') || 
-                                      allCls.includes('self') || allCls.includes('right') || allCls.includes('mine');
-            const isIncomingByClass = allCls.includes('received') || allCls.includes('incoming') || 
-                                      allCls.includes('other') || allCls.includes('left');
-            
-            // Check if we sent this message
-            const normalizedText = text.toLowerCase().trim();
-            const isSentByUs = sentMessages.has(normalizedText);
-            
-            let isIncoming;
-            if (isSentByUs || isOutgoingByClass) {
-              isIncoming = false;
-            } else if (isIncomingByClass) {
-              isIncoming = true;
-            } else {
-              // Fallback to position (less reliable)
-              isIncoming = rect.left < window.innerWidth * 0.4;
-            }
-            
-            messages.push({ text, isIncoming });
+    let detectedSender = null;
+
+    // SNAPCHAT MESSAGE STRUCTURE:
+    // <ul class="MibAa"> (main container)
+    //   <li class="T1yt2"> (date group - e.g. "December 4")
+    //     <div>
+    //       <ul class="ujRzj"> (messages for that date)
+    //   <li class="T1yt2"> (LAST = most recent date!)
+    //     <div>
+    //       <ul class="ujRzj"> (NEWEST messages - this is what we want!)
+
+    // STEP 1: Find the main container (ul.MibAa)
+    const mainContainer = document.querySelector('ul.MibAa');
+    let messageList = null;
+
+    if (mainContainer) {
+      log('Found main container (ul.MibAa)');
+
+      // STEP 2: Get LAST <li class="T1yt2"> (most recent date section)
+      const allDateGroups = Array.from(mainContainer.querySelectorAll(':scope > li.T1yt2'));
+      log('Found ' + allDateGroups.length + ' date groups');
+
+      if (allDateGroups.length > 0) {
+        const lastDateGroup = allDateGroups[allDateGroups.length - 1];
+        log('Using LAST date group (index ' + (allDateGroups.length - 1) + ') for newest messages');
+
+        // STEP 3: Find ul.ujRzj inside this last date group
+        const nestedUl = lastDateGroup.querySelector('div > ul.ujRzj');
+        if (nestedUl) {
+          messageList = nestedUl;
+          log('Found ul.ujRzj in last date group');
+        } else {
+          log('WARNING: No ul.ujRzj found in last date group!');
+        }
+      }
+    } else {
+      log('Main container (ul.MibAa) not found, trying fallback...');
+
+      // FALLBACK: Find largest visible ul.ujRzj (old method)
+      const allMessageLists = Array.from(document.querySelectorAll('ul.ujRzj'));
+      log('Found ' + allMessageLists.length + ' ul.ujRzj elements (fallback)');
+
+      let maxArea = 0;
+      for (const ul of allMessageLists) {
+        const rect = ul.getBoundingClientRect();
+        const area = rect.width * rect.height;
+
+        if (rect.width > 0 && rect.height > 200 && area > maxArea) {
+          const isInViewport = rect.top < window.innerHeight && rect.bottom > 0 &&
+                              rect.left < window.innerWidth && rect.right > 0;
+          if (isInViewport) {
+            messageList = ul;
+            maxArea = area;
           }
-        });
-      } catch(e) {}
+        }
+      }
+    }
+
+    if (!messageList) {
+      log('ERROR: Could not find any visible message list');
+      return messages;
+    }
+
+    // DEBUG: Log details about the selected message list
+    const listItemCount = messageList.querySelectorAll(':scope > li').length;
+    log('Selected message list with ' + listItemCount + ' message items');
+
+    // The messageList is now always a ul.ujRzj (nested), so process its direct <li> children
+    let messagesToProcess = [];
+    const messageItems = Array.from(messageList.querySelectorAll(':scope > li'));
+
+    for (const item of messageItems) {
+      messagesToProcess.push({
+        group: messageList.closest('li.T1yt2') || messageList.parentElement,
+        item: item,
+        index: messagesToProcess.length
+      });
+    }
+
+    // OLD FALLBACK CODE (kept for reference, but shouldn't be needed now)
+    if (messagesToProcess.length === 0) {
+      // messageList is the main container, need to find nested ul.ujRzj inside <li class="T1yt2">
+      const allTopLevelLis = Array.from(messageList.querySelectorAll(':scope > li.T1yt2, :scope > li'));
+      log('Found ' + allTopLevelLis.length + ' top-level message groups');
+      
+      if (allTopLevelLis.length === 0) {
+        log('No message groups found');
+        return messages;
+      }
+
+      // ONLY process the LAST 2 top-level groups (most recent messages)
+      // Each group is usually a date section (e.g., "December 5")
+      const groupsToCheck = Math.min(2, allTopLevelLis.length);
+      log('Processing last ' + groupsToCheck + ' message groups (most recent)');
+
+      for (let i = allTopLevelLis.length - 1; i >= allTopLevelLis.length - groupsToCheck; i--) {
+        const group = allTopLevelLis[i];
+        
+        // Within each group, find the nested <ul class="ujRzj"> inside a <div>
+        // Structure: <li class="T1yt2"> -> <div> -> <ul class="ujRzj"> -> <li> (messages)
+        let nestedUl = null;
+        
+        // Look for divs that contain ul.ujRzj
+        const divs = group.querySelectorAll('div');
+        for (const div of divs) {
+          // Check if this div has a direct child ul.ujRzj
+          const directUl = Array.from(div.children).find(child => 
+            child.tagName === 'UL' && child.classList.contains('ujRzj')
+          );
+          if (directUl) {
+            nestedUl = directUl;
+            log('Group ' + i + ': Found nested ul.ujRzj as direct child of div');
+            break;
+          }
+        }
+        
+        // If not found, look for any ul.ujRzj within the group
+        if (!nestedUl) {
+          const allUls = Array.from(group.querySelectorAll('ul.ujRzj'));
+          for (const ul of allUls) {
+            // Verify it's nested (inside a div within the group)
+            const parentDiv = ul.closest('div');
+            if (parentDiv && group.contains(parentDiv)) {
+              nestedUl = ul;
+              log('Group ' + i + ': Found nested ul.ujRzj via querySelector');
+              break;
+            }
+          }
+        }
+        
+        if (nestedUl) {
+          const nestedLis = Array.from(nestedUl.querySelectorAll(':scope > li'));
+          log('Group ' + i + ': Found nested ul.ujRzj with ' + nestedLis.length + ' message items');
+          
+          // Process each nested <li> in this group
+          for (const nestedLi of nestedLis) {
+            messagesToProcess.push({ group: group, item: nestedLi, index: messagesToProcess.length });
+          }
+        } else {
+          // Check if this group has a direct message bubble (no nested ul)
+          const directBubble = group.querySelector('div.KB4Aq');
+          if (directBubble) {
+            log('Group ' + i + ': Found direct message bubble (no nested ul)');
+            messagesToProcess.push({ group: group, item: group, index: messagesToProcess.length, isDirect: true });
+          }
+        }
+      }
     }
     
+    log('Total messages to process: ' + messagesToProcess.length);
+
+    // PRIORITY: Process ONLY the LAST group (most recent messages) first
+    // If the user just sent a message, we want to see their LATEST message, not old cached ones
+    if (messagesToProcess.length > 0) {
+      log('Prioritizing LAST message group (index ' + (messagesToProcess.length - 1) + ') as most recent');
+    }
+
+    // Process the last few messages (most recent first)
+    messagesToProcess = messagesToProcess.slice(-5).reverse(); // Get last 5, reverse to process newest first
+
+    for (const msgData of messagesToProcess) {
+      const messageItem = msgData.item;
+      const parentGroup = msgData.group;
+      
+      // Check if this message item or its parent group has a header (indicates sender)
+      const header = messageItem.querySelector('header.R1ne3') || parentGroup.querySelector('header.R1ne3');
+      
+      let isOutgoing = false;
+      let isIncoming = false;
+
+      if (header) {
+        // Has header - determine sender from header color and text
+        const headerStyle = window.getComputedStyle(header);
+        const headerColor = headerStyle.color || header.getAttribute('style') || '';
+        
+        // Check header color: blue typically means incoming, red might mean outgoing
+        // Also check the text content
+        const meSpan = header.querySelector('span.nonIntl');
+        const senderName = meSpan ? meSpan.textContent.trim() : '';
+        
+        // If sender is exactly "Me", it's our message (outgoing)
+        if (senderName === 'Me') {
+          isOutgoing = true;
+          isIncoming = false;
+          log('Message from header: "Me" [OUTGOING] color=' + headerColor);
+        } else if (senderName && senderName.length > 0) {
+          // Has a sender name that's not "Me", so it's incoming
+          isOutgoing = false;
+          isIncoming = true;
+
+          // Track the detected sender name
+          if (!detectedSender) {
+            detectedSender = senderName;
+          }
+
+          log('Message from header: "' + senderName + '" [INCOMING] color=' + headerColor);
+        } else {
+          // No sender name, use color as fallback
+          // Blue (rgb(14, 173, 255) or similar) usually means incoming
+          // Red (rgb(242, 60, 87)) means outgoing
+          const isBlue = headerColor.includes('rgb(14, 173, 255)') || headerColor.includes('rgb(14,173,255)') || 
+                        headerColor.includes('blue') || headerColor.includes('#0eadff');
+          const isRed = headerColor.includes('rgb(242, 60, 87)') || headerColor.includes('rgb(242,60,87)') ||
+                       headerColor.includes('red');
+          if (isBlue) {
+            isIncoming = true;
+            log('Message from header color: BLUE [INCOMING]');
+          } else if (isRed) {
+            isOutgoing = true;
+            log('Message from header color: RED [OUTGOING]');
+          }
+        }
+      }
+
+      // Find the actual message text in span.ogn1z.nonIntl (deep in nested structure)
+      // CRITICAL: Only look inside message bubbles (div.KB4Aq), NOT in headers
+      // The header has span.nonIntl with the username, but we want span.ogn1z inside div.KB4Aq
+      const messageBubbles = messageItem.querySelectorAll('div.KB4Aq');
+      const seenTexts = new Set();
+
+      if (messageBubbles.length === 0) {
+        log('No message bubbles found in this item');
+        continue;
+      }
+
+      for (const bubble of messageBubbles) {
+        // CRITICAL: Only look for message text in the specific path: div.KB4Aq > div.p8r1z > span.ogn1z.nonIntl
+        // This ensures we only get the actual message text, not header text
+        const p8r1zDiv = bubble.querySelector('div.p8r1z');
+        if (!p8r1zDiv) {
+          log('No div.p8r1z found in bubble, skipping');
+          continue;
+        }
+        
+        // Look specifically for span.ogn1z.nonIntl inside div.p8r1z
+        const messageTextSpans = p8r1zDiv.querySelectorAll('span.ogn1z.nonIntl[dir="auto"], span.ogn1z.nonIntl, span.ogn1z[dir="auto"]');
+        
+        if (messageTextSpans.length === 0) {
+          log('No span.ogn1z found in div.p8r1z');
+          continue;
+        }
+        
+        for (const span of messageTextSpans) {
+          // Triple-check: make sure this span is NOT inside a header (shouldn't be possible if we're in div.p8r1z, but be safe)
+          if (span.closest('header.R1ne3')) {
+            log('Skipping span inside header: "' + (span.textContent || '').substring(0, 20) + '"');
+            continue;
+          }
+          
+          // Make sure the span is actually inside the bubble we're processing
+          if (!bubble.contains(span)) {
+            log('Skipping span not in bubble');
+            continue;
+          }
+          
+          const text = span.textContent ? span.textContent.trim() : '';
+          
+          // Skip if empty
+          if (!text || text.length < 1) {
+            continue;
+          }
+          
+          // Skip very short text (1-2 characters) that might be usernames or single letters
+          if (text.length <= 2 && !text.match(/^[a-z]{2}$/i)) {
+            log('Skipping very short text (likely not a message): "' + text + '"');
+            continue;
+          }
+          
+          // Skip if already seen
+          if (seenTexts.has(text)) {
+            log('Skipping duplicate text: "' + text + '"');
+            continue;
+          }
+          
+          // Skip if status text
+          if (isStatusText(text)) {
+            log('Skipping status text: "' + text + '"');
+            continue;
+          }
+          
+          // Skip if this element has child elements with text (avoid duplicates)
+          const hasTextChildren = Array.from(span.children).some(child =>
+            child.textContent && child.textContent.trim().length > 0
+          );
+          if (hasTextChildren) {
+            log('Skipping span with text children: "' + text.substring(0, 30) + '"');
+            continue;
+          }
+
+          seenTexts.add(text);
+          
+          // If we determined direction from header, use it; otherwise check message bubble
+          let msgIsIncoming = isIncoming;
+          if (!isIncoming && !isOutgoing) {
+            // No header info, check the message bubble div.KB4Aq
+            const bubbleStyle = bubble.getAttribute('style') || '';
+            const bubbleColor = window.getComputedStyle(bubble).borderColor || '';
+            // Blue border (rgb(14, 173, 255)) usually means incoming
+            // Red border (rgb(242, 60, 87)) means outgoing
+            const isBlueBubble = bubbleStyle.includes('rgb(14, 173, 255)') || bubbleStyle.includes('rgb(14,173,255)') ||
+                                bubbleColor.includes('rgb(14, 173, 255)') || bubbleColor.includes('rgb(14,173,255)');
+            const isRedBubble = bubbleStyle.includes('rgb(242, 60, 87)') || bubbleStyle.includes('rgb(242,60,87)') ||
+                               bubbleColor.includes('rgb(242, 60, 87)') || bubbleColor.includes('rgb(242,60,87)');
+            if (isBlueBubble) {
+              msgIsIncoming = true;
+            } else if (isRedBubble) {
+              msgIsIncoming = false;
+            }
+          }
+          
+          const direction = msgIsIncoming ? 'INCOMING' : 'OUTGOING';
+          log('  -> ' + direction + ': "' + text + '"');
+          messages.push({ text, isIncoming: msgIsIncoming });
+        }
+      }
+    }
+
+    // If we didn't find messages, fall back to processing all groups more thoroughly
+    if (messages.length === 0) {
+      log('No messages found with new approach, processing all groups with fallback...');
+      for (const group of allTopLevelLis) {
+        // Find nested ul.ujRzj inside this group
+        const nestedUl = group.querySelector('div > ul.ujRzj, ul.ujRzj');
+        if (nestedUl) {
+          const nestedLis = Array.from(nestedUl.querySelectorAll(':scope > li'));
+          for (const nestedLi of nestedLis) {
+            const header = nestedLi.querySelector('header.R1ne3') || group.querySelector('header.R1ne3');
+            let isOutgoing = false;
+            let isIncoming = false;
+
+            if (header) {
+              const meSpan = header.querySelector('span.nonIntl');
+              const senderName = meSpan ? meSpan.textContent.trim() : '';
+              if (senderName === 'Me') {
+                isOutgoing = true;
+              } else if (senderName && senderName.length > 0) {
+                isIncoming = true;
+              } else {
+                // Check color
+                const headerColor = header.getAttribute('style') || '';
+                if (headerColor.includes('rgb(14, 173, 255)') || headerColor.includes('rgb(14,173,255)')) {
+                  isIncoming = true;
+                } else if (headerColor.includes('rgb(242, 60, 87)') || headerColor.includes('rgb(242,60,87)')) {
+                  isOutgoing = true;
+                }
+              }
+            }
+
+            // Only look inside message bubbles, not headers
+            const messageBubbles = nestedLi.querySelectorAll('div.KB4Aq');
+            const seenTexts = new Set();
+            for (const bubble of messageBubbles) {
+              const textSpans = bubble.querySelectorAll('span.ogn1z.nonIntl, span.ogn1z');
+              for (const span of textSpans) {
+                // Skip if inside header
+                if (span.closest('header.R1ne3')) continue;
+                
+                const text = span.textContent ? span.textContent.trim() : '';
+                if (!text || text.length < 1 || seenTexts.has(text) || isStatusText(text)) continue;
+                const hasTextChildren = Array.from(span.children).some(child =>
+                  child.textContent && child.textContent.trim().length > 0
+                );
+                if (hasTextChildren) continue;
+                seenTexts.add(text);
+                
+                // Determine direction if not already set
+                let msgIsIncoming = isIncoming;
+                if (!isIncoming && !isOutgoing) {
+                  const bubbleStyle = bubble.getAttribute('style') || '';
+                  if (bubbleStyle.includes('rgb(14, 173, 255)') || bubbleStyle.includes('rgb(14,173,255)')) {
+                    msgIsIncoming = true;
+                  } else if (bubbleStyle.includes('rgb(242, 60, 87)') || bubbleStyle.includes('rgb(242,60,87)')) {
+                    msgIsIncoming = false;
+                  }
+                }
+                
+                const direction = msgIsIncoming ? 'INCOMING' : 'OUTGOING';
+                log('  -> ' + direction + ': "' + text + '"');
+                messages.push({ text, isIncoming: msgIsIncoming });
+              }
+            }
+          }
+        }
+      }
+    }
+
+    log('Total messages collected: ' + messages.length);
+
+    // CRITICAL VERIFICATION: Check if the detected sender matches the expected one
+    if (expectedSender && detectedSender) {
+      // Clean both for comparison (remove emojis, extra spaces, etc.)
+      const cleanExpected = expectedSender.replace(/[^\w\s]/g, '').trim().toLowerCase();
+      const cleanDetected = detectedSender.replace(/[^\w\s]/g, '').trim().toLowerCase();
+
+      if (cleanDetected !== cleanExpected && !cleanExpected.includes(cleanDetected) && !cleanDetected.includes(cleanExpected)) {
+        log('WARNING: Sender mismatch! Expected "' + expectedSender + '" but found "' + detectedSender + '"');
+        log('This is likely stale/cached DOM! Returning empty to force retry.');
+        return []; // Return empty to indicate stale data
+      } else {
+        log('Sender verification passed: "' + detectedSender + '" matches expected "' + expectedSender + '"');
+      }
+    }
+
     return messages;
   }
   
@@ -1476,6 +1805,25 @@ function getBotScript(config: Config): string {
   }
   
   // Clean username by removing status indicators
+  // Extract username from chat row element
+  // SNAPCHAT USES: .mYSR9 > .FiLwP > .nonIntl (deeply nested!)
+  function getUsernameFromChatRow(chatRow) {
+    // Try nested path first (most accurate)
+    const nestedSpan = chatRow.querySelector('.mYSR9 .FiLwP .nonIntl');
+    if (nestedSpan) {
+      return nestedSpan.textContent.trim();
+    }
+
+    // Fallback to .mYSR9 directly
+    const usernameSpan = chatRow.querySelector('.mYSR9');
+    if (usernameSpan) {
+      return usernameSpan.textContent.trim();
+    }
+
+    return null;
+  }
+
+  // Legacy function - keep for compatibility but use getUsernameFromChatRow instead
   function cleanUsername(rawText) {
     // Status words that get appended to usernames in Snapchat
     const statusPatterns = [
@@ -1493,28 +1841,48 @@ function getBotScript(config: Config): string {
       /Today$/i,
       /Yesterday$/i
     ];
-    
+
     let cleaned = rawText.split(/[·\\n]/)[0].trim();
-    
+
     // Remove status suffixes
     for (const pattern of statusPatterns) {
       cleaned = cleaned.replace(pattern, '').trim();
     }
-    
+
     return cleaned;
   }
   
   // Process a chat
   async function processChat(chatEl, chatText) {
-    // Extract and clean username from chatText
-    const username = cleanUsername(chatText);
+    // Extract username directly from .mYSR9 span (exact selector)
+    const username = getUsernameFromChatRow(chatEl);
+
+    if (!username) {
+      // Fallback to old method if .mYSR9 not found
+      log('WARNING: .mYSR9 not found, falling back to text parsing');
+      const fallbackUsername = cleanUsername(chatText);
+      if (!fallbackUsername || fallbackUsername.length < 2) {
+        log('Invalid username, skipping');
+        return;
+      }
+      log('Opening chat with (fallback): ' + fallbackUsername);
+      // Continue with fallback username
+      return processChat_internal(chatEl, fallbackUsername);
+    }
+
     log('Opening chat with: ' + username);
-    
-    // Skip if username is empty or looks like a status
-    if (!username || username.length < 2) {
+
+    // Skip if username is empty or too short
+    if (username.length < 2) {
       log('Invalid username, skipping');
       return;
     }
+
+    return processChat_internal(chatEl, username);
+  }
+
+  // Internal chat processing (separated to avoid duplication)
+  async function processChat_internal(chatEl, username) {
     
     // Load and display memory for this user
     const memory = getUserMemory(username);
@@ -1528,11 +1896,60 @@ function getBotScript(config: Config): string {
     
     // Try clicking
     clickElement(chatEl);
-    log('Clicked, waiting for chat to load...');
+    log('Clicked chat: ' + username);
+
+    // CRITICAL: Wait for the DOM to fully update with NEW chat content
+    // Snapchat lazy-loads messages, so we need to wait AND scroll aggressively
+    log('Waiting for chat to load and messages to populate...');
     await sleep(2500);
+
+    // Force scroll to bottom MULTIPLE times with waits to trigger lazy loading
+    for (let scrollAttempt = 0; scrollAttempt < 3; scrollAttempt++) {
+      try {
+        // Find ALL ul.ujRzj and scroll the LARGEST one (most likely to be active)
+        const allLists = document.querySelectorAll('ul.ujRzj');
+        log('Scroll attempt ' + (scrollAttempt + 1) + ': found ' + allLists.length + ' ul.ujRzj elements');
+
+        let largestList = null;
+        let maxHeight = 0;
+
+        for (const list of allLists) {
+          const rect = list.getBoundingClientRect();
+          if (rect.height > maxHeight && rect.width > 0) {
+            maxHeight = rect.height;
+            largestList = list;
+          }
+        }
+
+        if (largestList) {
+          log('  Scrolling largest list (height=' + maxHeight.toFixed(0) + 'px)');
+
+          // Scroll to bottom
+          largestList.scrollTop = largestList.scrollHeight;
+
+          // Also try to find and scroll the parent container
+          const messageContainer = largestList.closest('[role="main"]') ||
+                                  largestList.closest('.chat-container') ||
+                                  largestList.parentElement;
+          if (messageContainer && messageContainer.scrollTo) {
+            messageContainer.scrollTop = messageContainer.scrollHeight;
+          }
+
+          // Wait for lazy load
+          await sleep(1200);
+        } else {
+          log('  No visible list found (all have height=0)');
+        }
+      } catch(e) {
+        log('Scroll attempt ' + (scrollAttempt + 1) + ' FAILED: ' + e);
+      }
+    }
+
+    log('Finished scrolling, messages should be loaded now');
     
     // Get messages using multiple methods
-    let messages = getVisibleMessages();
+    // Pass expected username to verify we're not reading stale cache
+    let messages = getVisibleMessages(username);
     log('Method 1 found ' + messages.length + ' messages');
     
     // If no messages found, try getting all text
@@ -1550,12 +1967,24 @@ function getBotScript(config: Config): string {
     }
     
     log('Total messages: ' + messages.length);
-    
+
     if (messages.length === 0) {
-      log('No messages found');
+      log('No messages found - DOM may not have loaded yet');
       return;
     }
-    
+
+    // CRITICAL CHECK: If ALL messages are from us, the DOM is stale/cached
+    const incomingCount = messages.filter(m => m.isIncoming).length;
+    const outgoingCount = messages.filter(m => !m.isIncoming).length;
+    log('Message breakdown: ' + incomingCount + ' incoming, ' + outgoingCount + ' outgoing');
+
+    if (incomingCount === 0 && outgoingCount > 0) {
+      log('WARNING: All messages are from us - DOM is showing stale/cached data!');
+      log('Chat was marked as "New Chat" or "Received" but we only see our own messages.');
+      log('Possible causes: 1) DOM not fully loaded, 2) Message was deleted, 3) False unread indicator');
+      return;
+    }
+
     // Check if the LAST message is from us - if so, don't reply
     if (messages.length > 0) {
       const lastMsg = messages[messages.length - 1];
@@ -1665,15 +2094,15 @@ function getBotScript(config: Config): string {
     
     const chats = findClickableChats();
     log('Found ' + chats.length + ' chat items');
-    
-    // Debug first 3 chats on first poll
-    if (pollCount === 1 && chats.length > 0) {
-      log('Debugging first 3 chats:');
-      for (let i = 0; i < Math.min(3, chats.length); i++) {
+
+    // Debug first 5 chats on every poll (to see what we're detecting)
+    if (chats.length > 0) {
+      log('Showing first ' + Math.min(5, chats.length) + ' chats:');
+      for (let i = 0; i < Math.min(5, chats.length); i++) {
         debugChatElement(chats[i], i);
       }
     }
-    
+
     // Find chats with unread
     const unreadChats = [];
     for (const chat of chats) {
