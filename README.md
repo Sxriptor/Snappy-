@@ -2,11 +2,11 @@
   <picture>
     <source
       media="(prefers-color-scheme: dark)"
-      srcset="https://github.com/user-attachments/assets/5fd5f5ac-87a2-4051-83e2-8a3a52946e46"
+      srcset="https://github.com/user-attachments/assets/"
     >
     <img
       alt="SNAPPY"
-      src="https://github.com/user-attachments/assets/5fd5f5ac-87a2-4051-83e2-8a3a52946e46"
+      src="https://github.com/user-attachments/assets/"
       width="300"
       height="100"
       style="margin-bottom:-4px;"

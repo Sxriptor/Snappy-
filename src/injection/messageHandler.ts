@@ -4,7 +4,7 @@
  */
 
 import { IncomingMessage, Configuration, DEFAULT_CONFIG } from '../types';
-import { initialize, log, getConfig } from './bot';
+import { initialize, log, getConfig, hasRepliedToMessage, markMessageReplied } from './bot';
 import { attachDOMWatcher, disconnectWatcher } from './domWatcher';
 import { processNewMessages } from './messageDetector';
 import { decideReply, setConfig as setBrainConfig, setLogCallback as setBrainLogCallback } from '../brain/brain';
@@ -74,6 +74,12 @@ function initializeComponents(): void {
 async function handleIncomingMessage(message: IncomingMessage): Promise<void> {
   log(`Processing message from ${message.sender}`);
 
+  // Check if we've already replied to this exact message
+  if (hasRepliedToMessage(message.messageId)) {
+    log(`Already replied to message ${message.messageId.substring(0, 50)}..., skipping`);
+    return;
+  }
+
   // Check active hours
   if (!isWithinActiveHours(config.activeHours)) {
     log('Outside active hours, skipping');
@@ -98,6 +104,8 @@ async function handleIncomingMessage(message: IncomingMessage): Promise<void> {
   const result = await typeAndSendWithRetry(reply, message.sender);
 
   if (result.success) {
+    // Mark this message as replied to prevent future duplicate replies
+    markMessageReplied(message.messageId);
     rateLimiter.recordReply();
     log(`Reply sent successfully to ${message.sender}`);
   } else {

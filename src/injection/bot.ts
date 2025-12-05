@@ -8,6 +8,7 @@ import { Configuration, IncomingMessage, DEFAULT_CONFIG } from '../types';
 // Global state
 let config: Configuration = DEFAULT_CONFIG;
 let seenMessages: Set<string> = new Set();
+let repliedMessages: Set<string> = new Set(); // Track messages we've already replied to
 let isInitialized: boolean = false;
 let currentSite: string = '';
 
@@ -92,6 +93,26 @@ function markMessageSeen(messageId: string): void {
 }
 
 /**
+ * Check if we've already replied to a message
+ */
+function hasRepliedToMessage(messageId: string): boolean {
+  return repliedMessages.has(messageId);
+}
+
+/**
+ * Mark a message as replied to prevent duplicate replies
+ */
+function markMessageReplied(messageId: string): void {
+  repliedMessages.add(messageId);
+
+  // Limit set size to prevent memory growth
+  if (repliedMessages.size > 1000) {
+    const entries = Array.from(repliedMessages);
+    repliedMessages = new Set(entries.slice(-500));
+  }
+}
+
+/**
  * Generate a unique message ID from message content
  * Note: We don't include timestamp to ensure the same message always gets the same ID,
  * preventing duplicate processing of the same message across multiple DOM mutations
@@ -123,12 +144,13 @@ function initialize(): boolean {
   // Load configuration
   loadConfig();
 
-  // Clear seen messages
+  // Clear seen messages and replied messages
   seenMessages = new Set();
+  repliedMessages = new Set();
 
   isInitialized = true;
   log('Snappy Bot initialized successfully');
-  
+
   return true;
 }
 
@@ -162,10 +184,13 @@ export {
   loadConfig,
   isMessageSeen,
   markMessageSeen,
+  hasRepliedToMessage,
+  markMessageReplied,
   generateMessageId,
   getConfig,
   getCurrentSite,
   isReady,
   seenMessages,
+  repliedMessages,
   config
 };
