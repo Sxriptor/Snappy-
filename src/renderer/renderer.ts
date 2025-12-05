@@ -1593,14 +1593,20 @@ function getBotScript(config: Config): string {
   // Type a message
   async function typeMessage(text) {
     const input = findInput();
-    if (!input) { 
-      log('ERROR: Input not found'); 
-      return false; 
+    if (!input) {
+      log('ERROR: Input not found');
+      return false;
     }
-    
+
     log('Typing into: ' + input.tagName);
-    input.focus();
-    
+
+    // CRITICAL: Click into the input field first to show natural user behavior
+    // This ensures Snapchat sees an active user clicking before typing
+    window.focus(); // Ensure window has focus
+    input.click(); // Click the input field
+    await sleep(100); // Brief pause after click (natural behavior)
+    input.focus(); // Then focus it
+
     // Clear first
     if (input.getAttribute('contenteditable') === 'true') {
       input.innerHTML = '';
@@ -1768,20 +1774,37 @@ function getBotScript(config: Config): string {
   
   // Try to click an element properly
   function clickElement(el) {
+    // CRITICAL: Ensure window has focus first (Snapchat detects this)
+    // Focus the window to show user presence
+    window.focus();
+
+    // Focus the document body to ensure clicks register
+    if (document.body) {
+      document.body.focus();
+    }
+
+    // Focus the element itself if possible
+    if (el.focus) {
+      el.focus();
+    }
+
     // Try multiple click methods
-    
+
     // Method 1: Direct click
     el.click();
-    
-    // Method 2: Dispatch mouse events
+
+    // Method 2: Dispatch mouse events (more realistic to Snapchat)
     const rect = el.getBoundingClientRect();
     const centerX = rect.left + rect.width / 2;
     const centerY = rect.top + rect.height / 2;
-    
+
+    // Dispatch full mouse event sequence with proper focus
+    el.dispatchEvent(new MouseEvent('mouseover', { bubbles: true, clientX: centerX, clientY: centerY }));
+    el.dispatchEvent(new MouseEvent('mouseenter', { bubbles: true, clientX: centerX, clientY: centerY }));
     el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, clientX: centerX, clientY: centerY }));
     el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, clientX: centerX, clientY: centerY }));
     el.dispatchEvent(new MouseEvent('click', { bubbles: true, clientX: centerX, clientY: centerY }));
-    
+
     // Method 3: Try clicking a child button or link if exists
     const clickable = el.querySelector('button, a, [role="button"]');
     if (clickable) {
@@ -1960,6 +1983,24 @@ function getBotScript(config: Config): string {
     // Snapchat lazy-loads messages, so we need to wait AND scroll aggressively
     log('Waiting for chat to load and messages to populate...');
     await sleep(2500);
+
+    // CRITICAL: Click into the input field to ensure Snapchat detects user presence
+    // This prevents the "doesn't seem to be present" detection
+    try {
+      const inputField = document.querySelector('[contenteditable="true"], textarea, input[type="text"]');
+      if (inputField) {
+        window.focus(); // Ensure window has focus
+        inputField.focus(); // Focus the input field
+        inputField.click(); // Click it for good measure
+        log('Focused into input field to show presence');
+      } else {
+        log('Warning: Could not find input field to focus');
+      }
+    } catch (e) {
+      log('Error focusing input field: ' + e.message);
+    }
+
+    await sleep(500); // Brief pause after focusing
 
     // Force scroll to bottom MULTIPLE times with waits to trigger lazy loading
     await scrollToLatestMessages();
