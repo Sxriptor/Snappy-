@@ -1106,21 +1106,32 @@ function getBotScript(config: Config): string {
     if (mainContainer) {
       log('Found main container (ul.MibAa)');
 
-      // STEP 2: Get LAST <li class="T1yt2"> (most recent date section)
+      // STEP 2: Get ALL <li class="T1yt2"> (these can be date headers OR message groups)
       const allDateGroups = Array.from(mainContainer.querySelectorAll(':scope > li.T1yt2'));
-      log('Found ' + allDateGroups.length + ' date groups');
+      log('Found ' + allDateGroups.length + ' li.T1yt2 elements');
 
-      if (allDateGroups.length > 0) {
-        const lastDateGroup = allDateGroups[allDateGroups.length - 1];
-        log('Using LAST date group (index ' + (allDateGroups.length - 1) + ') for newest messages');
+      // Filter to only those that have ul.ujRzj (actual message groups, not just date headers)
+      const messageGroups = allDateGroups.filter(li => li.querySelector('ul.ujRzj') !== null);
+      log('Filtered to ' + messageGroups.length + ' groups with messages');
 
-        // STEP 3: Find ul.ujRzj inside this last date group
-        const nestedUl = lastDateGroup.querySelector('div > ul.ujRzj');
+      if (messageGroups.length > 0) {
+        // Get the LAST message group
+        const lastGroup = messageGroups[messageGroups.length - 1];
+        log('Using LAST message group (index ' + (messageGroups.length - 1) + ')');
+
+        // DEBUG: Show what's in this group
+        const header = lastGroup.querySelector('header.R1ne3 span.nonIntl');
+        const sender = header ? header.textContent.trim() : 'unknown';
+        log('  Sender in last group: "' + sender + '"');
+
+        // STEP 3: Find ul.ujRzj inside this last group
+        const nestedUl = lastGroup.querySelector('ul.ujRzj');
         if (nestedUl) {
           messageList = nestedUl;
-          log('Found ul.ujRzj in last date group');
+          const msgCount = nestedUl.querySelectorAll(':scope > li').length;
+          log('  Found ul.ujRzj with ' + msgCount + ' messages');
         } else {
-          log('WARNING: No ul.ujRzj found in last date group!');
+          log('WARNING: No ul.ujRzj found in last group!');
         }
       }
     } else {
@@ -1245,8 +1256,8 @@ function getBotScript(config: Config): string {
       log('Prioritizing LAST message group (index ' + (messagesToProcess.length - 1) + ') as most recent');
     }
 
-    // Process the last few messages (most recent first)
-    messagesToProcess = messagesToProcess.slice(-5).reverse(); // Get last 5, reverse to process newest first
+    // Process the last few messages (keep in chronological order: oldest -> newest)
+    messagesToProcess = messagesToProcess.slice(-5); // Get last 5 messages
 
     for (const msgData of messagesToProcess) {
       const messageItem = msgData.item;
@@ -1881,9 +1892,16 @@ function getBotScript(config: Config): string {
     return processChat_internal(chatEl, username);
   }
 
+  // Track which chat we're currently monitoring
+  let currentMonitoredChat = {
+    username: null,
+    lastMessageId: null,
+    checkInterval: null
+  };
+
   // Internal chat processing (separated to avoid duplication)
   async function processChat_internal(chatEl, username) {
-    
+
     // Load and display memory for this user
     const memory = getUserMemory(username);
     if (memory.messages.length > 0) {
@@ -1893,7 +1911,7 @@ function getBotScript(config: Config): string {
     } else {
       log('No previous memory for ' + username);
     }
-    
+
     // Try clicking
     clickElement(chatEl);
     log('Clicked chat: ' + username);
@@ -1904,6 +1922,19 @@ function getBotScript(config: Config): string {
     await sleep(2500);
 
     // Force scroll to bottom MULTIPLE times with waits to trigger lazy loading
+    await scrollToLatestMessages();
+
+    log('Finished scrolling, messages should be loaded now');
+
+    // Process the initial messages
+    await processCurrentChatMessages(username);
+
+    // Start monitoring this chat for new messages
+    startChatMonitoring(username);
+  }
+
+  // Helper function to scroll to latest messages
+  async function scrollToLatestMessages() {
     for (let scrollAttempt = 0; scrollAttempt < 3; scrollAttempt++) {
       try {
         // Find ALL ul.ujRzj and scroll the LARGEST one (most likely to be active)
@@ -1944,19 +1975,20 @@ function getBotScript(config: Config): string {
         log('Scroll attempt ' + (scrollAttempt + 1) + ' FAILED: ' + e);
       }
     }
+  }
 
-    log('Finished scrolling, messages should be loaded now');
-    
+  // Process messages in the currently open chat
+  async function processCurrentChatMessages(username) {
     // Get messages using multiple methods
     // Pass expected username to verify we're not reading stale cache
     let messages = getVisibleMessages(username);
     log('Method 1 found ' + messages.length + ' messages');
-    
+
     // If no messages found, try getting all text
     if (messages.length === 0) {
       const allText = getAllChatText();
       log('Method 2 found ' + allText.length + ' text elements');
-      
+
       // Convert to messages format, using proper outgoing detection
       messages = allText
         .filter(t => !isStatusText(t.text))
@@ -1965,7 +1997,7 @@ function getBotScript(config: Config): string {
           isIncoming: !t.isOutgoing && !sentMessages.has(t.text.toLowerCase().trim())
         }));
     }
-    
+
     log('Total messages: ' + messages.length);
 
     if (messages.length === 0) {
@@ -1993,7 +2025,7 @@ function getBotScript(config: Config): string {
         return;
       }
     }
-    
+
     // Get last incoming message
     let lastIncoming = null;
     for (let i = messages.length - 1; i >= 0; i--) {
@@ -2002,35 +2034,35 @@ function getBotScript(config: Config): string {
         break;
       }
     }
-    
+
     if (!lastIncoming) {
       log('No incoming message found');
       return;
     }
-    
+
     // Skip if this is actually a message we sent
     const normalizedIncoming = lastIncoming.toLowerCase().trim();
     if (sentMessages.has(normalizedIncoming)) {
       log('Skipping - this is our own message');
       return;
     }
-    
+
     log('Last incoming: ' + lastIncoming.substring(0, 50));
-    
+
     // Check if already replied (use cleaned username + full normalized message for consistent ID)
     const msgId = username + '::' + normalizedIncoming;
     if (seenMessages.has(msgId)) {
       log('Already processed this exact message');
       return;
     }
-    
+
     // Also check if we recently replied to this user (within last 30 seconds)
     const recentReplyKey = 'recent::' + username;
     if (seenMessages.has(recentReplyKey)) {
       log('Recently replied to this user, waiting...');
       return;
     }
-    
+
     // Find reply (now async with AI support)
     const reply = await findReply(lastIncoming, username);
     if (!reply) {
@@ -2038,7 +2070,7 @@ function getBotScript(config: Config): string {
       seenMessages.add(msgId);
       return;
     }
-    
+
     // Random skip
     if (Math.random() < (CONFIG.randomSkipProbability || 0.15)) {
       log('Random skip');
@@ -2083,7 +2115,86 @@ function getBotScript(config: Config): string {
       log('Memory for ' + username + ': ' + summary.total + ' msgs (' + summary.fromThem + ' from them, ' + summary.fromMe + ' from me)');
     }
   }
-  
+
+  // Start monitoring the currently open chat for new messages
+  function startChatMonitoring(username) {
+    // Clear any existing monitor
+    if (currentMonitoredChat.checkInterval) {
+      clearInterval(currentMonitoredChat.checkInterval);
+      log('Stopped monitoring previous chat: ' + currentMonitoredChat.username);
+    }
+
+    log('Starting to monitor chat: ' + username);
+    currentMonitoredChat.username = username;
+    currentMonitoredChat.lastMessageId = null;
+
+    // Check for new messages every 3 seconds
+    currentMonitoredChat.checkInterval = setInterval(async () => {
+      if (!window.__SNAPPY_RUNNING__) {
+        clearInterval(currentMonitoredChat.checkInterval);
+        return;
+      }
+
+      try {
+        // Re-scan the DOM for messages
+        let messages = getVisibleMessages(username);
+
+        if (messages.length === 0) {
+          return;
+        }
+
+        // Find the last incoming message
+        let lastIncoming = null;
+        for (let i = messages.length - 1; i >= 0; i--) {
+          if (messages[i].isIncoming) {
+            lastIncoming = messages[i].text;
+            break;
+          }
+        }
+
+        if (!lastIncoming) {
+          return;
+        }
+
+        // Create a unique ID for this message
+        const msgId = username + '::' + lastIncoming.toLowerCase().trim();
+
+        // Check if this is a NEW message we haven't seen before
+        if (currentMonitoredChat.lastMessageId === null) {
+          // First check - just record the message ID
+          currentMonitoredChat.lastMessageId = msgId;
+          log('[Monitor] Initial message recorded: ' + lastIncoming.substring(0, 30));
+        } else if (currentMonitoredChat.lastMessageId !== msgId) {
+          // NEW MESSAGE DETECTED!
+          log('[Monitor] NEW MESSAGE DETECTED!');
+          currentMonitoredChat.lastMessageId = msgId;
+
+          // Scroll to see the latest
+          await scrollToLatestMessages();
+
+          // Wait a moment for DOM to settle
+          await sleep(500);
+
+          // Process the new message
+          await processCurrentChatMessages(username);
+        }
+      } catch (e) {
+        log('[Monitor] Error checking for new messages: ' + e);
+      }
+    }, 3000); // Check every 3 seconds
+  }
+
+  // Stop monitoring when we leave the chat
+  function stopChatMonitoring() {
+    if (currentMonitoredChat.checkInterval) {
+      clearInterval(currentMonitoredChat.checkInterval);
+      log('Stopped monitoring chat: ' + currentMonitoredChat.username);
+      currentMonitoredChat.username = null;
+      currentMonitoredChat.lastMessageId = null;
+      currentMonitoredChat.checkInterval = null;
+    }
+  }
+
   // Main poll function
   let pollCount = 0;
   async function poll() {
@@ -2112,15 +2223,23 @@ function getBotScript(config: Config): string {
     }
 
     log('Unread chats: ' + unreadChats.length);
-    
+
     // Only process chats with actual unread indicators
     if (unreadChats.length === 0) {
       log('No unread messages to process');
       return;
     }
-    
-    // Process first unread chat
+
+    // Check if the unread chat is from someone different than who we're monitoring
     const chat = unreadChats[0];
+    const username = getUsernameFromChatRow(chat);
+
+    if (currentMonitoredChat.username && username !== currentMonitoredChat.username) {
+      log('New unread chat from different user, switching from ' + currentMonitoredChat.username + ' to ' + username);
+      stopChatMonitoring();
+    }
+
+    // Process first unread chat
     const chatText = chat.textContent?.trim().substring(0, 50) || 'Unknown';
     await processChat(chat, chatText);
   }
