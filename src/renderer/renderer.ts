@@ -793,8 +793,10 @@ function getBotScript(config: Config): string {
   
   const CONFIG = ${JSON.stringify(config)};
   const seenMessages = new Set();
+  const lastRepliedMessage = new Map(); // Track last message we replied to per user: username -> messageText
   let pollInterval = null;
-  
+  let isProcessing = false; // Lock to prevent concurrent processing
+
   // Log storage for polling
   window.__SNAPPY_LOGS__ = window.__SNAPPY_LOGS__ || [];
   
@@ -980,35 +982,50 @@ function getBotScript(config: Config): string {
       log('Chat has unread badge element');
     }
 
-    // STEP 4: Check the message status - must NOT be an outgoing status
+    // STEP 4: Check the message status - must NOT be an outgoing status or already-handled status
     const statusSpan = element.querySelector('.GQKvA .tGtEY .nonIntl') || element.querySelector('.GQKvA');
     if (statusSpan) {
       const status = statusSpan.textContent.trim().toLowerCase();
       log('Message status: "' + status + '"');
 
-      // Skip if status indicates OUR outgoing message OR a message we already received/read
-      const outgoingStatuses = ['delivered', 'sent', 'opened', 'viewed', 'screenshot', 'replayed'];
-      const alreadyReceivedStatuses = ['received']; // Message we already got but may not have opened yet
+      // CRITICAL: Skip BOTH outgoing statuses AND already-received statuses
+      // Outgoing = we sent it to them
+      // Received/Delivered = either we got their message OR they got ours (ambiguous!)
+      const skipStatuses = [
+        'delivered',   // Message was delivered (either direction - skip to be safe)
+        'sent',        // We sent a message
+        'opened',      // They opened our message
+        'viewed',      // They viewed our message
+        'screenshot',  // They screenshotted
+        'replayed',    // They replayed
+        'received'     // Message received (either direction - skip to be safe)
+      ];
 
-      if (outgoingStatuses.includes(status)) {
-        log('Skipping - status "' + status + '" indicates our outgoing message');
+      if (skipStatuses.includes(status)) {
+        log('Skipping - status "' + status + '" indicates already-handled or outgoing message');
         return false;
       }
 
-      // CRITICAL: Also skip "received" - this means we already got their message
-      // If there's still an unread indicator with "received", it might be a stale indicator
-      if (alreadyReceivedStatuses.includes(status)) {
-        log('Skipping - status "' + status + '" means we already received this message');
-        return false;
+      // ONLY accept clearly new/incoming statuses
+      const acceptedStatuses = [
+        'typing',
+        'typing...',
+        'typing…',
+        'new chat',
+        'new snap'
+      ];
+
+      if (acceptedStatuses.some(s => status.includes(s))) {
+        log('Status "' + status + '" with unread indicator = NEW incoming message');
+        return true;
       }
 
-      // Accept: "typing…", "new chat", or any other status (but NOT received/delivered/sent/etc)
-      // The key is that we already verified there's an UNREAD indicator above
-      log('Status "' + status + '" with unread indicator = incoming message');
-      return true;
+      // If status is not in skip list OR accept list, log and skip to be safe
+      log('Unknown status "' + status + '" - skipping to be safe');
+      return false;
     }
 
-    // Has unread indicator but no status - accept as incoming
+    // Has unread indicator but no status - accept as incoming (might be a new message loading)
     log('Has unread indicator but no status - assuming incoming');
     return true;
   }
@@ -2072,32 +2089,35 @@ function getBotScript(config: Config): string {
 
     log('Last incoming: ' + lastIncoming.substring(0, 50));
 
-    // Check if already replied (use cleaned username + full normalized message for consistent ID)
-    const msgId = username + '::' + normalizedIncoming;
-    if (seenMessages.has(msgId)) {
-      log('Already processed this exact message');
+    // Check if this is the same message we last replied to for this user
+    const lastReplied = lastRepliedMessage.get(username);
+    if (lastReplied && lastReplied === normalizedIncoming) {
+      log('Already replied to this exact message from ' + username + ': "' + lastReplied.substring(0, 30) + '"');
       return;
     }
 
-    // Also check if we recently replied to this user (within last 30 seconds)
-    const recentReplyKey = 'recent::' + username;
-    if (seenMessages.has(recentReplyKey)) {
-      log('Recently replied to this user, waiting...');
-      return;
+    // Log what we last replied to for debugging
+    if (lastReplied) {
+      log('Last replied message from ' + username + ' was: "' + lastReplied.substring(0, 30) + '"');
+      log('Current message: "' + normalizedIncoming.substring(0, 30) + '" - NEW, will process');
+    } else {
+      log('First message from ' + username + ', will process');
     }
 
     // Find reply (now async with AI support)
     const reply = await findReply(lastIncoming, username);
     if (!reply) {
       log('No matching reply');
-      seenMessages.add(msgId);
+      // Still mark as replied so we don't keep trying to reply to a message with no match
+      lastRepliedMessage.set(username, normalizedIncoming);
       return;
     }
 
     // Random skip
     if (Math.random() < (CONFIG.randomSkipProbability || 0.15)) {
       log('Random skip');
-      seenMessages.add(msgId);
+      // Mark as replied so we don't process again
+      lastRepliedMessage.set(username, normalizedIncoming);
       return;
     }
     
@@ -2116,23 +2136,20 @@ function getBotScript(config: Config): string {
     
     if (sent) {
       log('SUCCESS: Sent reply: ' + reply);
-      seenMessages.add(msgId);
-      
+
+      // Track this as the last message we replied to for this user
+      lastRepliedMessage.set(username, normalizedIncoming);
+      log('Saved last replied message for ' + username + ': "' + normalizedIncoming.substring(0, 30) + '"');
+
       // Track this message as sent by us (to avoid replying to ourselves)
       sentMessages.add(reply.toLowerCase().trim());
-      
-      // Mark that we recently replied to this user (prevents rapid re-replies)
-      const recentReplyKey = 'recent::' + username;
-      seenMessages.add(recentReplyKey);
-      // Clear the recent flag after 30 seconds
-      setTimeout(() => seenMessages.delete(recentReplyKey), 30000);
-      
+
       // Save their message to memory (username already cleaned above)
       addToMemory(username, lastIncoming, true);
-      
+
       // Save our reply to memory
       addToMemory(username, reply, false);
-      
+
       // Log memory summary
       const summary = getMemorySummary(username);
       log('Memory for ' + username + ': ' + summary.total + ' msgs (' + summary.fromThem + ' from them, ' + summary.fromMe + ' from me)');
@@ -2222,8 +2239,14 @@ function getBotScript(config: Config): string {
   let pollCount = 0;
   async function poll() {
     if (!window.__SNAPPY_RUNNING__) return;
+
+    // Check if already processing - if so, skip this poll cycle
+    if (isProcessing) {
+      log('Already processing, skipping this poll cycle');
+      return;
+    }
+
     pollCount++;
-    
     log('--- Poll #' + pollCount + ' ---');
     
     const chats = findClickableChats();
@@ -2262,9 +2285,15 @@ function getBotScript(config: Config): string {
       stopChatMonitoring();
     }
 
-    // Process first unread chat
-    const chatText = chat.textContent?.trim().substring(0, 50) || 'Unknown';
-    await processChat(chat, chatText);
+    // Process first unread chat (set lock to prevent concurrent processing)
+    isProcessing = true;
+    try {
+      const chatText = chat.textContent?.trim().substring(0, 50) || 'Unknown';
+      await processChat(chat, chatText);
+    } finally {
+      isProcessing = false;
+      log('Finished processing, ready for next poll');
+    }
   }
   
   // Start
