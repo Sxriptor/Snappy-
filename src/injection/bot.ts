@@ -93,9 +93,11 @@ function markMessageSeen(messageId: string): void {
 
 /**
  * Generate a unique message ID from message content
+ * Note: We don't include timestamp to ensure the same message always gets the same ID,
+ * preventing duplicate processing of the same message across multiple DOM mutations
  */
 function generateMessageId(sender: string, text: string, timestamp: number): string {
-  return `${sender}-${text.substring(0, 50)}-${timestamp}`;
+  return `${sender}-${text.substring(0, 100)}`;
 }
 
 /**

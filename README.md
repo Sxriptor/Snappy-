@@ -1,14 +1,145 @@
-# Snappy
+<h1 align="center">
+  <picture>
+    <source
+      media="(prefers-color-scheme: dark)"
+      srcset="https://github.com/user-attachments/assets/5fd5f5ac-87a2-4051-83e2-8a3a52946e46"
+    >
+    <img
+      alt="SNAPPY"
+      src="https://github.com/user-attachments/assets/5fd5f5ac-87a2-4051-83e2-8a3a52946e46"
+      width="300"
+      height="100"
+      style="margin-bottom:-4px;"
+    >
+  </picture>
+  <br>
+  <small>Automation • Speed • Scale</small>
+</h1>
 
-A desktop automation assistant for web-based messaging platforms. Snappy is an Electron app that opens messaging sites (Snapchat Web, Twitter DMs, etc.) in a browser window, lets you log in manually, then injects automation scripts that watch for incoming messages and send human-like replies based on configurable rules.
+<p align="center">
+  <img src="https://img.shields.io/badge/version-1.0.0-white">
+  <img src="https://img.shields.io/badge/status-active-white">
+  <img src="https://img.shields.io/badge/platform-Windows 10/11-white">
+  <img src="https://img.shields.io/badge/discord-78_online-white">
+</p>
 
-## Features
+---
 
-- **Universal**: Works on any web messaging platform
-- **Manual Auth**: You handle login, 2FA, captchas - Snappy handles the rest
-- **Rule-Based Replies**: Simple keyword matching with support for future AI integration
-- **Human-Like Behavior**: Realistic typing delays, random pauses, rate limiting
-- **Local-First**: Runs on your machine with your own accounts
+# 🚀 SNAPPY  
+**Multi-session web automation at scale.**  
+SNAPPY opens, controls, and automates actions inside platforms like **Snapchat Web, Twitter, Instagram**, and more — letting you run **tens or hundreds** of simultaneous browser sessions with smart reply logic and DOM-aware interaction.
+
+> **Think of SNAPPY as your high-speed UI robot:  
+It reads the page, detects states, and instantly performs actions for you.**
+
+---
+
+## 🔥 What SNAPPY Can Do
+
+### ✅ **Real Browser Automation**
+SNAPPY doesn’t fake API calls — it interacts with the actual website UI using DOM selectors, dynamic element detection, and behavioral timing.
+
+- Reads unread messages  
+- Detects whether a message is from you or them  
+- Sends automated or AI-generated responses  
+- Handles multiple tabs / windows without slowing down  
+- Supports custom logic per platform
+
+---
+
+### ⚡ **Massively Parallel Sessions**
+Run **10, 50, or 100+ sessions** (Snapchat, Twitter, IG, anything).  
+Each one operates independently with its own logic and message flow.
+
+Perfect for:
+- Customer support  
+- Lead generation  
+- Creator agencies  
+- Automated engagement  
+- Testing and simulation  
+
+---
+
+### 🤖 **AI-Enhanced Reply Logic**
+Optional AI mode allows SNAPPY to:
+- Read incoming chat messages  
+- Decide the correct response contextually  
+- Reply instantly through the UI  
+
+This works using models you choose — remote API or local LLMs.
+
+---
+
+### 🔍 **DOM-Level Awareness**
+SNAPPY dynamically inspects the site DOM to determine:
+- If the chat is unread  
+- Which messages belong to you  
+- Whether an action is available (send button, typing box, etc.)  
+- Message timestamps & metadata  
+
+This makes the automation **reliable and not brittle**.
+
+---
+
+## 🖥️ Install SNAPPY
+
+Download the latest version:
+
+➡️ **https://snappy.app**  
+(Or replace with your actual URL)
+
+After installing:
+1. Open the app  
+2. Choose the platform you want to automate  
+3. Set the session count  
+4. (Optional) Enable AI reply logic  
+5. Press **Start Automation**
+
+---
+
+## 📁 Repo Purpose
+
+This repository exists to provide:
+- The latest SNAPPY installers  
+- Release notes  
+- Troubleshooting help  
+- Documentation for automation logic  
+- Contribution guidelines (optional)
+
+---
+
+## 📞 Support
+
+<p align="center">
+  <a href="https://snappy.app" target="_blank">
+    <img src="https://img.shields.io/badge/website-snappy.app-white?style=for-the-badge">
+  </a>
+  <a href="https://discord.gg/" target="_blank">
+    <img src="https://img.shields.io/badge/discord-community-white?style=for-the-badge">
+  </a>
+</p>
+
+If you run into issues or want custom automation logic, reach out anytime.
+
+---
+
+## 🛠️ Roadmap
+- Multi-platform script editor  
+- Cloud automation mode  
+- Full AI-driven conversation engine  
+- Auto-account rotation  
+- Behavioral pacing & bot-detection avoidance  
+- Mobile device spoofing layer  
+
+---
+
+## ⭐ Contribute
+Want to add platform scripts or new automation modules?  
+Fork the repo and open a PR — all contributions are welcome.
+
+---
+
+**SNAPPY — Automation that actually moves at your speed.**
 
 ## Quick Start
 

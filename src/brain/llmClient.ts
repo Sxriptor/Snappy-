@@ -58,10 +58,10 @@ export class LLMClient {
    * Build the request body for llama.cpp /completion endpoint
    * Formats messages into a single prompt string with system instructions
    */
-  buildRequestBody(messages: ChatMessage[], cachePrompt: boolean = true): { prompt: string; temperature?: number; max_tokens?: number; cache_prompt?: boolean } {
+  buildRequestBody(messages: ChatMessage[], cachePrompt: boolean = true): { prompt: string; temperature?: number; max_tokens?: number; cache_prompt?: boolean; stop?: string[] } {
     // Format messages into a single prompt
     let prompt = '';
-    
+
     for (const msg of messages) {
       if (msg.role === 'system') {
         // Add system prompt at the beginning
@@ -72,15 +72,16 @@ export class LLMClient {
         prompt += `Assistant: ${msg.content}\n`;
       }
     }
-    
+
     // Add final prompt for assistant to respond
     prompt += 'Assistant:';
-    
+
     return {
       prompt: prompt,
       temperature: this.config.temperature,
       max_tokens: this.config.maxTokens,
-      cache_prompt: cachePrompt  // Enable prompt caching for faster responses
+      cache_prompt: cachePrompt,  // Enable prompt caching for faster responses
+      stop: ['User:', '\nUser:', 'user:', '\nuser:']  // Stop generation when model tries to continue conversation
     };
   }
 

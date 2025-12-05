@@ -73,30 +73,30 @@ function initializeComponents(): void {
  */
 async function handleIncomingMessage(message: IncomingMessage): Promise<void> {
   log(`Processing message from ${message.sender}`);
-  
+
   // Check active hours
   if (!isWithinActiveHours(config.activeHours)) {
     log('Outside active hours, skipping');
     return;
   }
-  
+
   // Check rate limits
   if (!rateLimiter.canReply()) {
     log('Rate limit reached, skipping');
     return;
   }
-  
+
   // Get reply decision from brain (now async for AI support)
   const reply = await decideReply(message);
-  
+
   if (!reply) {
     log('No reply decided');
     return;
   }
-  
+
   // Send the reply
   const result = await typeAndSendWithRetry(reply, message.sender);
-  
+
   if (result.success) {
     rateLimiter.recordReply();
     log(`Reply sent successfully to ${message.sender}`);
