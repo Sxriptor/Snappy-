@@ -931,27 +931,42 @@ function getBotScript(config: Config): string {
   //   .qFDXZ class on .O4POs = unread message
   //   .GQKvA span = message status ("Received", "Sent", "Delivered", etc.)
   function isNewIncomingChat(element) {
-    // STEP 0: Skip "My AI" chat - it shows "Received" but we don't want to reply to it
+    // STEP 0: Block Snapchat official accounts
     const username = getUsernameFromChatRow(element);
-    if (username && username.toLowerCase().includes('my ai')) {
-      log('Skipping "My AI" chat');
-      return false;
+    if (username) {
+      const usernameLower = username.toLowerCase();
+
+      // Block list: Snapchat official accounts
+      const blockedAccounts = [
+        'my ai',
+        'team snapchat',
+        'snapchat',
+        'snapchat support',
+        'snapchat team'
+      ];
+
+      for (const blocked of blockedAccounts) {
+        if (usernameLower.includes(blocked)) {
+          log('Skipping blocked account: "' + username + '"');
+          return false;
+        }
+      }
     }
 
-    // STEP 1: Check if unread (has .qFDXZ class)
+    // STEP 1: MUST have unread indicator - this is the PRIMARY requirement
+    // .qFDXZ = unread class on chat row
     const isUnread = element.classList.contains('qFDXZ');
 
-    // STEP 2: Also check for "New Chat" or "New Snap" text
+    // STEP 2: Check for "New Chat" or "New Snap" status text (also indicates unread)
     const chatText = (element.textContent || '').toLowerCase();
     const hasNewChatText = chatText.includes('new chat') || chatText.includes('new snap');
 
-    // STEP 3: Check for blue badge/indicator (some chats show this)
+    // STEP 3: Check for unread badge/indicator element
     const hasUnreadBadge = element.querySelector('.HEkDJ') !== null ||
-                          element.querySelector('[class*="badge"]') !== null ||
-                          element.querySelector('[class*="unread"]') !== null;
+                          element.querySelector('[class*="badge"]') !== null;
 
+    // MUST have at least one unread indicator
     if (!isUnread && !hasNewChatText && !hasUnreadBadge) {
-      // No unread indicator at all, skip
       return false;
     }
 
@@ -965,7 +980,7 @@ function getBotScript(config: Config): string {
       log('Chat has unread badge element');
     }
 
-    // STEP 4: Check the message status in .GQKvA > .tGtEY > .nonIntl (nested!)
+    // STEP 4: Check the message status - must NOT be an outgoing status
     const statusSpan = element.querySelector('.GQKvA .tGtEY .nonIntl') || element.querySelector('.GQKvA');
     if (statusSpan) {
       const status = statusSpan.textContent.trim().toLowerCase();
@@ -978,14 +993,13 @@ function getBotScript(config: Config): string {
         return false;
       }
 
-      // "Received" or other incoming status
-      if (status === 'received' || status === 'typing…' || status === 'new chat') {
-        log('Status "' + status + '" indicates incoming message');
-        return true;
-      }
+      // Accept: "received", "typing…", "new chat", or any other non-outgoing status
+      // The key is that we already verified there's an UNREAD indicator above
+      log('Status "' + status + '" with unread indicator = incoming message');
+      return true;
     }
 
-    // If no status found but has unread indicator, assume incoming
+    // Has unread indicator but no status - accept as incoming
     log('Has unread indicator but no status - assuming incoming');
     return true;
   }
