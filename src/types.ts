@@ -108,6 +108,25 @@ export interface ConnectionTestResult {
 }
 
 /**
+ * Llama.cpp server configuration
+ */
+export interface LlamaServerConfig {
+  buildPath: string;
+  startCommand: string;
+  enabled: boolean;
+}
+
+/**
+ * Llama.cpp server status
+ */
+export interface LlamaServerStatus {
+  running: boolean;
+  pid?: number;
+  error?: string;
+  startTime?: number;
+}
+
+/**
  * Existing user memory structure (from localStorage)
  */
 export interface ExistingUserMemory {

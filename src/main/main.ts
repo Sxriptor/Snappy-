@@ -455,6 +455,82 @@ export function setupIPCHandlers(): void {
   // ============================================================================
   // Proxy Management IPC Handlers
   // ============================================================================
+  // Llama.cpp Server Management
+  // ============================================================================
+
+  ipcMain.handle('llama:getConfig', async () => {
+    try {
+      const configPath = path.join(app.getPath('userData'), 'llama-config.json');
+      if (fs.existsSync(configPath)) {
+        const content = fs.readFileSync(configPath, 'utf-8');
+        return JSON.parse(content);
+      }
+      return { buildPath: '', startCommand: '', enabled: false };
+    } catch (error) {
+      console.error('[Shell] Error loading llama config:', error);
+      return { buildPath: '', startCommand: '', enabled: false };
+    }
+  });
+
+  ipcMain.handle('llama:saveConfig', async (event, llamaConfig) => {
+    try {
+      const configPath = path.join(app.getPath('userData'), 'llama-config.json');
+      fs.writeFileSync(configPath, JSON.stringify(llamaConfig, null, 2), 'utf-8');
+      console.log('[Shell] Llama config saved');
+      return { success: true };
+    } catch (error) {
+      console.error('[Shell] Error saving llama config:', error);
+      return { success: false, error: String(error) };
+    }
+  });
+
+  ipcMain.handle('llama:start', async () => {
+    try {
+      const { llamaServerManager } = await import('./llamaServerManager');
+      
+      // Load config first
+      const configPath = path.join(app.getPath('userData'), 'llama-config.json');
+      let llamaConfig = { buildPath: '', startCommand: '', enabled: false };
+      
+      if (fs.existsSync(configPath)) {
+        const content = fs.readFileSync(configPath, 'utf-8');
+        llamaConfig = JSON.parse(content);
+      }
+
+      llamaServerManager.setConfig(llamaConfig);
+      const status = await llamaServerManager.start();
+      
+      console.log('[Shell] Llama server start result:', status);
+      return status;
+    } catch (error) {
+      console.error('[Shell] Error starting llama server:', error);
+      return { running: false, error: String(error) };
+    }
+  });
+
+  ipcMain.handle('llama:stop', async () => {
+    try {
+      const { llamaServerManager } = await import('./llamaServerManager');
+      const status = await llamaServerManager.stop();
+      console.log('[Shell] Llama server stopped');
+      return status;
+    } catch (error) {
+      console.error('[Shell] Error stopping llama server:', error);
+      return { running: false, error: String(error) };
+    }
+  });
+
+  ipcMain.handle('llama:getStatus', async () => {
+    try {
+      const { llamaServerManager } = await import('./llamaServerManager');
+      return llamaServerManager.getStatus();
+    } catch (error) {
+      console.error('[Shell] Error getting llama status:', error);
+      return { running: false, error: String(error) };
+    }
+  });
+
+  // ============================================================================
 
   ipcMain.handle('proxy:getPool', async () => {
     return proxyManager.getPool();

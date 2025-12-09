@@ -245,10 +245,51 @@ const proxyAPI = {
   }
 };
 
+/**
+ * Llama.cpp Server API for AI server management
+ */
+const llamaAPI = {
+  /**
+   * Get llama.cpp server configuration
+   */
+  getConfig: async (): Promise<unknown> => {
+    return await ipcRenderer.invoke('llama:getConfig');
+  },
+
+  /**
+   * Save llama.cpp server configuration
+   */
+  saveConfig: async (config: unknown): Promise<{ success: boolean; error?: string }> => {
+    return await ipcRenderer.invoke('llama:saveConfig', config);
+  },
+
+  /**
+   * Start the llama.cpp server
+   */
+  start: async (): Promise<unknown> => {
+    return await ipcRenderer.invoke('llama:start');
+  },
+
+  /**
+   * Stop the llama.cpp server
+   */
+  stop: async (): Promise<unknown> => {
+    return await ipcRenderer.invoke('llama:stop');
+  },
+
+  /**
+   * Get llama.cpp server status
+   */
+  getStatus: async (): Promise<unknown> => {
+    return await ipcRenderer.invoke('llama:getStatus');
+  }
+};
+
 // Expose the APIs to the renderer
 contextBridge.exposeInMainWorld('bot', botAPI);
 contextBridge.exposeInMainWorld('updater', updaterAPI);
 contextBridge.exposeInMainWorld('session', sessionAPI);
 contextBridge.exposeInMainWorld('proxy', proxyAPI);
+contextBridge.exposeInMainWorld('llama', llamaAPI);
 
-console.log('[Preload] Bridge initialized with multi-session support');
+console.log('[Preload] Bridge initialized with multi-session support and llama.cpp server management');

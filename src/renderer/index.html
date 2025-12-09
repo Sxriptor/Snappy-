@@ -251,9 +251,70 @@
           </div>
         </section>
 
+        <!-- Llama.cpp Server -->
+        <section class="section">
+          <div class="section-header">
+            <span>LLAMA.CPP SERVER</span>
+            <button id="open-llama-config" class="btn-text">⚙</button>
+          </div>
+          <div class="setting-row">
+            <span>Status</span>
+            <span id="llama-status" class="llama-status disconnected">●</span>
+          </div>
+        </section>
+
         <button id="save-btn" class="btn btn-full">Save</button>
       </div>
     </aside>
+
+    <!-- Llama.cpp Configuration Modal -->
+    <div id="llama-config-modal" class="modal hidden">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h2>Llama.cpp Server Configuration</h2>
+          <button class="modal-close">&times;</button>
+        </div>
+        <div class="modal-body">
+          <div class="form-group">
+            <label for="llama-build-path">Build Directory Path</label>
+            <div class="path-input-group">
+              <input type="text" id="llama-build-path" placeholder="C:\path\to\llama.cpp\build">
+              <button id="llama-browse-build" class="btn-text">Browse</button>
+            </div>
+          </div>
+          <div class="form-group">
+            <label for="llama-start-command">Start Command</label>
+            <input type="text" id="llama-start-command" placeholder="./server -m model.gguf -ngl 33">
+          </div>
+          <div class="form-group">
+            <label for="llama-enabled">
+              <input type="checkbox" id="llama-enabled" checked>
+              <span>Enable Llama.cpp Server</span>
+            </label>
+          </div>
+          <div id="llama-server-status" class="llama-server-status">
+            <div class="status-line">
+              <span>Server Status:</span>
+              <span id="llama-server-running" class="status-value">Stopped</span>
+            </div>
+            <div class="status-line">
+              <span>PID:</span>
+              <span id="llama-server-pid" class="status-value">-</span>
+            </div>
+            <div class="status-line">
+              <span>Uptime:</span>
+              <span id="llama-server-uptime" class="status-value">-</span>
+            </div>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary modal-cancel">Cancel</button>
+          <button class="btn" id="llama-stop-btn" style="display: none;">Stop Server</button>
+          <button class="btn btn-primary" id="llama-start-btn">Start Server</button>
+          <button class="btn btn-primary" id="llama-save-config-btn">Save Config</button>
+        </div>
+      </div>
+    </div>
   </div>
 
   <script src="renderer.js"></script>

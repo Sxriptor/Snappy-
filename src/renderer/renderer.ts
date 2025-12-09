@@ -673,6 +673,25 @@ botBtn.addEventListener('click', async () => {
     botBtn.textContent = 'Start';
   } else {
     addLog('Starting bot...', 'highlight');
+    
+    // Start llama server if enabled and not already running
+    if (llamaServerConfig.enabled) {
+      const currentStatus = await (window as any).llama.getStatus();
+      if (!currentStatus.running) {
+        addLog('Starting Llama.cpp server...', 'info');
+        const startResult = await (window as any).llama.start();
+        if (startResult.running) {
+          addLog(`Llama.cpp server started (PID: ${startResult.pid})`, 'success');
+          updateLlamaUI();
+        } else {
+          addLog(`Warning: Failed to start Llama.cpp server: ${startResult.error}`, 'error');
+          // Continue with bot startup anyway
+        }
+      } else {
+        addLog('Llama.cpp server already running', 'info');
+      }
+    }
+    
     const success = await injectBotIntoWebview();
     if (success) {
       isBotActive = true;
@@ -2695,3 +2714,214 @@ document.addEventListener('DOMContentLoaded', async () => {
   // Update webview reference
   webview = getActiveWebview();
 });
+
+
+// ============================================================================
+// Llama.cpp Server Management
+// ============================================================================
+
+interface LlamaServerConfig {
+  buildPath: string;
+  startCommand: string;
+  enabled: boolean;
+}
+
+interface LlamaServerStatus {
+  running: boolean;
+  pid?: number;
+  error?: string;
+  startTime?: number;
+}
+
+let llamaServerConfig: LlamaServerConfig = {
+  buildPath: '',
+  startCommand: '',
+  enabled: false
+};
+
+let llamaServerStatus: LlamaServerStatus = {
+  running: false
+};
+
+let llamaStatusUpdateInterval: NodeJS.Timeout | null = null;
+
+// UI Elements
+const llamaConfigModal = document.getElementById('llama-config-modal')!;
+const openLlamaConfigBtn = document.getElementById('open-llama-config')!;
+const llamaBuildPathInput = document.getElementById('llama-build-path') as HTMLInputElement;
+const llamaStartCommandInput = document.getElementById('llama-start-command') as HTMLInputElement;
+const llamaEnabledCheckbox = document.getElementById('llama-enabled') as HTMLInputElement;
+const llamaStartBtn = document.getElementById('llama-start-btn')!;
+const llamaStopBtn = document.getElementById('llama-stop-btn')!;
+const llamaSaveConfigBtn = document.getElementById('llama-save-config-btn')!;
+const llamaStatusDot = document.getElementById('llama-status')!;
+const llamaServerRunning = document.getElementById('llama-server-running')!;
+const llamaServerPid = document.getElementById('llama-server-pid')!;
+const llamaServerUptime = document.getElementById('llama-server-uptime')!;
+const modalCloseBtn = llamaConfigModal.querySelector('.modal-close')!;
+const modalCancelBtn = llamaConfigModal.querySelector('.modal-cancel')!;
+
+// Load llama.cpp configuration
+async function loadLlamaConfig() {
+  try {
+    const config = await (window as any).llama.getConfig();
+    if (config) {
+      llamaServerConfig = config;
+      llamaBuildPathInput.value = config.buildPath || '';
+      llamaStartCommandInput.value = config.startCommand || '';
+      llamaEnabledCheckbox.checked = config.enabled || false;
+    }
+  } catch (e) {
+    console.error('Failed to load llama config:', e);
+  }
+}
+
+// Save llama.cpp configuration
+async function saveLlamaConfig() {
+  llamaServerConfig = {
+    buildPath: llamaBuildPathInput.value.trim(),
+    startCommand: llamaStartCommandInput.value.trim(),
+    enabled: llamaEnabledCheckbox.checked
+  };
+
+  try {
+    await (window as any).llama.saveConfig(llamaServerConfig);
+    addLog('Llama.cpp configuration saved', 'success');
+    llamaSaveConfigBtn.textContent = 'Saved';
+    setTimeout(() => {
+      llamaSaveConfigBtn.textContent = 'Save Config';
+    }, 1500);
+  } catch (e) {
+    addLog(`Failed to save llama config: ${e}`, 'error');
+  }
+}
+
+// Start llama.cpp server
+async function startLlamaServer() {
+  if (!llamaServerConfig.buildPath || !llamaServerConfig.startCommand) {
+    addLog('Build path and start command are required', 'error');
+    return;
+  }
+
+  addLog('Starting Llama.cpp server...', 'highlight');
+  (llamaStartBtn as HTMLButtonElement).disabled = true;
+
+  try {
+    const status = await (window as any).llama.start();
+    llamaServerStatus = status;
+
+    if (status.running) {
+      addLog(`Llama.cpp server started (PID: ${status.pid})`, 'success');
+      updateLlamaUI();
+    } else {
+      addLog(`Failed to start server: ${status.error}`, 'error');
+    }
+  } catch (e) {
+    addLog(`Error starting server: ${e}`, 'error');
+  } finally {
+    (llamaStartBtn as HTMLButtonElement).disabled = false;
+  }
+}
+
+// Stop llama.cpp server
+async function stopLlamaServer() {
+  addLog('Stopping Llama.cpp server...', 'highlight');
+  (llamaStopBtn as HTMLButtonElement).disabled = true;
+
+  try {
+    const status = await (window as any).llama.stop();
+    llamaServerStatus = status;
+
+    if (!status.running) {
+      addLog('Llama.cpp server stopped', 'success');
+      updateLlamaUI();
+    } else {
+      addLog(`Failed to stop server: ${status.error}`, 'error');
+    }
+  } catch (e) {
+    addLog(`Error stopping server: ${e}`, 'error');
+  } finally {
+    (llamaStopBtn as HTMLButtonElement).disabled = false;
+  }
+}
+
+// Get llama.cpp server status
+async function getLlamaStatus() {
+  try {
+    const status = await (window as any).llama.getStatus();
+    llamaServerStatus = status;
+    updateLlamaUI();
+  } catch (e) {
+    console.error('Failed to get llama status:', e);
+  }
+}
+
+// Update llama.cpp UI based on status
+function updateLlamaUI() {
+  if (llamaServerStatus.running) {
+    llamaStatusDot.className = 'llama-status running';
+    llamaStatusDot.textContent = '●';
+    llamaServerRunning.textContent = 'Running';
+    llamaServerPid.textContent = String(llamaServerStatus.pid || '-');
+    llamaStartBtn.style.display = 'none';
+    llamaStopBtn.style.display = 'inline-block';
+
+    // Update uptime
+    if (llamaServerStatus.startTime) {
+      const uptime = Math.floor((Date.now() - llamaServerStatus.startTime) / 1000);
+      const minutes = Math.floor(uptime / 60);
+      const seconds = uptime % 60;
+      llamaServerUptime.textContent = `${minutes}m ${seconds}s`;
+    }
+  } else {
+    llamaStatusDot.className = 'llama-status disconnected';
+    llamaStatusDot.textContent = '●';
+    llamaServerRunning.textContent = 'Stopped';
+    llamaServerPid.textContent = '-';
+    llamaServerUptime.textContent = '-';
+    llamaStartBtn.style.display = 'inline-block';
+    llamaStopBtn.style.display = 'none';
+  }
+}
+
+// Show llama.cpp configuration modal
+function showLlamaConfigModal() {
+  llamaConfigModal.classList.remove('hidden');
+  loadLlamaConfig();
+  getLlamaStatus();
+
+  // Start updating status every second
+  if (llamaStatusUpdateInterval) {
+    clearInterval(llamaStatusUpdateInterval);
+  }
+  llamaStatusUpdateInterval = setInterval(() => {
+    getLlamaStatus();
+  }, 1000);
+}
+
+// Hide llama.cpp configuration modal
+function hideLlamaConfigModal() {
+  llamaConfigModal.classList.add('hidden');
+  if (llamaStatusUpdateInterval) {
+    clearInterval(llamaStatusUpdateInterval);
+    llamaStatusUpdateInterval = null;
+  }
+}
+
+// Wire up llama.cpp UI events
+openLlamaConfigBtn.addEventListener('click', showLlamaConfigModal);
+modalCloseBtn.addEventListener('click', hideLlamaConfigModal);
+modalCancelBtn.addEventListener('click', hideLlamaConfigModal);
+llamaStartBtn.addEventListener('click', startLlamaServer);
+llamaStopBtn.addEventListener('click', stopLlamaServer);
+llamaSaveConfigBtn.addEventListener('click', saveLlamaConfig);
+
+// Close modal on backdrop click
+llamaConfigModal.addEventListener('click', (e) => {
+  if (e.target === llamaConfigModal) {
+    hideLlamaConfigModal();
+  }
+});
+
+// Initialize llama status on startup
+loadLlamaConfig();

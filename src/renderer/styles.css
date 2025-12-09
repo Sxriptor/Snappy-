@@ -972,3 +972,57 @@ input[type="number"] {
   border-color: #2a2a2a;
   outline: none;
 }
+
+/* Llama.cpp Server Styles */
+.llama-status {
+  font-size: 10px;
+}
+
+.llama-status.connected {
+  color: #5a8;
+}
+
+.llama-status.disconnected {
+  color: #a55;
+}
+
+.llama-status.running {
+  color: #aa8;
+}
+
+#open-llama-config {
+  padding: 0 4px;
+}
+
+.path-input-group {
+  display: flex;
+  gap: 4px;
+}
+
+.path-input-group input {
+  flex: 1;
+}
+
+.llama-server-status {
+  background: #111;
+  border: 1px solid #1a1a1a;
+  padding: 8px;
+  margin-top: 12px;
+  font-size: 9px;
+}
+
+.status-line {
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 4px;
+  color: #555;
+}
+
+.status-line:last-child {
+  margin-bottom: 0;
+}
+
+.status-value {
+  color: #888;
+  font-family: monospace;
+}
