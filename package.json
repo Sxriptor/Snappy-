@@ -1,6 +1,6 @@
 {
   "name": "snappy",
-  "version": "1.3.0",
+  "version": "1.4.0",
   "description": "Universal Web Auto-Responder - Desktop automation assistant for web-based messaging platforms",
   "main": "dist/main/main.js",
   "scripts": {

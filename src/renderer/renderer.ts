@@ -1067,11 +1067,11 @@ async function injectBotIntoWebview() {
     } catch {
       hostname = '';
     }
-    const botScript = getBotScript(config, hostname);
+    
     addLog(`Injecting bot for host: ${hostname || 'unknown'}`, 'info');
 
     // Inject the bot script into the webview
-    const botScript = getBotScript(config!);
+    const botScript = getBotScript(config!, hostname);
     
     // Try injection with error details
     try {
