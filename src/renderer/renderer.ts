@@ -225,6 +225,62 @@ async function deleteSession(sessionId: string) {
   }
 }
 
+// Detach a session to a new window
+async function detachSession(sessionId: string) {
+  try {
+    const sessionName = getSessionName(sessionId);
+    
+    // Get webview before detaching
+    const wv = sessionWebviews.get(sessionId);
+    if (!wv) {
+      addLog('No webview found for session', 'error');
+      return;
+    }
+    
+    // Create detached window
+    const result = await (window as any).windowManager.detachSession(sessionId, sessionName);
+    if (!result.success) {
+      addLog(`Failed to detach session: ${result.error}`, 'error');
+      return;
+    }
+    
+    // Remove the session from main window completely
+    const tab = document.getElementById(`tab-${sessionId}`);
+    if (tab) {
+      tab.remove();
+    }
+    
+    // Remove webview from main window
+    if (wv) {
+      wv.remove();
+      sessionWebviews.delete(sessionId);
+    }
+    
+    // Remove session configuration
+    sessionConfigs.delete(sessionId);
+    
+    // If this was the active session, activate another one
+    if (activeSessionId === sessionId) {
+      const remaining = Array.from(sessionWebviews.keys());
+      if (remaining.length > 0) {
+        activateSession(remaining[0]);
+      } else {
+        activeSessionId = null;
+        webview = null;
+        // Clear settings panel
+        const indicator = document.getElementById('settings-session-indicator');
+        if (indicator) indicator.style.display = 'none';
+        updateTabSettingsButtons();
+      }
+    }
+    
+    addLog(`Session "${sessionName}" detached to new window`, 'success');
+    
+  } catch (e) {
+    addLog(`Failed to detach session: ${e}`, 'error');
+  }
+}
+
 // Show context menu for tab
 function showTabContextMenu(sessionId: string, x: number, y: number) {
   const menu = document.getElementById('tab-context-menu');
@@ -271,6 +327,9 @@ function setupContextMenu() {
           break;
         case 'copy-settings':
           showCopySettingsModal(sessionId);
+          break;
+        case 'detach':
+          await detachSession(sessionId);
           break;
         case 'hibernate':
           await (window as any).session.hibernateSession(sessionId);
@@ -453,6 +512,190 @@ function setupCopySettingsModal() {
   });
 }
 
+// Set up detached window handlers
+function setupDetachedWindowHandlers() {
+  // Listen for detached window initialization
+  (window as any).electronAPI?.onDetachedWindowInit?.((data: { sessionId: string; sessionName: string; isDetachedWindow: boolean }) => {
+    if (data.isDetachedWindow) {
+      // Set the flag immediately to prevent session loading
+      (window as any).isDetachedWindow = true;
+      (window as any).detachedSessionId = data.sessionId;
+      setupDetachedWindowMode(data.sessionId, data.sessionName);
+    }
+  });
+  
+  // Listen for detached window closed events
+  (window as any).windowManager.onDetachedWindowClosed((data: { windowId: string; sessionId: string }) => {
+    // Mark tab as reattached
+    const tab = document.getElementById(`tab-${data.sessionId}`);
+    if (tab) {
+      tab.classList.remove('detached');
+      tab.title = '';
+    }
+    
+    // Show webview in main window again
+    const wv = sessionWebviews.get(data.sessionId);
+    if (wv) {
+      wv.classList.remove('detached');
+      if (activeSessionId === data.sessionId) {
+        wv.classList.remove('hidden');
+      }
+    }
+    
+    addLog(`Session reattached from closed window`, 'info');
+  });
+  
+  // Listen for session reattach requests
+  (window as any).windowManager.onSessionReattach((data: { sessionId: string }) => {
+    reattachSession(data.sessionId);
+  });
+  
+  // Listen for webview data from detached windows
+  (window as any).electronAPI?.onWebviewReceiveFromDetached?.((webviewData: { sessionId: string; html: string }) => {
+    receiveWebviewFromDetached(webviewData);
+  });
+}
+
+// Set up detached window mode - only show the detached session
+function setupDetachedWindowMode(sessionId: string, sessionName: string) {
+  // Mark this as a detached window
+  (window as any).isDetachedWindow = true;
+  (window as any).detachedSessionId = sessionId;
+  
+  // Clear existing sessions and only load the detached one
+  sessionWebviews.clear();
+  sessionConfigs.clear();
+  
+  // Clear tabs container
+  const tabsContainer = document.getElementById('tabs-container');
+  if (tabsContainer) {
+    tabsContainer.innerHTML = '';
+  }
+  
+  // Load only the detached session
+  loadDetachedSession(sessionId, sessionName);
+  
+  // Hide new session button
+  const newSessionBtn = document.getElementById('new-session-btn');
+  if (newSessionBtn) {
+    newSessionBtn.style.display = 'none';
+  }
+  
+  // Add reattach button to the tab bar
+  const tabBar = document.getElementById('tab-bar');
+  if (tabBar) {
+    const reattachBtn = document.createElement('button');
+    reattachBtn.id = 'reattach-btn';
+    reattachBtn.className = 'btn btn-secondary';
+    reattachBtn.textContent = '↩ Reattach to Main';
+    reattachBtn.title = 'Reattach this session to the main window';
+    reattachBtn.style.marginLeft = 'auto';
+    reattachBtn.style.fontSize = '10px';
+    reattachBtn.style.padding = '4px 8px';
+    
+    reattachBtn.onclick = async () => {
+      try {
+        const result = await (window as any).windowManager.reattachSession(sessionId);
+        if (result.success) {
+          addLog(`Reattaching session "${sessionName}" to main window`, 'info');
+          // Window will be closed by the main process
+        } else {
+          addLog(`Failed to reattach: ${result.error}`, 'error');
+        }
+      } catch (error) {
+        addLog(`Error during reattach: ${error}`, 'error');
+      }
+    };
+    
+    tabBar.appendChild(reattachBtn);
+  }
+  
+  // Update window title
+  document.title = `Snappy - ${sessionName}`;
+  
+  // Update settings panel title
+  const panelTitle = document.querySelector('#settings-panel .panel-header h1');
+  if (panelTitle) {
+    panelTitle.textContent = `SNAPPY - ${sessionName.toUpperCase()}`;
+  }
+  
+  addLog(`Detached window mode: ${sessionName}`, 'highlight');
+}
+
+// Load only the detached session in the detached window
+async function loadDetachedSession(sessionId: string, sessionName: string) {
+  try {
+    // Get the session data from the main process
+    const session = await (window as any).session.getSession(sessionId);
+    if (session) {
+      // Add only this session to the UI
+      addSessionToUI(session);
+      addLog(`Loaded detached session: ${sessionName}`, 'info');
+    } else {
+      addLog(`Could not load detached session: ${sessionName}`, 'error');
+    }
+  } catch (e) {
+    addLog(`Error loading detached session: ${e}`, 'error');
+  }
+}
+
+// Reattach a session from detached window
+async function reattachSession(sessionId: string) {
+  try {
+    // Get the session data and recreate it in the main window
+    const session = await (window as any).session.getSession(sessionId);
+    if (session) {
+      addSessionToUI(session);
+      addLog(`Session "${session.name}" reattached to main window`, 'success');
+    } else {
+      addLog(`Could not reattach session: ${sessionId}`, 'error');
+    }
+  } catch (e) {
+    addLog(`Error reattaching session: ${e}`, 'error');
+  }
+}
+
+// Receive webview from detached window
+function receiveWebviewFromDetached(webviewData: { sessionId: string; html: string }) {
+  const existingWebview = sessionWebviews.get(webviewData.sessionId);
+  
+  if (existingWebview) {
+    // Remove the placeholder webview
+    existingWebview.remove();
+    sessionWebviews.delete(webviewData.sessionId);
+  }
+  
+  // Create new webview from transferred HTML
+  const container = document.getElementById('webview-container');
+  if (!container) return;
+  
+  const tempDiv = document.createElement('div');
+  tempDiv.innerHTML = webviewData.html;
+  const webview = tempDiv.querySelector('webview') as Electron.WebviewTag;
+  
+  if (webview) {
+    webview.classList.remove('detached');
+    webview.classList.add('hidden'); // Start hidden
+    container.appendChild(webview);
+    
+    // Store reference
+    sessionWebviews.set(webviewData.sessionId, webview);
+    
+    // Set up listeners
+    setupWebviewListeners(webview);
+    setupWebviewReadyHandler(webview);
+    
+    // If this session is active, show the webview
+    if (activeSessionId === webviewData.sessionId) {
+      webview.classList.remove('hidden');
+      // Update global reference
+      (window as any).webview = webview;
+    }
+    
+    addLog(`Webview restored for session`, 'success');
+  }
+}
+
 // Create new session via modal
 async function createNewSession() {
   const nameInput = document.getElementById('session-name') as HTMLInputElement;
@@ -511,6 +754,11 @@ async function loadProxiesIntoSelect() {
 
 // Load existing sessions on startup
 async function loadExistingSessions() {
+  // Skip loading sessions if this is a detached window
+  if ((window as any).isDetachedWindow) {
+    return;
+  }
+  
   try {
     const sessions = await (window as any).session.getAllSessions();
     if (sessions && sessions.length > 0) {
@@ -563,6 +811,9 @@ function setupMultiSessionUI() {
   
   // Set up copy settings modal
   setupCopySettingsModal();
+  
+  // Set up detached window handlers
+  setupDetachedWindowHandlers();
 }
 
 // ============================================================================
@@ -2939,44 +3190,60 @@ document.addEventListener('DOMContentLoaded', async () => {
   loadConfig();
   addLog('Snappy initialized', 'highlight');
   
-  // Set up multi-session UI (tabs, modal, context menu)
-  setupMultiSessionUI();
+  // Check if this is a detached window via URL parameters
+  const urlParams = new URLSearchParams(window.location.search);
+  const isDetachedWindow = urlParams.get('detached') === 'true';
+  const detachedSessionId = urlParams.get('sessionId');
+  const detachedSessionName = urlParams.get('sessionName');
   
-  // Try to load existing sessions from main process
-  try {
-    const sessions = await (window as any).session.getAllSessions();
-    if (sessions && sessions.length > 0) {
-      // Load saved sessions
-      sessions.forEach((s: SessionData) => addSessionToUI(s));
-      addLog(`Loaded ${sessions.length} session(s)`, 'info');
+  if (isDetachedWindow && detachedSessionId && detachedSessionName) {
+    // Set up detached window mode immediately
+    (window as any).isDetachedWindow = true;
+    (window as any).detachedSessionId = detachedSessionId;
+    
+    // Set up UI for detached mode
+    setupMultiSessionUI();
+    setupDetachedWindowMode(detachedSessionId, detachedSessionName);
+  } else {
+    // Normal window - set up multi-session UI and load all sessions
+    setupMultiSessionUI();
+    
+    // Try to load existing sessions from main process
+    try {
+      const sessions = await (window as any).session.getAllSessions();
+      if (sessions && sessions.length > 0) {
+        // Load saved sessions
+        sessions.forEach((s: SessionData) => addSessionToUI(s));
+        addLog(`Loaded ${sessions.length} session(s)`, 'info');
       
-      // Update all tab indicators after loading
-      setTimeout(() => updateAllTabIndicators(), 100);
-    } else {
-      // No saved sessions - create a default one
-      addLog('Creating default session...', 'info');
-      const defaultSession = await (window as any).session.createSession(
-        'Default Session',
-        undefined,
-        { initialUrl: 'https://web.snapchat.com' }
-      );
-      if (defaultSession) {
-        addSessionToUI(defaultSession);
+        // Update all tab indicators after loading
+        setTimeout(() => updateAllTabIndicators(), 100);
       } else {
-        // Fallback: create local webview if IPC fails
-        const wv = createDefaultWebview('https://web.snapchat.com');
-        setupWebviewListeners(wv);
-        setupWebviewReadyHandler(wv);
-        webview = wv;
+        // No saved sessions - create a default one
+        addLog('Creating default session...', 'info');
+        const defaultSession = await (window as any).session.createSession(
+          'Default Session',
+          undefined,
+          { initialUrl: 'https://web.snapchat.com' }
+        );
+        if (defaultSession) {
+          addSessionToUI(defaultSession);
+        } else {
+          // Fallback: create local webview if IPC fails
+          const wv = createDefaultWebview('https://web.snapchat.com');
+          setupWebviewListeners(wv);
+          setupWebviewReadyHandler(wv);
+          webview = wv;
+        }
       }
+    } catch (e) {
+      // IPC not available - create fallback webview
+      console.log('Session API not available, using fallback:', e);
+      const wv = createDefaultWebview('https://web.snapchat.com');
+      setupWebviewListeners(wv);
+      setupWebviewReadyHandler(wv);
+      webview = wv;
     }
-  } catch (e) {
-    // IPC not available - create fallback webview
-    console.log('Session API not available, using fallback:', e);
-    const wv = createDefaultWebview('https://web.snapchat.com');
-    setupWebviewListeners(wv);
-    setupWebviewReadyHandler(wv);
-    webview = wv;
   }
   
   // Update webview reference

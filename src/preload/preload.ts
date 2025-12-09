@@ -285,11 +285,90 @@ const llamaAPI = {
   }
 };
 
+/**
+ * Window Management API for detached tabs
+ */
+const windowAPI = {
+  /**
+   * Detach a session to a new window
+   */
+  detachSession: async (sessionId: string, sessionName: string): Promise<{ success: boolean; windowId?: string; error?: string }> => {
+    return await ipcRenderer.invoke('window:detach', { sessionId, sessionName });
+  },
+
+  /**
+   * Reattach a session back to main window
+   */
+  reattachSession: async (sessionId: string): Promise<{ success: boolean; error?: string }> => {
+    return await ipcRenderer.invoke('window:reattach', sessionId);
+  },
+
+  /**
+   * Get list of detached windows
+   */
+  getDetachedWindows: async (): Promise<{ id: string; sessionId: string }[]> => {
+    return await ipcRenderer.invoke('window:getDetached');
+  },
+
+  /**
+   * Listen for detached window events
+   */
+  onDetachedWindowClosed: (callback: (data: { windowId: string; sessionId: string }) => void): void => {
+    ipcRenderer.on('detached-window:closed', (_, data) => callback(data));
+  },
+
+  onSessionReattach: (callback: (data: { sessionId: string }) => void): void => {
+    ipcRenderer.on('session:reattach', (_, data) => callback(data));
+  }
+};
+
+/**
+ * Electron API for detached windows
+ */
+const electronAPI = {
+  /**
+   * Listen for detached window initialization
+   */
+  onDetachedWindowInit: (callback: (data: { sessionId: string; sessionName: string; isDetachedWindow?: boolean }) => void): void => {
+    ipcRenderer.on('detached-window:init', (_, data) => callback(data));
+  },
+
+  /**
+   * Listen for webview transfer
+   */
+  onWebviewTransfer: (callback: (data: { sessionId: string; html: string }) => void): void => {
+    ipcRenderer.on('webview:transfer', (_, data) => callback(data));
+  },
+
+  /**
+   * Reattach window (from detached window)
+   */
+  reattachWindow: async (sessionId: string): Promise<{ success: boolean; error?: string }> => {
+    return await ipcRenderer.invoke('window:reattach', sessionId);
+  },
+
+  /**
+   * Send webview data to main window
+   */
+  sendWebviewToMain: (data: { sessionId: string; html: string }): void => {
+    ipcRenderer.send('webview:sendToMain', data);
+  },
+
+  /**
+   * Listen for webview data from detached windows
+   */
+  onWebviewReceiveFromDetached: (callback: (data: { sessionId: string; html: string }) => void): void => {
+    ipcRenderer.on('webview:receiveFromDetached', (_, data) => callback(data));
+  }
+};
+
 // Expose the APIs to the renderer
 contextBridge.exposeInMainWorld('bot', botAPI);
 contextBridge.exposeInMainWorld('updater', updaterAPI);
 contextBridge.exposeInMainWorld('session', sessionAPI);
 contextBridge.exposeInMainWorld('proxy', proxyAPI);
 contextBridge.exposeInMainWorld('llama', llamaAPI);
+contextBridge.exposeInMainWorld('windowManager', windowAPI);
+contextBridge.exposeInMainWorld('electronAPI', electronAPI);
 
-console.log('[Preload] Bridge initialized with multi-session support and llama.cpp server management');
+console.log('[Preload] Bridge initialized with multi-session support, llama.cpp server management, and window detachment');

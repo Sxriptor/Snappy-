@@ -14,7 +14,7 @@ if (!fs.existsSync(distDir)) {
 }
 
 // Files to copy
-const files = ['index.html', 'styles.css'];
+const files = ['index.html', 'detached.html', 'styles.css'];
 
 files.forEach(file => {
   const src = path.join(srcDir, file);

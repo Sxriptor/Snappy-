@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline';">
+  <title>Snappy - Detached Session</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div id="detached-app">
+    <!-- Header with session info and reattach button -->
+    <div id="detached-header">
+      <div id="session-info">
+        <span id="session-name">Session</span>
+      </div>
+      <div id="detached-controls">
+        <button id="reattach-btn" class="btn btn-secondary" title="Reattach to main window">
+          ↩ Reattach
+        </button>
+      </div>
+    </div>
+
+    <!-- Webview Container for the detached session -->
+    <div id="detached-webview-container">
+      <!-- Webview will be moved here from main window -->
+    </div>
+  </div>
+
+  <script src="detached.js"></script>
+</body>
+</html>

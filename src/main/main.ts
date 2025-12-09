@@ -13,6 +13,7 @@ import { ProxyManager } from './proxyManager';
 import { FingerprintGenerator } from './fingerprintGenerator';
 import { createFingerprintInjectorScript } from '../injection/fingerprintInjector';
 import { AIBrain } from '../brain/aiBrain';
+import { windowManager } from './windowManager';
 
 let mainWindow: BrowserWindow | null = null;
 let config: Configuration = DEFAULT_CONFIG;
@@ -564,7 +565,18 @@ export function setupIPCHandlers(): void {
     }
   });
 
-  console.log('[Shell] IPC handlers set up with multi-session support');
+  // ============================================================================
+  // Webview Transfer Handlers (for detached windows)
+  // ============================================================================
+
+  ipcMain.on('webview:sendToMain', (event, data: { sessionId: string; html: string }) => {
+    // Forward webview data from detached window to main window
+    if (mainWindow) {
+      mainWindow.webContents.send('webview:receiveFromDetached', data);
+    }
+  });
+
+  console.log('[Shell] IPC handlers set up with multi-session support and window management');
 }
 
 /**
@@ -676,6 +688,12 @@ async function initializeApp(): Promise<void> {
   
   // Set up IPC handlers
   setupIPCHandlers();
+  
+  // Set up window manager
+  if (mainWindow) {
+    windowManager.setMainWindow(mainWindow);
+  }
+  windowManager.setupIPCHandlers();
   
   if (!mainWindow) {
     throw new Error('Failed to create window');

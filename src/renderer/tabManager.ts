@@ -33,6 +33,7 @@ export class TabManager {
   public onTabRename?: (sessionId: string, newName: string) => void;
   public onTabDuplicate?: (sessionId: string) => void;
   public onTabHibernate?: (sessionId: string) => void;
+  public onTabDetach?: (sessionId: string, sessionName: string) => void;
   public onNewSession?: () => void;
 
   constructor() {
@@ -317,6 +318,9 @@ export class TabManager {
    * Handle context menu action
    */
   private handleContextMenuAction(action: string, sessionId: string): void {
+    const tab = this.tabs.get(sessionId);
+    if (!tab) return;
+
     switch (action) {
       case 'rename':
         const newName = prompt('Enter new name:');
@@ -326,6 +330,9 @@ export class TabManager {
         break;
       case 'duplicate':
         this.onTabDuplicate?.(sessionId);
+        break;
+      case 'detach':
+        this.onTabDetach?.(sessionId, tab.name);
         break;
       case 'hibernate':
         this.onTabHibernate?.(sessionId);
@@ -358,6 +365,75 @@ export class TabManager {
   clear(): void {
     for (const sessionId of this.tabs.keys()) {
       this.removeTab(sessionId);
+    }
+  }
+
+  /**
+   * Transfer webview to detached window
+   */
+  transferWebviewToDetached(sessionId: string): { sessionId: string; html: string } | null {
+    const webview = this.getWebview(sessionId);
+    if (!webview) return null;
+
+    const webviewData = {
+      sessionId,
+      html: webview.outerHTML
+    };
+
+    // Hide the webview in main window (don't remove yet)
+    webview.classList.add('hidden');
+    webview.classList.add('detached');
+
+    return webviewData;
+  }
+
+  /**
+   * Receive webview back from detached window
+   */
+  receiveWebviewFromDetached(webviewData: { sessionId: string; html: string }): void {
+    const existingWebview = this.getWebview(webviewData.sessionId);
+    
+    if (existingWebview) {
+      // Remove the placeholder webview
+      existingWebview.remove();
+    }
+
+    // Create new webview from transferred HTML
+    const tempDiv = document.createElement('div');
+    tempDiv.innerHTML = webviewData.html;
+    const webview = tempDiv.querySelector('webview');
+    
+    if (webview) {
+      webview.classList.remove('detached');
+      webview.classList.add('hidden'); // Start hidden
+      this.webviewContainer.appendChild(webview);
+
+      // If this session is active, show the webview
+      if (this.activeTabId === webviewData.sessionId) {
+        this.showWebview(webviewData.sessionId);
+      }
+    }
+  }
+
+  /**
+   * Mark tab as detached (visual indicator)
+   */
+  markTabAsDetached(sessionId: string): void {
+    const tabElement = document.getElementById(`tab-${sessionId}`);
+    if (tabElement) {
+      tabElement.classList.add('detached');
+      tabElement.title = 'This tab is detached to a separate window';
+    }
+  }
+
+  /**
+   * Mark tab as reattached (remove visual indicator)
+   */
+  markTabAsReattached(sessionId: string): void {
+    const tabElement = document.getElementById(`tab-${sessionId}`);
+    if (tabElement) {
+      tabElement.classList.remove('detached');
+      tabElement.title = '';
     }
   }
 

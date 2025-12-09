@@ -666,6 +666,16 @@ input[type="number"] {
   content: ' 💤';
 }
 
+.session-tab.detached {
+  border-left: 3px solid #0eadff;
+  background: #0a1a2a;
+}
+
+.session-tab.detached .tab-name::after {
+  content: ' 🔗';
+  color: #0eadff;
+}
+
 .tab-status {
   width: 6px;
   height: 6px;
@@ -1122,4 +1132,86 @@ b Actions */
 
 .session-tab:hover .tab-settings-indicator {
   opacity: 1;
+}
+
+/* ============================================================================
+   Detached Window Styles
+   ============================================================================ */
+
+#detached-app {
+  display: flex;
+  flex-direction: column;
+  width: 100vw;
+  height: 100vh;
+  background: #0d0d0d;
+  color: #ccc;
+}
+
+#detached-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 8px 12px;
+  background: #1a1a1a;
+  border-bottom: 1px solid #2a2a2a;
+  min-height: 40px;
+}
+
+#session-info {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+#session-name {
+  font-weight: bold;
+  color: #0eadff;
+}
+
+#detached-controls {
+  display: flex;
+  gap: 8px;
+}
+
+#reattach-btn {
+  padding: 4px 8px;
+  font-size: 11px;
+  background: #2a2a2a;
+  border: 1px solid #3a3a3a;
+  color: #ccc;
+  cursor: pointer;
+  border-radius: 2px;
+}
+
+#reattach-btn:hover {
+  background: #3a3a3a;
+  color: #fff;
+}
+
+#detached-webview-container {
+  flex: 1;
+  background: #fff;
+  position: relative;
+}
+
+#detached-webview-container webview {
+  width: 100%;
+  height: 100%;
+  border: none;
+}/* 
+Reattach button for detached windows */
+#reattach-btn {
+  background: #2a2a2a;
+  border: 1px solid #3a3a3a;
+  color: #0eadff;
+  font-size: 10px;
+  padding: 4px 8px;
+  cursor: pointer;
+  border-radius: 2px;
+  margin-left: auto;
+}
+
+#reattach-btn:hover {
+  background: #3a3a3a;
+  color: #fff;
 }
