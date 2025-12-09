@@ -1,6 +1,9 @@
 /**
  * Renderer - Settings Panel with Activity Log
  */
+import { detectSiteFromHost } from '../injection/siteRouter';
+import { buildThreadsBotScript } from '../injection/threadsBot';
+import { buildRedditBotScript } from '../injection/redditBotEmbed';
 
 interface ReplyRule {
   match: string;
@@ -37,6 +40,14 @@ interface Config {
   randomSkipProbability: number;
   ai?: AIConfig;
   llama?: LlamaConfig;
+  threads?: {
+    pollIntervalMs?: number;
+    maxCommentsPerPoll?: number;
+  };
+  reddit?: {
+    pollIntervalMs?: number;
+    maxCommentsPerPoll?: number;
+  };
 }
 
 let isPanelOpen = false;
@@ -1050,7 +1061,15 @@ async function injectBotIntoWebview() {
         randomSkipProbability: 0.15
       };
     }
-    
+    let hostname = '';
+    try {
+      hostname = await currentWebview.executeJavaScript('location.hostname || ""');
+    } catch {
+      hostname = '';
+    }
+    const botScript = getBotScript(config, hostname);
+    addLog(`Injecting bot for host: ${hostname || 'unknown'}`, 'info');
+
     // Inject the bot script into the webview
     const botScript = getBotScript(config!);
     
@@ -1352,8 +1371,8 @@ function loadConfigIntoUI(config: Config) {
   }
 }
 
-// Generate the bot script to inject into webview
-function getBotScript(config: Config): string {
+// Generate the Snapchat bot script to inject into webview
+function getSnapchatBotScript(config: Config): string {
   return `
 (function() {
   if (window.__SNAPPY_RUNNING__) {
@@ -2930,6 +2949,19 @@ function getBotScript(config: Config): string {
   };
 })();
 `;
+}
+
+function getBotScript(config: Config, hostname: string): string {
+  const site = detectSiteFromHost(hostname);
+  switch (site) {
+    case 'threads':
+      return buildThreadsBotScript(config as any);
+    case 'reddit':
+      return buildRedditBotScript(config as any);
+    case 'snapchat':
+    default:
+      return getSnapchatBotScript(config);
+  }
 }
 
 // Listen for console messages from webview
