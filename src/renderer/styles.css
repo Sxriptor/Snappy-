@@ -95,9 +95,25 @@ body {
   align-items: center;
 }
 
+.panel-title {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
 .panel-header h1 {
   font-size: 11px;
   font-weight: normal;
+}
+
+.session-indicator {
+  font-size: 9px;
+  color: #666;
+  background: #1a1a1a;
+  padding: 2px 6px;
+  border-radius: 2px;
+  border: 1px solid #2a2a2a;
+}
   letter-spacing: 1px;
   color: #666;
 }
@@ -1025,4 +1041,85 @@ input[type="number"] {
 .status-value {
   color: #888;
   font-family: monospace;
+}
+/* Copy Settings Modal */
+.sessions-list {
+  max-height: 200px;
+  overflow-y: auto;
+  border: 1px solid #2a2a2a;
+  border-radius: 4px;
+  background: #1a1a1a;
+}
+
+.session-option {
+  padding: 8px 12px;
+  cursor: pointer;
+  border-bottom: 1px solid #2a2a2a;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.session-option:last-child {
+  border-bottom: none;
+}
+
+.session-option:hover {
+  background: #2a2a2a;
+}
+
+.session-option.selected {
+  background: #0066cc;
+  color: #fff;
+}
+
+.session-option-status {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #666;
+}
+
+.session-option-status.connected {
+  background: #0eadff;
+}
+
+.session-option-status.none {
+  background: #666;
+}/* Ta
+b Actions */
+.tab-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.btn-secondary {
+  background: #2a2a2a;
+  border: 1px solid #3a3a3a;
+  color: #ccc;
+  font-size: 10px;
+  padding: 6px 8px;
+  cursor: pointer;
+}
+
+.btn-secondary:hover {
+  background: #3a3a3a;
+}
+
+.btn-secondary:disabled {
+  background: #1a1a1a;
+  color: #666;
+  cursor: not-allowed;
+}/
+* Tab Settings Indicator */
+.tab-settings-indicator {
+  color: #0eadff;
+  font-size: 8px;
+  margin-left: 4px;
+  opacity: 0.8;
+}
+
+.session-tab:hover .tab-settings-indicator {
+  opacity: 1;
 }

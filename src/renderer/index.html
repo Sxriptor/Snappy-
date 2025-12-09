@@ -21,6 +21,7 @@
     <div id="tab-context-menu" class="context-menu hidden">
       <div class="context-menu-item" data-action="rename">Rename</div>
       <div class="context-menu-item" data-action="duplicate">Duplicate</div>
+      <div class="context-menu-item" data-action="copy-settings">Copy Settings From...</div>
       <div class="context-menu-item" data-action="hibernate">Hibernate</div>
       <div class="context-menu-divider"></div>
       <div class="context-menu-item danger" data-action="close">Close</div>
@@ -81,7 +82,12 @@
 
     <aside id="settings-panel">
       <header class="panel-header">
-        <h1>SNAPPY</h1>
+        <div class="panel-title">
+          <h1>SNAPPY</h1>
+          <div id="settings-session-indicator" class="session-indicator" style="display: none;">
+            Session: Default
+          </div>
+        </div>
         <button id="panel-close">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
             <path d="M18 6L6 18M6 6l12 12"/>
@@ -263,9 +269,40 @@
           </div>
         </section>
 
+        <!-- Per-Tab Settings Actions -->
+        <section class="section">
+          <div class="section-header">TAB SETTINGS</div>
+          <div class="tab-actions">
+            <button id="copy-from-tab-btn" class="btn btn-secondary">Copy From Other Tab</button>
+            <button id="reset-tab-settings-btn" class="btn btn-secondary">Reset to Default</button>
+          </div>
+        </section>
+
         <button id="save-btn" class="btn btn-full">Save</button>
       </div>
     </aside>
+
+    <!-- Copy Settings Modal -->
+    <div id="copy-settings-modal" class="modal hidden">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h2>Copy Settings From</h2>
+          <button class="modal-close">&times;</button>
+        </div>
+        <div class="modal-body">
+          <div class="form-group">
+            <label>Select source session:</label>
+            <div id="source-sessions-list" class="sessions-list">
+              <!-- Sessions will be populated here -->
+            </div>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary modal-cancel">Cancel</button>
+          <button class="btn btn-primary" id="copy-settings-btn">Copy Settings</button>
+        </div>
+      </div>
+    </div>
 
     <!-- Llama.cpp Configuration Modal -->
     <div id="llama-config-modal" class="modal hidden">

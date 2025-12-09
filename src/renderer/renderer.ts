@@ -73,13 +73,16 @@ interface SessionData {
   partition: string;
   fingerprint: { userAgent: string };
   proxy: { id: string } | null;
-  config: { initialUrl: string };
+  config: { initialUrl: string } | Config;
   state: string;
 }
 
 // Track sessions and their webviews
 const sessionWebviews = new Map<string, Electron.WebviewTag>();
 let activeSessionId: string | null = null;
+
+// Per-tab configuration storage
+const sessionConfigs = new Map<string, Config>();
 
 // Create a webview for a session
 function createSessionWebview(session: SessionData): Electron.WebviewTag {
@@ -171,7 +174,15 @@ function activateSession(sessionId: string) {
   if (tab) tab.classList.add('active');
   
   activeSessionId = sessionId;
-  addLog(`Switched to session: ${sessionId.substring(0, 8)}...`, 'info');
+  
+  // Load configuration for this session
+  loadSessionConfig(sessionId);
+  updateSettingsPanelTitle(sessionId);
+  updateTabSettingsButtons();
+  
+  const hasCustomConfig = sessionConfigs.has(sessionId);
+  const configStatus = hasCustomConfig ? 'custom settings' : 'default settings';
+  addLog(`Switched to ${getSessionName(sessionId)} (${configStatus})`, 'info');
 }
 
 // Delete a session
@@ -186,6 +197,9 @@ async function deleteSession(sessionId: string) {
       sessionWebviews.delete(sessionId);
     }
     
+    // Remove session configuration
+    sessionConfigs.delete(sessionId);
+    
     // Remove tab
     const tab = document.getElementById(`tab-${sessionId}`);
     if (tab) tab.remove();
@@ -198,6 +212,10 @@ async function deleteSession(sessionId: string) {
       } else {
         activeSessionId = null;
         webview = null;
+        // Clear settings panel
+        const indicator = document.getElementById('settings-session-indicator');
+        if (indicator) indicator.style.display = 'none';
+        updateTabSettingsButtons();
       }
     }
     
@@ -251,6 +269,9 @@ function setupContextMenu() {
           const dup = await (window as any).session.duplicateSession(sessionId);
           if (dup) addSessionToUI(dup);
           break;
+        case 'copy-settings':
+          showCopySettingsModal(sessionId);
+          break;
         case 'hibernate':
           await (window as any).session.hibernateSession(sessionId);
           const tab = document.getElementById(`tab-${sessionId}`);
@@ -285,8 +306,151 @@ function addSessionToUI(session: SessionData) {
   // Create webview
   createSessionWebview(session);
   
+  // Initialize session config if it has one
+  if (session.config) {
+    sessionConfigs.set(session.id, session.config as Config);
+  }
+  
   // Activate it
   activateSession(session.id);
+  
+  // Update button states since we now have a new tab
+  updateTabSettingsButtons();
+}
+
+// Update settings panel title to show which session is active
+function updateSettingsPanelTitle(sessionId: string) {
+  const panelTitle = document.querySelector('#settings-panel .panel-header h3');
+  if (panelTitle) {
+    const sessionName = getSessionName(sessionId);
+    panelTitle.textContent = `Settings - ${sessionName}`;
+  }
+  
+  // Add visual indicator to show per-tab settings
+  const settingsIndicator = document.getElementById('settings-session-indicator');
+  if (settingsIndicator) {
+    settingsIndicator.textContent = `Session: ${getSessionName(sessionId)}`;
+    settingsIndicator.style.display = 'block';
+  }
+}
+
+// Get session name by ID
+function getSessionName(sessionId: string): string {
+  const tab = document.getElementById(`tab-${sessionId}`);
+  if (tab) {
+    const nameEl = tab.querySelector('.tab-name');
+    if (nameEl) {
+      return nameEl.textContent || sessionId.substring(0, 8);
+    }
+  }
+  return sessionId.substring(0, 8);
+}
+
+// Copy configuration from one session to another
+function copySessionConfig(fromSessionId: string, toSessionId: string) {
+  const config = sessionConfigs.get(fromSessionId);
+  if (config) {
+    // Deep clone the config
+    const clonedConfig = JSON.parse(JSON.stringify(config));
+    sessionConfigs.set(toSessionId, clonedConfig);
+    
+    // If the target session is active, reload the UI
+    if (toSessionId === activeSessionId) {
+      loadConfigIntoUI(clonedConfig);
+    }
+    
+    // Update visual indicators
+    updateTabCustomSettingsIndicator(toSessionId);
+    
+    addLog(`Configuration copied from ${getSessionName(fromSessionId)} to ${getSessionName(toSessionId)}`, 'info');
+  }
+}
+
+// Show copy settings modal
+function showCopySettingsModal(targetSessionId: string) {
+  const modal = document.getElementById('copy-settings-modal');
+  const sessionsList = document.getElementById('source-sessions-list');
+  const copyBtn = document.getElementById('copy-settings-btn');
+  
+  if (!modal || !sessionsList || !copyBtn) return;
+  
+  // Clear previous selections
+  sessionsList.innerHTML = '';
+  let selectedSourceId: string | null = null;
+  
+  // Populate with available sessions (excluding target)
+  sessionWebviews.forEach((_, sessionId) => {
+    if (sessionId === targetSessionId) return;
+    
+    const sessionName = getSessionName(sessionId);
+    const hasConfig = sessionConfigs.has(sessionId);
+    
+    const option = document.createElement('div');
+    option.className = 'session-option';
+    option.dataset.sessionId = sessionId;
+    
+    option.innerHTML = `
+      <span class="session-option-status ${hasConfig ? 'connected' : 'none'}"></span>
+      <span>${sessionName}</span>
+      <span style="margin-left: auto; font-size: 10px; color: #666;">
+        ${hasConfig ? 'Has settings' : 'Default settings'}
+      </span>
+    `;
+    
+    option.addEventListener('click', () => {
+      // Remove previous selection
+      sessionsList.querySelectorAll('.session-option').forEach(opt => {
+        opt.classList.remove('selected');
+      });
+      
+      // Select this option
+      option.classList.add('selected');
+      selectedSourceId = sessionId;
+      (copyBtn as HTMLButtonElement).disabled = false;
+    });
+    
+    sessionsList.appendChild(option);
+  });
+  
+  // Disable copy button initially
+  (copyBtn as HTMLButtonElement).disabled = true;
+  
+  // Set up copy button handler
+  (copyBtn as HTMLButtonElement).onclick = () => {
+    if (selectedSourceId) {
+      copySessionConfig(selectedSourceId, targetSessionId);
+      hideCopySettingsModal();
+    }
+  };
+  
+  // Show modal
+  modal.classList.remove('hidden');
+}
+
+// Hide copy settings modal
+function hideCopySettingsModal() {
+  const modal = document.getElementById('copy-settings-modal');
+  if (modal) {
+    modal.classList.add('hidden');
+  }
+}
+
+// Set up copy settings modal event listeners
+function setupCopySettingsModal() {
+  const modal = document.getElementById('copy-settings-modal');
+  if (!modal) return;
+  
+  // Close buttons
+  modal.querySelectorAll('.modal-close, .modal-cancel').forEach(btn => {
+    btn.addEventListener('click', hideCopySettingsModal);
+  });
+  
+  // Close on backdrop click
+  modal.addEventListener('click', (e) => {
+    if (e.target === modal) {
+      hideCopySettingsModal();
+    }
+  });
 }
 
 // Create new session via modal
@@ -396,6 +560,9 @@ function setupMultiSessionUI() {
   
   // Load proxy list on startup
   refreshProxyList();
+  
+  // Set up copy settings modal
+  setupCopySettingsModal();
 }
 
 // ============================================================================
@@ -603,16 +770,31 @@ urlInput.addEventListener('keypress', e => { if (e.key === 'Enter') loadUrl(); }
 // Bot injection into webview
 async function injectBotIntoWebview() {
   const currentWebview = getActiveWebview();
-  if (!currentWebview) {
-    addLog('No active webview for injection', 'error');
+  if (!currentWebview || !activeSessionId) {
+    addLog('No active webview or session for injection', 'error');
     return false;
   }
   
   try {
-    const { config } = await (window as any).bot.getStatus();
+    // Use session-specific configuration
+    let config = sessionConfigs.get(activeSessionId);
+    if (!config) {
+      // Fallback to global config
+      const { config: globalConfig } = await (window as any).bot.getStatus();
+      config = globalConfig || {
+        initialUrl: 'https://web.snapchat.com',
+        autoInject: false,
+        replyRules: [],
+        typingDelayRangeMs: [50, 150],
+        preReplyDelayRangeMs: [2000, 6000],
+        maxRepliesPerMinute: 5,
+        maxRepliesPerHour: 30,
+        randomSkipProbability: 0.15
+      };
+    }
     
     // Inject the bot script into the webview
-    const botScript = getBotScript(config);
+    const botScript = getBotScript(config!);
     
     // Try injection with error details
     try {
@@ -731,8 +913,13 @@ function getRules(): ReplyRule[] {
   return rules;
 }
 
-// Save
+// Save configuration for active session
 saveBtn.addEventListener('click', async () => {
+  if (!activeSessionId) {
+    addLog('No active session to save configuration for', 'error');
+    return;
+  }
+
   const config: Config = {
     initialUrl: urlInput.value || 'https://web.snapchat.com',
     autoInject: autoInject.checked,
@@ -754,49 +941,127 @@ saveBtn.addEventListener('click', async () => {
       maxContextMessages: parseInt(aiHistory?.value) || 10
     }
   };
-  await (window as any).bot.saveConfig(config);
+
+  // Save to session-specific storage
+  sessionConfigs.set(activeSessionId, config);
+  
+  // Also save via session manager for persistence
+  try {
+    await (window as any).session.updateSessionConfig(activeSessionId, config);
+  } catch (e) {
+    console.log('Session API not available, using local storage only');
+  }
+
   saveBtn.textContent = 'Saved';
-  addLog('Configuration saved', 'success');
+  addLog(`Configuration saved for session: ${activeSessionId.substring(0, 8)}...`, 'success');
+  
+  // Add visual indicator to tab that it has custom settings
+  updateTabCustomSettingsIndicator(activeSessionId);
+  
   setTimeout(() => { saveBtn.textContent = 'Save'; }, 1000);
 });
 
-// Load
+// Load global default configuration (fallback)
 async function loadConfig() {
   try {
     const { config } = await (window as any).bot.getStatus();
     if (!config) return;
-    urlInput.value = config.initialUrl || 'https://web.snapchat.com';
-    autoInject.checked = config.autoInject || false;
-    typingMin.value = String(config.typingDelayRangeMs?.[0] || 50);
-    typingMax.value = String(config.typingDelayRangeMs?.[1] || 150);
-    delayMin.value = String(config.preReplyDelayRangeMs?.[0] || 2000);
-    delayMax.value = String(config.preReplyDelayRangeMs?.[1] || 6000);
-    rateMinute.value = String(config.maxRepliesPerMinute || 5);
-    rateHour.value = String(config.maxRepliesPerHour || 30);
-    skipRate.value = String(Math.round((config.randomSkipProbability || 0.15) * 100));
-    rulesContainer.innerHTML = '';
-    (config.replyRules || []).forEach((r: ReplyRule) => addRule(String(r.match), r.reply));
     
-    // Load AI settings
-    if (config.ai) {
-      if (aiEnabled) aiEnabled.checked = config.ai.enabled || false;
-      if (aiEndpoint) aiEndpoint.value = config.ai.llmEndpoint || 'localhost';
-      if (aiPort) aiPort.value = String(config.ai.llmPort || 8080);
-      if (aiModel) aiModel.value = config.ai.modelName || 'local-model';
-      if (aiPrompt) aiPrompt.value = config.ai.systemPrompt || '';
-      if (aiTemp) {
-        aiTemp.value = String(config.ai.temperature || 0.7);
-        aiTempVal.textContent = String(config.ai.temperature || 0.7);
+    // Store as default config for new sessions
+    const defaultConfig: Config = {
+      initialUrl: config.initialUrl || 'https://web.snapchat.com',
+      autoInject: config.autoInject || false,
+      replyRules: config.replyRules || [],
+      typingDelayRangeMs: config.typingDelayRangeMs || [50, 150],
+      preReplyDelayRangeMs: config.preReplyDelayRangeMs || [2000, 6000],
+      maxRepliesPerMinute: config.maxRepliesPerMinute || 5,
+      maxRepliesPerHour: config.maxRepliesPerHour || 30,
+      randomSkipProbability: config.randomSkipProbability || 0.15,
+      ai: config.ai || {
+        enabled: false,
+        llmEndpoint: 'localhost',
+        llmPort: 8080,
+        modelName: 'local-model',
+        systemPrompt: '',
+        temperature: 0.7,
+        maxTokens: 150,
+        contextHistoryEnabled: true,
+        maxContextMessages: 10
       }
-      if (aiTokens) aiTokens.value = String(config.ai.maxTokens || 150);
-      if (aiContext) aiContext.checked = config.ai.contextHistoryEnabled !== false;
-      if (aiHistory) aiHistory.value = String(config.ai.maxContextMessages || 10);
-    }
+    };
     
-    const currentWebview = getActiveWebview();
-    if (config.initialUrl && currentWebview) currentWebview.src = config.initialUrl;
+    // If no active session, load into UI as default
+    if (!activeSessionId) {
+      loadConfigIntoUI(defaultConfig);
+    }
   } catch (e) {
     console.error('Load failed:', e);
+  }
+}
+
+// Load session-specific configuration
+function loadSessionConfig(sessionId: string) {
+  let config = sessionConfigs.get(sessionId);
+  
+  if (!config) {
+    // Create default config for new session
+    config = {
+      initialUrl: 'https://web.snapchat.com',
+      autoInject: false,
+      replyRules: [],
+      typingDelayRangeMs: [50, 150],
+      preReplyDelayRangeMs: [2000, 6000],
+      maxRepliesPerMinute: 5,
+      maxRepliesPerHour: 30,
+      randomSkipProbability: 0.15,
+      ai: {
+        enabled: false,
+        llmEndpoint: 'localhost',
+        llmPort: 8080,
+        modelName: 'local-model',
+        systemPrompt: '',
+        temperature: 0.7,
+        maxTokens: 150,
+        contextHistoryEnabled: true,
+        maxContextMessages: 10
+      }
+    };
+    sessionConfigs.set(sessionId, config);
+  }
+  
+  loadConfigIntoUI(config);
+}
+
+// Load configuration into UI elements
+function loadConfigIntoUI(config: Config) {
+  urlInput.value = config.initialUrl || 'https://web.snapchat.com';
+  autoInject.checked = config.autoInject || false;
+  typingMin.value = String(config.typingDelayRangeMs?.[0] || 50);
+  typingMax.value = String(config.typingDelayRangeMs?.[1] || 150);
+  delayMin.value = String(config.preReplyDelayRangeMs?.[0] || 2000);
+  delayMax.value = String(config.preReplyDelayRangeMs?.[1] || 6000);
+  rateMinute.value = String(config.maxRepliesPerMinute || 5);
+  rateHour.value = String(config.maxRepliesPerHour || 30);
+  skipRate.value = String(Math.round((config.randomSkipProbability || 0.15) * 100));
+  
+  // Load reply rules
+  rulesContainer.innerHTML = '';
+  (config.replyRules || []).forEach((r: ReplyRule) => addRule(String(r.match), r.reply));
+  
+  // Load AI settings
+  if (config.ai) {
+    if (aiEnabled) aiEnabled.checked = config.ai.enabled || false;
+    if (aiEndpoint) aiEndpoint.value = config.ai.llmEndpoint || 'localhost';
+    if (aiPort) aiPort.value = String(config.ai.llmPort || 8080);
+    if (aiModel) aiModel.value = config.ai.modelName || 'local-model';
+    if (aiPrompt) aiPrompt.value = config.ai.systemPrompt || '';
+    if (aiTemp) {
+      aiTemp.value = String(config.ai.temperature || 0.7);
+      aiTempVal.textContent = String(config.ai.temperature || 0.7);
+    }
+    if (aiTokens) aiTokens.value = String(config.ai.maxTokens || 150);
+    if (aiContext) aiContext.checked = config.ai.contextHistoryEnabled !== false;
+    if (aiHistory) aiHistory.value = String(config.ai.maxContextMessages || 10);
   }
 }
 
@@ -2684,6 +2949,9 @@ document.addEventListener('DOMContentLoaded', async () => {
       // Load saved sessions
       sessions.forEach((s: SessionData) => addSessionToUI(s));
       addLog(`Loaded ${sessions.length} session(s)`, 'info');
+      
+      // Update all tab indicators after loading
+      setTimeout(() => updateAllTabIndicators(), 100);
     } else {
       // No saved sessions - create a default one
       addLog('Creating default session...', 'info');
@@ -2925,3 +3193,115 @@ llamaConfigModal.addEventListener('click', (e) => {
 
 // Initialize llama status on startup
 loadLlamaConfig();
+
+// ============================================================================
+// Per-Tab Settings Actions
+// ============================================================================
+
+// Copy settings from another tab button
+const copyFromTabBtn = document.getElementById('copy-from-tab-btn');
+if (copyFromTabBtn) {
+  copyFromTabBtn.addEventListener('click', () => {
+    if (activeSessionId) {
+      showCopySettingsModal(activeSessionId);
+    }
+  });
+}
+
+// Reset tab settings button
+const resetTabSettingsBtn = document.getElementById('reset-tab-settings-btn');
+if (resetTabSettingsBtn) {
+  resetTabSettingsBtn.addEventListener('click', () => {
+    if (activeSessionId && confirm('Reset this tab\'s settings to default?')) {
+      resetSessionToDefault(activeSessionId);
+    }
+  });
+}
+
+// Reset session to default configuration
+function resetSessionToDefault(sessionId: string) {
+  const defaultConfig: Config = {
+    initialUrl: 'https://web.snapchat.com',
+    autoInject: false,
+    replyRules: [],
+    typingDelayRangeMs: [50, 150],
+    preReplyDelayRangeMs: [2000, 6000],
+    maxRepliesPerMinute: 5,
+    maxRepliesPerHour: 30,
+    randomSkipProbability: 0.15,
+    ai: {
+      enabled: false,
+      llmEndpoint: 'localhost',
+      llmPort: 8080,
+      modelName: 'local-model',
+      systemPrompt: '',
+      temperature: 0.7,
+      maxTokens: 150,
+      contextHistoryEnabled: true,
+      maxContextMessages: 10
+    }
+  };
+  
+  sessionConfigs.set(sessionId, defaultConfig);
+  
+  if (sessionId === activeSessionId) {
+    loadConfigIntoUI(defaultConfig);
+  }
+  
+  // Update visual indicator
+  updateTabCustomSettingsIndicator(sessionId);
+  
+  addLog(`Settings reset to default for ${getSessionName(sessionId)}`, 'info');
+}
+
+// Update button states based on active session
+function updateTabSettingsButtons() {
+  const copyBtn = document.getElementById('copy-from-tab-btn') as HTMLButtonElement;
+  const resetBtn = document.getElementById('reset-tab-settings-btn') as HTMLButtonElement;
+  
+  if (copyBtn && resetBtn) {
+    const hasMultipleTabs = sessionWebviews.size > 1;
+    (copyBtn as HTMLButtonElement).disabled = !activeSessionId || !hasMultipleTabs;
+    (resetBtn as HTMLButtonElement).disabled = !activeSessionId;
+    
+    if (!hasMultipleTabs) {
+      copyBtn.title = 'Need multiple tabs to copy settings';
+    } else {
+      copyBtn.title = 'Copy settings from another tab';
+    }
+  }
+}
+
+// Update tab visual indicator for custom settings
+function updateTabCustomSettingsIndicator(sessionId: string) {
+  const tab = document.getElementById(`tab-${sessionId}`);
+  if (!tab) return;
+  
+  const hasCustomSettings = sessionConfigs.has(sessionId);
+  
+  // Add or remove custom settings indicator
+  let indicator = tab.querySelector('.tab-settings-indicator');
+  if (hasCustomSettings && !indicator) {
+    indicator = document.createElement('span');
+    indicator.className = 'tab-settings-indicator';
+    (indicator as HTMLElement).title = 'Has custom settings';
+    indicator.textContent = '●';
+    
+    // Insert before the close button
+    const closeBtn = tab.querySelector('.tab-close');
+    if (closeBtn) {
+      tab.insertBefore(indicator, closeBtn);
+    } else {
+      tab.appendChild(indicator);
+    }
+  } else if (!hasCustomSettings && indicator) {
+    indicator.remove();
+  }
+}
+
+// Update all tab indicators
+function updateAllTabIndicators() {
+  sessionWebviews.forEach((_, sessionId) => {
+    updateTabCustomSettingsIndicator(sessionId);
+  });
+}
