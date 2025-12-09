@@ -25,6 +25,14 @@ export interface Configuration {
   };
   randomSkipProbability: number;
   ai?: AIConfig;  // New AI configuration
+  threads?: {
+    pollIntervalMs?: number;
+    maxCommentsPerPoll?: number;
+  };
+  reddit?: {
+    pollIntervalMs?: number;
+    maxCommentsPerPoll?: number;
+  };
 }
 
 export interface IncomingMessage {
@@ -167,7 +175,15 @@ export const DEFAULT_CONFIG: Configuration = {
   maxRepliesPerHour: 30,
   maxReplyLength: 500,
   siteMode: 'universal',
-  randomSkipProbability: 0.15
+  randomSkipProbability: 0.15,
+  threads: {
+    pollIntervalMs: 60000,
+    maxCommentsPerPoll: 5
+  },
+  reddit: {
+    pollIntervalMs: 10000,
+    maxCommentsPerPoll: 5
+  }
 };
 
 
