@@ -65,13 +65,24 @@ export class LlamaServerManager {
       console.log('[LlamaServerManager] Working directory:', buildPath);
       console.log('[LlamaServerManager] Command:', startCommand);
 
-      // On Windows, spawn a visible command prompt and run the command EXACTLY as pasted
+      // On Windows, spawn a visible command prompt and run the command
       if (process.platform === 'win32') {
         console.log('[LlamaServerManager] Running exact command:', startCommand);
         
+        // Parse and clean the command first
+        const args = this.parseCommand(startCommand);
+        const executable = args.shift();
+        
+        if (!executable) {
+          throw new Error('Invalid start command');
+        }
+        
+        // Create the cleaned command string
+        const cleanedCommand = [executable, ...args].join(' ');
+        console.log('[LlamaServerManager] Cleaned command for cmd:', cleanedCommand);
+        
         // Use start command to open a new visible command prompt window
-        // This creates a new cmd window that stays open
-        this.process = spawn('cmd.exe', ['/c', `start "Llama Server" /wait cmd.exe /k "${startCommand}"`], {
+        this.process = spawn('cmd.exe', ['/c', `start "Llama Server" /wait cmd.exe /k "${cleanedCommand}"`], {
           cwd: buildPath,
           stdio: 'ignore',
           shell: true,
@@ -248,9 +259,15 @@ export class LlamaServerManager {
    * Handles quoted arguments and Windows batch file syntax (^ line continuations)
    */
   private parseCommand(command: string): string[] {
-    // First, handle Windows batch file line continuations (^)
-    // Remove ^ followed by whitespace/newlines
-    const cleanCommand = command.replace(/\^\s*[\r\n]+\s*/g, ' ').trim();
+    // Handle Windows batch file line continuations (^)
+    // Replace ^ followed by any whitespace (including newlines) with a single space
+    const cleanCommand = command
+      .replace(/\^\s*\r?\n\s*/g, ' ')  // Handle ^ with newlines
+      .replace(/\^\s+/g, ' ')          // Handle ^ with spaces
+      .replace(/\s+/g, ' ')            // Normalize multiple spaces
+      .trim();
+    
+    console.log('[LlamaServerManager] Cleaned command:', cleanCommand);
     
     const args: string[] = [];
     let current = '';
@@ -280,7 +297,7 @@ export class LlamaServerManager {
       args.push(current);
     }
 
-    console.log('[LlamaServerManager] Parsed command:', args);
+    console.log('[LlamaServerManager] Parsed args:', args);
     return args;
   }
 
