@@ -20,6 +20,12 @@ interface AIConfig {
   maxContextMessages: number;
 }
 
+interface LlamaConfig {
+  buildPath: string;
+  startCommand: string;
+  enabled: boolean;
+}
+
 interface Config {
   initialUrl: string;
   autoInject: boolean;
@@ -30,6 +36,7 @@ interface Config {
   maxRepliesPerHour: number;
   randomSkipProbability: number;
   ai?: AIConfig;
+  llama?: LlamaConfig;
 }
 
 let isPanelOpen = false;
@@ -1190,6 +1197,11 @@ saveBtn.addEventListener('click', async () => {
       maxTokens: parseInt(aiTokens?.value) || 150,
       contextHistoryEnabled: aiContext?.checked || true,
       maxContextMessages: parseInt(aiHistory?.value) || 10
+    },
+    llama: {
+      buildPath: llamaBuildPathInput?.value || '',
+      startCommand: llamaStartCommandInput?.value || '',
+      enabled: llamaEnabledCheckbox?.checked || false
     }
   };
 
@@ -1238,6 +1250,11 @@ async function loadConfig() {
         maxTokens: 150,
         contextHistoryEnabled: true,
         maxContextMessages: 10
+      },
+      llama: {
+        buildPath: '',
+        startCommand: '',
+        enabled: false
       }
     };
     
@@ -1275,6 +1292,11 @@ function loadSessionConfig(sessionId: string) {
         maxTokens: 150,
         contextHistoryEnabled: true,
         maxContextMessages: 10
+      },
+      llama: {
+        buildPath: '',
+        startCommand: '',
+        enabled: false
       }
     };
     sessionConfigs.set(sessionId, config);
@@ -1313,6 +1335,20 @@ function loadConfigIntoUI(config: Config) {
     if (aiTokens) aiTokens.value = String(config.ai.maxTokens || 150);
     if (aiContext) aiContext.checked = config.ai.contextHistoryEnabled !== false;
     if (aiHistory) aiHistory.value = String(config.ai.maxContextMessages || 10);
+  }
+  
+  // Load Llama settings
+  if (config.llama) {
+    if (llamaBuildPathInput) llamaBuildPathInput.value = config.llama.buildPath || '';
+    if (llamaStartCommandInput) llamaStartCommandInput.value = config.llama.startCommand || '';
+    if (llamaEnabledCheckbox) llamaEnabledCheckbox.checked = config.llama.enabled || false;
+    
+    // Update the global llamaServerConfig for this session
+    llamaServerConfig = {
+      buildPath: config.llama.buildPath || '',
+      startCommand: config.llama.startCommand || '',
+      enabled: config.llama.enabled || false
+    };
   }
 }
 
@@ -3298,6 +3334,19 @@ const modalCancelBtn = llamaConfigModal.querySelector('.modal-cancel')!;
 
 // Load llama.cpp configuration
 async function loadLlamaConfig() {
+  // Load from current session config if available
+  if (activeSessionId) {
+    const sessionConfig = sessionConfigs.get(activeSessionId);
+    if (sessionConfig && sessionConfig.llama) {
+      llamaServerConfig = sessionConfig.llama;
+      llamaBuildPathInput.value = sessionConfig.llama.buildPath || '';
+      llamaStartCommandInput.value = sessionConfig.llama.startCommand || '';
+      llamaEnabledCheckbox.checked = sessionConfig.llama.enabled || false;
+      return;
+    }
+  }
+  
+  // Fallback to global config if no session config
   try {
     const config = await (window as any).llama.getConfig();
     if (config) {
@@ -3313,22 +3362,39 @@ async function loadLlamaConfig() {
 
 // Save llama.cpp configuration
 async function saveLlamaConfig() {
-  llamaServerConfig = {
+  if (!activeSessionId) {
+    addLog('No active session to save Llama config for', 'error');
+    return;
+  }
+
+  const llamaConfig = {
     buildPath: llamaBuildPathInput.value.trim(),
     startCommand: llamaStartCommandInput.value.trim(),
     enabled: llamaEnabledCheckbox.checked
   };
 
-  try {
-    await (window as any).llama.saveConfig(llamaServerConfig);
-    addLog('Llama.cpp configuration saved', 'success');
-    llamaSaveConfigBtn.textContent = 'Saved';
-    setTimeout(() => {
-      llamaSaveConfigBtn.textContent = 'Save Config';
-    }, 1500);
-  } catch (e) {
-    addLog(`Failed to save llama config: ${e}`, 'error');
+  // Update global config for immediate use
+  llamaServerConfig = llamaConfig;
+
+  // Update session config
+  const sessionConfig = sessionConfigs.get(activeSessionId);
+  if (sessionConfig) {
+    sessionConfig.llama = llamaConfig;
+    sessionConfigs.set(activeSessionId, sessionConfig);
+    
+    // Save to persistent storage
+    try {
+      await (window as any).session.updateSessionConfig(activeSessionId, sessionConfig);
+    } catch (e) {
+      console.log('Session API not available, using local storage only');
+    }
   }
+
+  addLog(`Llama.cpp configuration saved for session: ${activeSessionId.substring(0, 8)}...`, 'success');
+  llamaSaveConfigBtn.textContent = 'Saved';
+  setTimeout(() => {
+    llamaSaveConfigBtn.textContent = 'Save Config';
+  }, 1500);
 }
 
 // Start llama.cpp server
@@ -3506,6 +3572,11 @@ function resetSessionToDefault(sessionId: string) {
       maxTokens: 150,
       contextHistoryEnabled: true,
       maxContextMessages: 10
+    },
+    llama: {
+      buildPath: '',
+      startCommand: '',
+      enabled: false
     }
   };
   
