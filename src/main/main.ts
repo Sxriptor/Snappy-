@@ -553,6 +553,37 @@ export function setupIPCHandlers(): void {
     }
   });
 
+  ipcMain.handle('llama:stopByPid', async (event, pid: number) => {
+    try {
+      const { llamaServerManager } = await import('./llamaServerManager');
+      return await llamaServerManager.stopByPid(pid);
+    } catch (error) {
+      console.error('[Shell] Error stopping llama server by PID:', error);
+      return { running: false, error: String(error) };
+    }
+  });
+
+  ipcMain.handle('llama:getTrackedPids', async () => {
+    try {
+      const { llamaServerManager } = await import('./llamaServerManager');
+      return llamaServerManager.getTrackedPids();
+    } catch (error) {
+      console.error('[Shell] Error getting tracked PIDs:', error);
+      return [];
+    }
+  });
+
+  ipcMain.handle('llama:clearTracking', async () => {
+    try {
+      const { llamaServerManager } = await import('./llamaServerManager');
+      llamaServerManager.clearTracking();
+      return { success: true };
+    } catch (error) {
+      console.error('[Shell] Error clearing llama tracking:', error);
+      return { success: false, error: String(error) };
+    }
+  });
+
   // ============================================================================
 
   ipcMain.handle('proxy:getPool', async () => {

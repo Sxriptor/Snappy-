@@ -282,10 +282,24 @@ const llamaAPI = {
   },
 
   /**
-   * Stop the llama.cpp server
+   * Stop all llama.cpp servers
    */
   stop: async (): Promise<unknown> => {
     return await ipcRenderer.invoke('llama:stop');
+  },
+
+  /**
+   * Stop a specific llama.cpp server by PID
+   */
+  stopByPid: async (pid: number): Promise<unknown> => {
+    return await ipcRenderer.invoke('llama:stopByPid', pid);
+  },
+
+  /**
+   * Get all tracked server PIDs
+   */
+  getTrackedPids: async (): Promise<number[]> => {
+    return await ipcRenderer.invoke('llama:getTrackedPids');
   },
 
   /**
@@ -293,6 +307,13 @@ const llamaAPI = {
    */
   getStatus: async (): Promise<unknown> => {
     return await ipcRenderer.invoke('llama:getStatus');
+  },
+
+  /**
+   * Clear all tracking (call on app startup)
+   */
+  clearTracking: async (): Promise<{ success: boolean }> => {
+    return await ipcRenderer.invoke('llama:clearTracking');
   }
 };
 

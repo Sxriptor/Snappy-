@@ -1446,19 +1446,27 @@ botBtn.addEventListener('click', async () => {
     statusText.textContent = 'Inactive';
     botBtn.textContent = 'Start';
     
-    // Stop llama server if it was running
-    if (llamaServerConfig.enabled) {
-      addLog('Stopping Llama.cpp server...', 'info');
-      try {
-        const stopResult = await (window as any).llama.stop();
-        if (!stopResult.running) {
-          addLog('Llama.cpp server stopped', 'success');
-        } else {
-          addLog(`Warning: Llama server may still be running: ${stopResult.error}`, 'error');
+    // Stop llama server if this session had one running
+    if (activeSessionId) {
+      const serverInfo = sessionServerPids.get(activeSessionId);
+      console.log(`[Bot Stop] Session ${activeSessionId}, serverInfo:`, serverInfo);
+      if (serverInfo) {
+        addLog(`Stopping Llama.cpp server (PID: ${serverInfo.pid})...`, 'info');
+        try {
+          const stopResult = await (window as any).llama.stopByPid(serverInfo.pid);
+          console.log(`[Bot Stop] stopByPid result:`, stopResult);
+          if (!stopResult.error) {
+            sessionServerPids.delete(activeSessionId);
+            addLog('Llama.cpp server stopped', 'success');
+          } else {
+            addLog(`Warning: ${stopResult.error}`, 'error');
+          }
+          updateLlamaUI();
+        } catch (e) {
+          addLog(`Error stopping Llama server: ${e}`, 'error');
         }
-        updateLlamaUI();
-      } catch (e) {
-        addLog(`Error stopping Llama server: ${e}`, 'error');
+      } else {
+        addLog('No Llama server tracked for this session', 'info');
       }
     }
     
@@ -1468,10 +1476,15 @@ botBtn.addEventListener('click', async () => {
     addLog('Starting bot...', 'highlight');
     
     // Start llama server if enabled (always start new instance)
-    if (llamaServerConfig.enabled) {
-      addLog('Starting new Llama.cpp server instance...', 'info');
+    if (llamaServerConfig.enabled && activeSessionId) {
+      addLog('Starting Llama.cpp server...', 'info');
+      console.log(`[Bot Start] Starting llama for session ${activeSessionId}`);
       const startResult = await (window as any).llama.start();
-      if (startResult.running) {
+      console.log(`[Bot Start] Result:`, startResult);
+      if (startResult.running && startResult.pid) {
+        // Track PID for this session
+        sessionServerPids.set(activeSessionId, { pid: startResult.pid, startTime: startResult.startTime || Date.now() });
+        console.log(`[Bot Start] Tracked PID ${startResult.pid} for session ${activeSessionId}`);
         addLog(`Llama.cpp server started (PID: ${startResult.pid})`, 'success');
         updateLlamaUI();
       } else {
@@ -3602,6 +3615,14 @@ document.addEventListener('DOMContentLoaded', async () => {
   loadConfig();
   addLog('Snappy initialized', 'highlight');
   
+  // Clear stale llama server tracking from previous runs
+  try {
+    await (window as any).llama.clearTracking();
+    console.log('[Renderer] Cleared stale llama server tracking');
+  } catch (e) {
+    console.log('[Renderer] Could not clear llama tracking:', e);
+  }
+  
   // Check if this is a detached window via URL parameters
   const urlParams = new URLSearchParams(window.location.search);
   const isDetachedWindow = urlParams.get('detached') === 'true';
@@ -3686,9 +3707,20 @@ let llamaServerConfig: LlamaServerConfig = {
   enabled: false
 };
 
-let llamaServerStatus: LlamaServerStatus = {
-  running: false
-};
+// Per-session server PID tracking
+const sessionServerPids = new Map<string, { pid: number; startTime: number }>();
+
+// Get the current session's server status
+function getSessionServerStatus(): LlamaServerStatus {
+  if (!activeSessionId) {
+    return { running: false };
+  }
+  const serverInfo = sessionServerPids.get(activeSessionId);
+  if (serverInfo) {
+    return { running: true, pid: serverInfo.pid, startTime: serverInfo.startTime };
+  }
+  return { running: false };
+}
 
 let llamaStatusUpdateInterval: NodeJS.Timeout | null = null;
 
@@ -3784,70 +3816,87 @@ async function startLlamaServer() {
     return;
   }
 
-  addLog('Starting new Llama.cpp server instance...', 'highlight');
+  if (!activeSessionId) {
+    addLog('No active session', 'error');
+    return;
+  }
+
+  addLog('Starting Llama.cpp server...', 'highlight');
   (llamaStartBtn as HTMLButtonElement).disabled = true;
 
   try {
     const status = await (window as any).llama.start();
-    llamaServerStatus = status;
 
-    if (status.running) {
-      addLog(`New Llama.cpp server started (PID: ${status.pid})`, 'success');
+    if (status.running && status.pid) {
+      // Store PID for this session
+      sessionServerPids.set(activeSessionId, { pid: status.pid, startTime: status.startTime || Date.now() });
+      addLog(`Llama.cpp server started (PID: ${status.pid})`, 'success');
       updateLlamaUI();
     } else {
-      addLog(`Failed to start new server: ${status.error}`, 'error');
+      addLog(`Failed to start server: ${status.error}`, 'error');
     }
   } catch (e) {
-    addLog(`Error starting new server: ${e}`, 'error');
+    addLog(`Error starting server: ${e}`, 'error');
   } finally {
     (llamaStartBtn as HTMLButtonElement).disabled = false;
   }
 }
 
-// Stop llama.cpp server
+// Stop llama.cpp server by PID (only stops this session's server)
 async function stopLlamaServer() {
-  addLog('Stopping all Llama.cpp servers...', 'highlight');
+  if (!activeSessionId) {
+    addLog('No active session', 'error');
+    return;
+  }
+
+  const serverInfo = sessionServerPids.get(activeSessionId);
+  if (!serverInfo) {
+    addLog('No server running for this session', 'error');
+    return;
+  }
+  
+  const currentPid = serverInfo.pid;
+  addLog(`Stopping Llama.cpp server (PID: ${currentPid})...`, 'highlight');
   (llamaStopBtn as HTMLButtonElement).disabled = true;
 
   try {
-    const status = await (window as any).llama.stop();
-    llamaServerStatus = status;
+    const status = await (window as any).llama.stopByPid(currentPid);
 
-    if (!status.running) {
-      addLog('All Llama.cpp servers stopped', 'success');
+    if (!status.error) {
+      // Remove PID from this session's tracking
+      sessionServerPids.delete(activeSessionId);
+      addLog(`Llama.cpp server stopped (PID: ${currentPid})`, 'success');
       updateLlamaUI();
     } else {
-      addLog(`Failed to stop all servers: ${status.error}`, 'error');
+      addLog(`Failed to stop server: ${status.error}`, 'error');
     }
   } catch (e) {
-    addLog(`Error stopping servers: ${e}`, 'error');
+    addLog(`Error stopping server: ${e}`, 'error');
   } finally {
     (llamaStopBtn as HTMLButtonElement).disabled = false;
   }
 }
 
-// Get llama.cpp server status
+// Get llama.cpp server status (uses per-session tracking)
 async function getLlamaStatus() {
-  try {
-    const status = await (window as any).llama.getStatus();
-    llamaServerStatus = status;
-    updateLlamaUI();
-  } catch (e) {
-    console.error('Failed to get llama status:', e);
-  }
+  // Just update the UI based on our local session tracking
+  // No need to call the backend since we track PIDs per-session locally
+  updateLlamaUI();
 }
 
-// Update llama.cpp UI based on status
+// Update llama.cpp UI based on this session's server status
 function updateLlamaUI() {
-  if (llamaServerStatus.running) {
+  const sessionStatus = getSessionServerStatus();
+  
+  if (sessionStatus.running) {
     llamaStatusDot.className = 'llama-status running';
     llamaStatusDot.textContent = '●';
     llamaServerRunning.textContent = 'Running';
-    llamaServerPid.textContent = String(llamaServerStatus.pid || '-');
+    llamaServerPid.textContent = String(sessionStatus.pid || '-');
 
     // Update uptime
-    if (llamaServerStatus.startTime) {
-      const uptime = Math.floor((Date.now() - llamaServerStatus.startTime) / 1000);
+    if (sessionStatus.startTime) {
+      const uptime = Math.floor((Date.now() - sessionStatus.startTime) / 1000);
       const minutes = Math.floor(uptime / 60);
       const seconds = uptime % 60;
       llamaServerUptime.textContent = `${minutes}m ${seconds}s`;
@@ -3860,13 +3909,13 @@ function updateLlamaUI() {
     llamaServerUptime.textContent = '-';
   }
   
-  // Always show both buttons - Start opens new instance, Stop kills all
+  // Always show start button, only show stop if this session has a running server
   llamaStartBtn.style.display = 'inline-block';
-  llamaStopBtn.style.display = 'inline-block';
+  llamaStopBtn.style.display = sessionStatus.running && sessionStatus.pid ? 'inline-block' : 'none';
   
-  // Update button text to be clearer
-  (llamaStartBtn as HTMLButtonElement).textContent = 'Start New Server';
-  (llamaStopBtn as HTMLButtonElement).textContent = 'Stop All Servers';
+  // Update button text
+  (llamaStartBtn as HTMLButtonElement).textContent = 'Start Server';
+  (llamaStopBtn as HTMLButtonElement).textContent = `Stop (PID: ${sessionStatus.pid || '-'})`;
 }
 
 // Show llama.cpp configuration modal

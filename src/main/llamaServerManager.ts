@@ -34,6 +34,15 @@ export class LlamaServerManager {
   }
 
   /**
+   * Clear all tracking (call on app startup to reset stale state)
+   */
+  clearTracking(): void {
+    console.log('[LlamaServerManager] Clearing all tracked PIDs');
+    this.cmdPids.clear();
+    this.processes.clear();
+  }
+
+  /**
    * Start the llama.cpp server
    */
   async start(): Promise<LlamaServerStatus> {
@@ -123,8 +132,19 @@ export class LlamaServerManager {
         if (cmdPid) {
           this.cmdPids.add(cmdPid);
           console.log(`[LlamaServerManager] Added CMD PID ${cmdPid} to tracking set. Total tracked: ${this.cmdPids.size}`);
+          
+          // Return early with the CMD PID for Windows
+          const status: LlamaServerStatus = {
+            running: true,
+            pid: cmdPid,  // Return the CMD PID, not the PowerShell launcher PID
+            startTime
+          };
+          this.notifyStatus(status);
+          console.log('[LlamaServerManager] Server started successfully, CMD PID:', cmdPid);
+          return status;
         } else {
           console.error('[LlamaServerManager] Failed to capture CMD PID!');
+          throw new Error('Failed to capture CMD process ID');
         }
       } else {
         // Parse the command for non-Windows platforms
@@ -228,21 +248,80 @@ export class LlamaServerManager {
   }
 
   /**
-   * Stop all llama.cpp server processes
+   * Stop a specific llama.cpp server by its CMD PID
+   */
+  async stopByPid(pid: number): Promise<LlamaServerStatus> {
+    try {
+      console.log(`[LlamaServerManager] Stopping server with PID ${pid}...`);
+      console.log(`[LlamaServerManager] Currently tracked PIDs: ${Array.from(this.cmdPids).join(', ')}`);
+
+      if (!this.cmdPids.has(pid)) {
+        console.log(`[LlamaServerManager] PID ${pid} not found in tracked processes`);
+        return { running: this.cmdPids.size > 0, error: `PID ${pid} not tracked` };
+      }
+
+      // On Windows, kill the CMD and its child processes (llama-server.exe)
+      // /T kills the process tree, /F forces termination
+      if (process.platform === 'win32') {
+        await new Promise<void>((resolve) => {
+          console.log(`[LlamaServerManager] Executing: taskkill /F /T /PID ${pid}`);
+          exec(`taskkill /F /T /PID ${pid}`, (error, stdout) => {
+            if (error) {
+              console.log(`[LlamaServerManager] taskkill PID ${pid} error: ${error.message}`);
+            } else {
+              console.log(`[LlamaServerManager] Successfully killed PID ${pid} and children: ${stdout.trim()}`);
+            }
+            resolve();
+          });
+        });
+      }
+
+      // Remove from tracking
+      this.cmdPids.delete(pid);
+
+      const status: LlamaServerStatus = {
+        running: this.cmdPids.size > 0
+      };
+
+      this.notifyStatus(status);
+      console.log(`[LlamaServerManager] Server PID ${pid} stopped. Remaining tracked: ${Array.from(this.cmdPids).join(', ') || 'none'}`);
+      return status;
+    } catch (error) {
+      const errorMsg = error instanceof Error ? error.message : String(error);
+      console.error(`[LlamaServerManager] Error stopping PID ${pid}:`, errorMsg);
+      return { running: this.cmdPids.size > 0, error: errorMsg };
+    }
+  }
+
+  /**
+   * Get all tracked PIDs
+   */
+  getTrackedPids(): number[] {
+    return Array.from(this.cmdPids);
+  }
+
+  /**
+   * Stop all llama.cpp server processes started by this manager
+   * Only kills processes we explicitly tracked - does not affect other sessions
    */
   async stop(): Promise<LlamaServerStatus> {
     try {
-      console.log('[LlamaServerManager] Stopping all servers...');
+      console.log('[LlamaServerManager] Stopping tracked servers only...');
       console.log('[LlamaServerManager] Tracked CMD PIDs:', Array.from(this.cmdPids));
 
-      // On Windows, kill by tracked PIDs first, then cleanup
+      if (this.cmdPids.size === 0 && this.processes.size === 0) {
+        console.log('[LlamaServerManager] No tracked processes to stop');
+        return { running: false };
+      }
+
+      // On Windows, kill only the tracked PIDs
       if (process.platform === 'win32') {
         // Kill each tracked CMD PID directly using taskkill with /T to kill child processes too
         const killByPidPromises = Array.from(this.cmdPids).map(pid => {
           return new Promise<void>((resolve) => {
-            console.log(`[LlamaServerManager] Killing CMD PID ${pid} and its children...`);
+            console.log(`[LlamaServerManager] Killing tracked CMD PID ${pid} and its children...`);
             // Use taskkill with /T to kill the process tree (CMD + llama-server)
-            exec(`taskkill /F /T /PID ${pid}`, (error, stdout, stderr) => {
+            exec(`taskkill /F /T /PID ${pid}`, (error, stdout) => {
               if (error) {
                 console.log(`[LlamaServerManager] taskkill PID ${pid} error (may already be closed): ${error.message}`);
               } else {
@@ -257,29 +336,6 @@ export class LlamaServerManager {
         
         // Clear tracked PIDs
         this.cmdPids.clear();
-        
-        // Also run PowerShell cleanup as fallback for any orphaned processes
-        console.log('[LlamaServerManager] Running PowerShell cleanup for any remaining processes...');
-        const killWithPowerShell = new Promise<void>((resolve) => {
-          const psScript = `
-            Get-Process -Name "*llama*" -ErrorAction SilentlyContinue | Stop-Process -Force
-            Get-WmiObject Win32_Process | Where-Object { $_.CommandLine -like "*llama*" -and $_.Name -ne "powershell.exe" } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
-          `;
-          
-          const psProcess = spawn('powershell.exe', ['-Command', psScript], {
-            stdio: 'pipe',
-            shell: false
-          });
-          
-          psProcess.on('exit', (code) => {
-            console.log(`[LlamaServerManager] PowerShell cleanup exited with code: ${code}`);
-            resolve();
-          });
-          
-          psProcess.on('error', () => resolve());
-        });
-        
-        await killWithPowerShell;
       }
 
       // Also kill the tracked launcher processes
@@ -317,13 +373,14 @@ export class LlamaServerManager {
       };
 
       this.notifyStatus(status);
-      console.log('[LlamaServerManager] All servers stopped');
+      console.log('[LlamaServerManager] Tracked servers stopped');
       return status;
     } catch (error) {
       const errorMsg = error instanceof Error ? error.message : String(error);
       console.error('[LlamaServerManager] Error stopping servers:', errorMsg);
 
       this.processes.clear();
+      this.cmdPids.clear();
 
       return {
         running: false,
@@ -334,15 +391,23 @@ export class LlamaServerManager {
 
   /**
    * Get current server status
+   * Note: This returns aggregate status. Per-session tracking is done in the renderer.
    */
   getStatus(): LlamaServerStatus {
+    // On Windows, we track CMD PIDs
+    if (this.cmdPids.size > 0) {
+      return {
+        running: true
+      };
+    }
+
+    // For non-Windows or fallback
     if (this.processes.size === 0) {
       return {
         running: false
       };
     }
 
-    // Return status of the most recent process
     const latestProcess = Array.from(this.processes.values()).pop();
     if (!latestProcess) {
       return {
