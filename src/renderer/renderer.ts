@@ -509,9 +509,15 @@ function buildInstagramBotScript(config: any): string {
   let isProcessing = false;
 
   const MIN_MESSAGE_LENGTH = 2;
-  const POLL_MS = (CONFIG?.instagram && CONFIG.instagram.pollIntervalMs) || 5000;
+  const BASE_POLL_MS = (CONFIG?.instagram && CONFIG.instagram.pollIntervalMs) || 8000;
+  const POLL_VARIANCE_MS = 4000; // Random variance for more natural scanning
   const typingDelayRange = CONFIG?.typingDelayRangeMs || [50, 150];
   const preReplyDelayRange = CONFIG?.preReplyDelayRangeMs || [2000, 6000];
+
+  function getRandomPollInterval() {
+    // Random interval between BASE_POLL_MS and BASE_POLL_MS + POLL_VARIANCE_MS
+    return BASE_POLL_MS + Math.floor(Math.random() * POLL_VARIANCE_MS);
+  }
 
   function log(msg) {
     const formatted = '[Snappy][Instagram] ' + msg;
@@ -625,17 +631,55 @@ function buildInstagramBotScript(config: any): string {
 
   function findConversations() {
     const conversations = [];
-    const items = Array.from(document.querySelectorAll('[role="listitem"]'));
+
+    let items = Array.from(document.querySelectorAll('[role="listitem"]'));
+
+    if (items.length === 0) {
+      log('No [role="listitem"] found, trying alternative selectors...');
+
+      items = Array.from(document.querySelectorAll('a[href*="/direct/t/"]'));
+      log('Found ' + items.length + ' direct message links');
+
+      if (items.length === 0) {
+        const unreadDivs = Array.from(document.querySelectorAll('div')).filter(div =>
+          div.textContent?.includes('Unread') && div.textContent.length < 200
+        );
+        log('Found ' + unreadDivs.length + ' elements with "Unread" text');
+
+        items = unreadDivs.map(div => {
+          let parent = div.parentElement;
+          for (let i = 0; i < 5 && parent; i++) {
+            if (parent.tagName === 'A' || parent.getAttribute('role') === 'button') {
+              return parent;
+            }
+            parent = parent.parentElement;
+          }
+          return div.parentElement;
+        }).filter(el => el !== null);
+      }
+    }
+
+    log('Found ' + items.length + ' total conversation items to check');
 
     for (const item of items) {
       const hasUnread = hasUnreadIndicator(item);
+
+      const text = item.textContent?.substring(0, 80) || '';
+      if (text.length > 0) {
+        const hasUnreadText = text.includes('Unread');
+        log('Item: "' + text + '" - hasUnread=' + hasUnread + ', hasUnreadText=' + hasUnreadText);
+      }
+
       if (!hasUnread) continue;
 
-      const text = item.textContent || '';
-      const convId = 'conv-' + text.substring(0, 50).replace(/\\s+/g, '-');
+      const fullText = item.textContent || '';
+      const convId = 'conv-' + fullText.substring(0, 50).replace(/\\s+/g, '-');
 
       if (!seenMessages.has(convId)) {
+        log('✓ Found unread conversation: ' + convId.substring(0, 60));
         conversations.push({ id: convId, element: item });
+      } else {
+        log('Skipping already seen conversation: ' + convId.substring(0, 60));
       }
     }
 
@@ -643,21 +687,32 @@ function buildInstagramBotScript(config: any): string {
   }
 
   function hasUnreadIndicator(element) {
+    // Primary method: Look for the specific Instagram unread div
+    const unreadDiv = element.querySelector('div.x9f619.x1ja2u2z.xzpqnlu.x1hyvwdk.x14bfe9o.xjm9jq1.x6ikm8r.x10wlt62.x10l6tqk.x1i1rx1s');
+    if (unreadDiv && unreadDiv.textContent?.includes('Unread')) {
+      return true;
+    }
+
+    // Fallback: Check for any element with "Unread" text
+    const allDivs = element.querySelectorAll('div');
+    for (const div of allDivs) {
+      if (div.textContent?.trim() === 'Unread') {
+        return true;
+      }
+    }
+
+    // Additional fallback: notification badges
     const badge = element.querySelector('[role="status"], [aria-label*="unread"], [aria-label*="notification"]');
     if (badge) return true;
 
-    const fontWeights = [];
+    // Check for bold text (Instagram often bolds unread message previews)
     const spans = element.querySelectorAll('span, div');
-    spans.forEach(el => {
+    for (const el of spans) {
       const weight = window.getComputedStyle(el).fontWeight;
-      if (weight === 'bold' || weight === '700' || parseInt(weight) >= 600) {
-        fontWeights.push(el);
+      if ((weight === 'bold' || weight === '700' || parseInt(weight) >= 600) && el.textContent && el.textContent.length > 3) {
+        return true;
       }
-    });
-    if (fontWeights.length > 0) return true;
-
-    const html = element.innerHTML.toLowerCase();
-    if (html.includes('unread') || html.includes('notification')) return true;
+    }
 
     return false;
   }
@@ -991,17 +1046,30 @@ function buildInstagramBotScript(config: any): string {
     }
   }
 
+  function scheduleNextPoll() {
+    if (!isRunning) return;
+    const delay = getRandomPollInterval();
+    log('Next scan in ' + Math.round(delay / 1000) + 's');
+    pollInterval = setTimeout(() => {
+      poll();
+      scheduleNextPoll(); // Schedule the next one after this completes
+    }, delay);
+  }
+
   function stop() {
     isRunning = false;
-    if (pollInterval) clearInterval(pollInterval);
+    if (pollInterval) {
+      clearTimeout(pollInterval);
+      clearInterval(pollInterval);
+    }
     window.__SNAPPY_RUNNING__ = false;
     window.__SNAPPY_INSTAGRAM_RUNNING__ = false;
     log('Instagram bot stopped');
   }
 
-  log('🚀 Instagram DM bot started');
+  log('🚀 Instagram DM bot started (no page refresh needed - Instagram updates automatically)');
   poll();
-  pollInterval = setInterval(poll, POLL_MS);
+  scheduleNextPoll();
 
   window.__SNAPPY_STOP__ = stop;
 })();
