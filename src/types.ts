@@ -28,6 +28,8 @@ export interface Configuration {
   threads?: {
     pollIntervalMs?: number;
     maxCommentsPerPoll?: number;
+    activityColumnEnabled?: boolean;
+    activityPriority?: boolean;
   };
   reddit?: {
     pollIntervalMs?: number;
@@ -178,7 +180,9 @@ export const DEFAULT_CONFIG: Configuration = {
   randomSkipProbability: 0.15,
   threads: {
     pollIntervalMs: 60000,
-    maxCommentsPerPoll: 5
+    maxCommentsPerPoll: 5,
+    activityColumnEnabled: true,
+    activityPriority: true
   },
   reddit: {
     pollIntervalMs: 10000,
