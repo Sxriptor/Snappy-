@@ -201,46 +201,131 @@ export function buildThreadsBotScript(config: Configuration): string {
     });
   }
 
+  function findActivityFilterDropdown() {
+    // Find the dropdown button with "All" filter
+    const buttons = Array.from(document.querySelectorAll('div[role="button"][aria-expanded][aria-haspopup="menu"]'));
+    return buttons.find(btn => {
+      const svg = btn.querySelector('svg[aria-label="All"]');
+      return svg !== null;
+    });
+  }
+
+  function findRepliesOption() {
+    // Find the "Replies" option in the dropdown menu
+    // Target based on text content (most stable method)
+    const allSpans = Array.from(document.querySelectorAll('span'));
+    log('Searching through ' + allSpans.length + ' spans for "Replies"');
+
+    const repliesSpan = allSpans.find(span => {
+      const text = span.textContent?.trim();
+      return text === 'Replies'; // Exact match, case-sensitive
+    });
+
+    if (repliesSpan) {
+      log('Found Replies span');
+      // Try clicking parents up to depth 5 to find something clickable
+      let current = repliesSpan;
+      for (let i = 0; i <= 5; i++) {
+        const role = current.getAttribute('role');
+        const tabindex = current.getAttribute('tabindex');
+        log('Depth ' + i + ': tag=' + current.tagName + ', role=' + role + ', tabindex=' + tabindex);
+
+        // Return first element that looks clickable
+        if (role === 'menuitem' || role === 'button' || tabindex === '0') {
+          log('Returning clickable element at depth ' + i);
+          return current;
+        }
+
+        if (!current.parentElement) break;
+        current = current.parentElement;
+      }
+
+      // If nothing clickable found, return the span's parent (or span itself if no parent)
+      log('No explicit clickable found, returning span parent');
+      return repliesSpan.parentElement || repliesSpan;
+    }
+
+    log('Replies span not found');
+    return null;
+  }
+
   async function setupActivityColumn() {
     if (!ACTIVITY_ENABLED) {
       log('Activity column disabled in config');
       return false;
     }
-    
+
     if (activityColumnSetup) return true;
-    
+
     log('Checking if Activity column is open...');
-    
+
     if (isActivityColumnOpen()) {
       log('Activity column already open');
+
+      // Set filter to Replies
+      const filterDropdown = findActivityFilterDropdown();
+      if (filterDropdown) {
+        log('Setting filter to Replies...');
+        filterDropdown.click();
+        await sleep(1200); // Increased wait time for dropdown to fully render
+
+        const repliesOption = findRepliesOption();
+        if (repliesOption) {
+          log('Found Replies option, clicking...');
+          repliesOption.click();
+          await sleep(500);
+          log('Filter set to Replies');
+        } else {
+          log('Replies option not found in dropdown');
+        }
+      }
+
       activityColumnSetup = true;
       return true;
     }
-    
+
     log('Activity column not found, attempting to add it...');
-    
+
     // Click "Add a column" button
     const addColumnBtn = findAddColumnButton();
     if (!addColumnBtn) {
       log('Add column button not found');
       return false;
     }
-    
+
     log('Clicking Add Column button...');
     addColumnBtn.click();
     await sleep(1000);
-    
+
     // Click Activity option
     const activityOption = findActivityOption();
     if (!activityOption) {
       log('Activity option not found');
       return false;
     }
-    
+
     log('Clicking Activity option...');
     activityOption.click();
     await sleep(1500);
-    
+
+    // Set filter to Replies
+    const filterDropdown = findActivityFilterDropdown();
+    if (filterDropdown) {
+      log('Setting filter to Replies...');
+      filterDropdown.click();
+      await sleep(1200); // Increased wait time for dropdown to fully render
+
+      const repliesOption = findRepliesOption();
+      if (repliesOption) {
+        log('Found Replies option, clicking...');
+        repliesOption.click();
+        await sleep(500);
+        log('Filter set to Replies');
+      } else {
+        log('Replies option not found in dropdown');
+      }
+    }
+
     activityColumnSetup = true;
     log('Activity column setup complete');
     return true;

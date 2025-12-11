@@ -137,11 +137,61 @@ function buildThreadsBotScript(config: any): string {
       link.textContent?.trim().toLowerCase() === 'activity'
     );
   }
+  function findActivityFilterDropdown() {
+    const buttons = Array.from(document.querySelectorAll('div[role="button"][aria-expanded][aria-haspopup="menu"]'));
+    return buttons.find(btn => {
+      const svg = btn.querySelector('svg[aria-label="All"]');
+      return svg !== null;
+    });
+  }
+  function findRepliesOption() {
+    const allSpans = Array.from(document.querySelectorAll('span'));
+    log('Searching through ' + allSpans.length + ' spans for "Replies"');
+    const repliesSpan = allSpans.find(span => span.textContent?.trim() === 'Replies');
+    if (repliesSpan) {
+      log('Found Replies span');
+      let current = repliesSpan;
+      for (let i = 0; i <= 5; i++) {
+        const role = current.getAttribute('role');
+        const tabindex = current.getAttribute('tabindex');
+        log('Depth ' + i + ': tag=' + current.tagName + ', role=' + role + ', tabindex=' + tabindex);
+        if (role === 'menuitem' || role === 'button' || tabindex === '0') {
+          log('Returning clickable element at depth ' + i);
+          return current;
+        }
+        if (!current.parentElement) break;
+        current = current.parentElement;
+      }
+      log('No explicit clickable found, returning span parent');
+      return repliesSpan.parentElement || repliesSpan;
+    }
+    log('Replies span not found');
+    return null;
+  }
   async function setupActivityColumn() {
     if (!ACTIVITY_ENABLED) { log('Activity column disabled in config'); return false; }
     if (activityColumnSetup) return true;
     log('Checking if Activity column is open...');
-    if (isActivityColumnOpen()) { log('Activity column already open'); activityColumnSetup = true; return true; }
+    if (isActivityColumnOpen()) {
+      log('Activity column already open');
+      const filterDropdown = findActivityFilterDropdown();
+      if (filterDropdown) {
+        log('Setting filter to Replies...');
+        filterDropdown.click();
+        await sleep(1200);
+        const repliesOption = findRepliesOption();
+        if (repliesOption) {
+          log('Found Replies option, clicking...');
+          repliesOption.click();
+          await sleep(500);
+          log('Filter set to Replies');
+        } else {
+          log('Replies option not found in dropdown');
+        }
+      }
+      activityColumnSetup = true;
+      return true;
+    }
     log('Activity column not found, attempting to add it...');
     const addColumnBtn = findAddColumnButton();
     if (!addColumnBtn) { log('Add column button not found'); return false; }
@@ -149,6 +199,21 @@ function buildThreadsBotScript(config: any): string {
     const activityOption = findActivityOption();
     if (!activityOption) { log('Activity option not found'); return false; }
     log('Clicking Activity option...'); activityOption.click(); await sleep(1500);
+    const filterDropdown = findActivityFilterDropdown();
+    if (filterDropdown) {
+      log('Setting filter to Replies...');
+      filterDropdown.click();
+      await sleep(800);
+      const repliesOption = findRepliesOption();
+      if (repliesOption) {
+        log('Found Replies option, clicking...');
+        repliesOption.click();
+        await sleep(500);
+        log('Filter set to Replies');
+      } else {
+        log('Replies option not found in dropdown');
+      }
+    }
     activityColumnSetup = true; log('Activity column setup complete'); return true;
   }
   function findActivityItems() {
