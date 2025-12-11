@@ -720,8 +720,28 @@ function buildInstagramBotScript(config: any): string {
   async function openConversation(conversation) {
     try {
       log('Opening conversation: ' + conversation.id);
-      conversation.element.click();
-      await sleep(1500);
+
+      let clickTarget = conversation.element;
+
+      if (conversation.element.tagName === 'A') {
+        clickTarget = conversation.element;
+      } else {
+        const link = conversation.element.querySelector('a[href*="/direct/t/"]');
+        if (link) {
+          clickTarget = link;
+          log('Found direct message link within element');
+        } else {
+          const clickable = conversation.element.querySelector('[role="button"], a, button');
+          if (clickable) {
+            clickTarget = clickable;
+            log('Found clickable element within container');
+          }
+        }
+      }
+
+      log('Clicking element: ' + clickTarget.tagName);
+      clickTarget.click();
+      await sleep(2000);
       return true;
     } catch (err) {
       log('Error opening conversation: ' + err);
