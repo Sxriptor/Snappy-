@@ -109,6 +109,7 @@ interface SessionData {
   proxy: { id: string } | null;
   config: { initialUrl: string } | Config;
   state: string;
+  botStatus?: 'active' | 'inactive';
 }
 
 // Track sessions and their webviews
@@ -158,6 +159,11 @@ function createSessionTab(session: SessionData): HTMLElement {
   const status = document.createElement('span');
   status.className = `tab-status ${session.proxy ? 'connected' : 'none'}`;
   
+  const botStatus = document.createElement('span');
+  botStatus.className = `tab-bot-status ${session.botStatus || 'inactive'}`;
+  botStatus.textContent = '●';
+  botStatus.title = `Bot Status: ${session.botStatus || 'inactive'}`;
+  
   const name = document.createElement('span');
   name.className = 'tab-name';
   name.textContent = session.name;
@@ -174,6 +180,7 @@ function createSessionTab(session: SessionData): HTMLElement {
   };
   
   tab.appendChild(status);
+  tab.appendChild(botStatus);
   tab.appendChild(name);
   tab.appendChild(closeBtn);
   
@@ -216,6 +223,9 @@ function activateSession(sessionId: string, suppressLog: boolean = false) {
   loadSessionConfig(sessionId);
   updateSettingsPanelTitle(sessionId);
   updateTabSettingsButtons();
+  
+  // Sync bot status UI with the active session's bot status
+  syncBotStatusUI(sessionId);
   
   if (!suppressLog) {
     const hasCustomConfig = sessionConfigs.has(sessionId);
@@ -415,6 +425,18 @@ function addSessionToUIWithoutActivation(session: SessionData) {
   // Initialize session config if it has one
   if (session.config) {
     sessionConfigs.set(session.id, session.config as Config);
+  }
+  
+  // Update tab bot status indicator if available
+  if (session.botStatus) {
+    const tabElement = document.getElementById(`tab-${session.id}`);
+    if (tabElement) {
+      const botStatusEl = tabElement.querySelector('.tab-bot-status');
+      if (botStatusEl) {
+        botStatusEl.className = `tab-bot-status ${session.botStatus}`;
+        botStatusEl.setAttribute('title', `Bot Status: ${session.botStatus}`);
+      }
+    }
   }
   
   // Update button states since we now have a new tab
@@ -889,6 +911,9 @@ function setupMultiSessionUI() {
   
   // Initialize log tabs container
   initializeLogTabs();
+  
+  // Set up cross-session bot status synchronization
+  setupBotStatusSync();
 }
 
 function initializeLogTabs() {
@@ -901,6 +926,83 @@ function initializeLogTabs() {
   
   // Add some initial styling if needed
   logTabsContainer.style.display = 'flex';
+}
+
+// Sync bot status UI with a specific session's status
+async function syncBotStatusUI(sessionId: string) {
+  try {
+    const session = await (window as any).session.getSession(sessionId);
+    if (session && session.botStatus) {
+      const wasActive = isBotActive;
+      isBotActive = session.botStatus === 'active';
+      
+      // Update UI elements
+      if (isBotActive) {
+        statusDot.classList.add('active');
+        statusText.textContent = 'Active';
+        botBtn.textContent = 'Stop';
+      } else {
+        statusDot.classList.remove('active');
+        statusText.textContent = 'Inactive';
+        botBtn.textContent = 'Start';
+      }
+      
+      // Log if status changed
+      if (wasActive !== isBotActive) {
+        const sessionName = getSessionName(sessionId);
+        addLog(`Bot status synced: ${session.botStatus}`, 'info', sessionId);
+      }
+    }
+  } catch (e) {
+    console.log('Could not sync bot status:', e);
+  }
+}
+
+// Set up cross-session bot status synchronization
+function setupBotStatusSync() {
+  // Listen for bot status changes from other sessions/windows
+  (window as any).session.onSessionBotStatusChanged((data: { sessionId: string; botStatus: 'active' | 'inactive' }) => {
+    const { sessionId, botStatus } = data;
+    
+    // Update tab visual indicator
+    const tab = document.getElementById(`tab-${sessionId}`);
+    if (tab) {
+      const botStatusEl = tab.querySelector('.tab-bot-status');
+      if (botStatusEl) {
+        botStatusEl.className = `tab-bot-status ${botStatus}`;
+        botStatusEl.setAttribute('title', `Bot Status: ${botStatus}`);
+      }
+    }
+    
+    // If this is the active session, update the main UI
+    if (sessionId === activeSessionId) {
+      const wasActive = isBotActive;
+      isBotActive = botStatus === 'active';
+      
+      // Update UI elements
+      if (isBotActive) {
+        statusDot.classList.add('active');
+        statusText.textContent = 'Active';
+        botBtn.textContent = 'Stop';
+      } else {
+        statusDot.classList.remove('active');
+        statusText.textContent = 'Inactive';
+        botBtn.textContent = 'Start';
+      }
+      
+      // Log the status change if it actually changed
+      if (wasActive !== isBotActive) {
+        const sessionName = getSessionName(sessionId);
+        addLog(`Bot ${botStatus} in ${sessionName}`, botStatus === 'active' ? 'success' : 'info', sessionId);
+      }
+    }
+    
+    // Log status change for other sessions
+    if (sessionId !== activeSessionId) {
+      const sessionName = getSessionName(sessionId);
+      addLog(`Bot ${botStatus} in ${sessionName}`, botStatus === 'active' ? 'success' : 'info', 'global');
+    }
+  });
 }
 
 // ============================================================================
@@ -1335,30 +1437,33 @@ async function stopBotInWebview() {
 
 // Bot toggle
 botBtn.addEventListener('click', async () => {
+  if (!activeSessionId) {
+    addLog('No active session', 'error');
+    return;
+  }
+
   if (isBotActive) {
     await stopBotInWebview();
     isBotActive = false;
     statusDot.classList.remove('active');
     statusText.textContent = 'Inactive';
     botBtn.textContent = 'Start';
+    
+    // Update session bot status across all windows
+    await (window as any).session.updateBotStatus(activeSessionId, 'inactive');
   } else {
     addLog('Starting bot...', 'highlight');
     
-    // Start llama server if enabled and not already running
+    // Start llama server if enabled (always start new instance)
     if (llamaServerConfig.enabled) {
-      const currentStatus = await (window as any).llama.getStatus();
-      if (!currentStatus.running) {
-        addLog('Starting Llama.cpp server...', 'info');
-        const startResult = await (window as any).llama.start();
-        if (startResult.running) {
-          addLog(`Llama.cpp server started (PID: ${startResult.pid})`, 'success');
-          updateLlamaUI();
-        } else {
-          addLog(`Warning: Failed to start Llama.cpp server: ${startResult.error}`, 'error');
-          // Continue with bot startup anyway
-        }
+      addLog('Starting new Llama.cpp server instance...', 'info');
+      const startResult = await (window as any).llama.start();
+      if (startResult.running) {
+        addLog(`Llama.cpp server started (PID: ${startResult.pid})`, 'success');
+        updateLlamaUI();
       } else {
-        addLog('Llama.cpp server already running', 'info');
+        addLog(`Warning: Failed to start Llama.cpp server: ${startResult.error}`, 'error');
+        // Continue with bot startup anyway
       }
     }
     
@@ -1368,6 +1473,9 @@ botBtn.addEventListener('click', async () => {
       statusDot.classList.add('active');
       statusText.textContent = 'Active';
       botBtn.textContent = 'Stop';
+      
+      // Update session bot status across all windows
+      await (window as any).session.updateBotStatus(activeSessionId, 'active');
     }
   }
 });
@@ -3662,7 +3770,7 @@ async function startLlamaServer() {
     return;
   }
 
-  addLog('Starting Llama.cpp server...', 'highlight');
+  addLog('Starting new Llama.cpp server instance...', 'highlight');
   (llamaStartBtn as HTMLButtonElement).disabled = true;
 
   try {
@@ -3670,13 +3778,13 @@ async function startLlamaServer() {
     llamaServerStatus = status;
 
     if (status.running) {
-      addLog(`Llama.cpp server started (PID: ${status.pid})`, 'success');
+      addLog(`New Llama.cpp server started (PID: ${status.pid})`, 'success');
       updateLlamaUI();
     } else {
-      addLog(`Failed to start server: ${status.error}`, 'error');
+      addLog(`Failed to start new server: ${status.error}`, 'error');
     }
   } catch (e) {
-    addLog(`Error starting server: ${e}`, 'error');
+    addLog(`Error starting new server: ${e}`, 'error');
   } finally {
     (llamaStartBtn as HTMLButtonElement).disabled = false;
   }
@@ -3684,7 +3792,7 @@ async function startLlamaServer() {
 
 // Stop llama.cpp server
 async function stopLlamaServer() {
-  addLog('Stopping Llama.cpp server...', 'highlight');
+  addLog('Stopping all Llama.cpp servers...', 'highlight');
   (llamaStopBtn as HTMLButtonElement).disabled = true;
 
   try {
@@ -3692,13 +3800,13 @@ async function stopLlamaServer() {
     llamaServerStatus = status;
 
     if (!status.running) {
-      addLog('Llama.cpp server stopped', 'success');
+      addLog('All Llama.cpp servers stopped', 'success');
       updateLlamaUI();
     } else {
-      addLog(`Failed to stop server: ${status.error}`, 'error');
+      addLog(`Failed to stop all servers: ${status.error}`, 'error');
     }
   } catch (e) {
-    addLog(`Error stopping server: ${e}`, 'error');
+    addLog(`Error stopping servers: ${e}`, 'error');
   } finally {
     (llamaStopBtn as HTMLButtonElement).disabled = false;
   }
@@ -3722,8 +3830,6 @@ function updateLlamaUI() {
     llamaStatusDot.textContent = '●';
     llamaServerRunning.textContent = 'Running';
     llamaServerPid.textContent = String(llamaServerStatus.pid || '-');
-    llamaStartBtn.style.display = 'none';
-    llamaStopBtn.style.display = 'inline-block';
 
     // Update uptime
     if (llamaServerStatus.startTime) {
@@ -3738,9 +3844,15 @@ function updateLlamaUI() {
     llamaServerRunning.textContent = 'Stopped';
     llamaServerPid.textContent = '-';
     llamaServerUptime.textContent = '-';
-    llamaStartBtn.style.display = 'inline-block';
-    llamaStopBtn.style.display = 'none';
   }
+  
+  // Always show both buttons - Start opens new instance, Stop kills all
+  llamaStartBtn.style.display = 'inline-block';
+  llamaStopBtn.style.display = 'inline-block';
+  
+  // Update button text to be clearer
+  (llamaStartBtn as HTMLButtonElement).textContent = 'Start New Server';
+  (llamaStopBtn as HTMLButtonElement).textContent = 'Stop All Servers';
 }
 
 // Show llama.cpp configuration modal

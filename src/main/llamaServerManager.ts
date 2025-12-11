@@ -10,9 +10,8 @@ import * as path from 'path';
 import { LlamaServerConfig, LlamaServerStatus } from '../types';
 
 export class LlamaServerManager {
-  private process: ChildProcess | null = null;
+  private processes: Map<number, { process: ChildProcess; startTime: number }> = new Map();
   private config: LlamaServerConfig | null = null;
-  private startTime: number | null = null;
   private statusCallback: ((status: LlamaServerStatus) => void) | null = null;
 
   /**
@@ -45,13 +44,8 @@ export class LlamaServerManager {
       };
     }
 
-    if (this.process) {
-      return {
-        running: true,
-        pid: this.process.pid,
-        startTime: this.startTime || undefined
-      };
-    }
+    // Allow multiple CMD windows - don't check if process already exists
+    // Each start request will open a new CMD window
 
     try {
       const { buildPath, startCommand } = this.config;
@@ -82,12 +76,17 @@ export class LlamaServerManager {
         console.log('[LlamaServerManager] Cleaned command for cmd:', cleanedCommand);
         
         // Use start command to open a new visible command prompt window
-        this.process = spawn('cmd.exe', ['/c', `start "Llama Server" /wait cmd.exe /k "${cleanedCommand}"`], {
+        const newProcess = spawn('cmd.exe', ['/c', `start "Llama Server" /wait cmd.exe /k "${cleanedCommand}"`], {
           cwd: buildPath,
           stdio: 'ignore',
           shell: true,
           detached: false
         });
+        
+        const startTime = Date.now();
+        if (newProcess.pid) {
+          this.processes.set(newProcess.pid, { process: newProcess, startTime });
+        }
       } else {
         // Parse the command for non-Windows platforms
         const args = this.parseCommand(startCommand);
@@ -97,51 +96,63 @@ export class LlamaServerManager {
           throw new Error('Invalid start command');
         }
 
-        this.process = spawn(executable, args, {
+        const newProcess = spawn(executable, args, {
           cwd: buildPath,
           stdio: ['ignore', 'pipe', 'pipe'],
           shell: true,
           detached: false
         });
+        
+        const startTime = Date.now();
+        if (newProcess.pid) {
+          this.processes.set(newProcess.pid, { process: newProcess, startTime });
+        }
       }
 
-      this.startTime = Date.now();
+      const currentProcess = Array.from(this.processes.values()).pop();
+      if (!currentProcess) {
+        throw new Error('Failed to create process');
+      }
 
       // Handle stdout
-      this.process.stdout?.on('data', (data) => {
+      currentProcess.process.stdout?.on('data', (data) => {
         const output = data.toString().trim();
         if (output) {
-          console.log('[LlamaServer]', output);
+          console.log(`[LlamaServer:${currentProcess.process.pid}]`, output);
         }
       });
 
       // Handle stderr
-      this.process.stderr?.on('data', (data) => {
+      currentProcess.process.stderr?.on('data', (data) => {
         const output = data.toString().trim();
         if (output) {
-          console.log('[LlamaServer] ERROR:', output);
+          console.log(`[LlamaServer:${currentProcess.process.pid}] ERROR:`, output);
         }
       });
 
       // Handle process exit
-      this.process.on('exit', (code, signal) => {
-        console.log(`[LlamaServerManager] Process exited with code ${code}, signal ${signal}`);
-        this.process = null;
-        this.startTime = null;
+      currentProcess.process.on('exit', (code, signal) => {
+        const pid = currentProcess.process.pid;
+        console.log(`[LlamaServerManager] Process ${pid} exited with code ${code}, signal ${signal}`);
+        if (pid) {
+          this.processes.delete(pid);
+        }
         this.notifyStatus({
-          running: false,
-          error: `Process exited with code ${code}`
+          running: this.processes.size > 0,
+          error: this.processes.size === 0 ? `Last process exited with code ${code}` : undefined
         });
       });
 
       // Handle process error
-      this.process.on('error', (err) => {
-        console.error('[LlamaServerManager] Process error:', err);
-        this.process = null;
-        this.startTime = null;
+      currentProcess.process.on('error', (err) => {
+        const pid = currentProcess.process.pid;
+        console.error(`[LlamaServerManager] Process ${pid} error:`, err);
+        if (pid) {
+          this.processes.delete(pid);
+        }
         this.notifyStatus({
-          running: false,
-          error: err.message
+          running: this.processes.size > 0,
+          error: this.processes.size === 0 ? err.message : undefined
         });
       });
 
@@ -149,28 +160,26 @@ export class LlamaServerManager {
       await new Promise(resolve => setTimeout(resolve, 500));
 
       // Check if process is still running
-      if (!this.process || this.process.killed) {
+      if (!currentProcess.process || currentProcess.process.killed) {
         throw new Error('Process failed to start');
       }
 
       const status: LlamaServerStatus = {
         running: true,
-        pid: this.process.pid,
-        startTime: this.startTime
+        pid: currentProcess.process.pid,
+        startTime: currentProcess.startTime
       };
 
       this.notifyStatus(status);
-      console.log('[LlamaServerManager] Server started successfully, PID:', this.process.pid);
+      console.log('[LlamaServerManager] Server started successfully, PID:', currentProcess.process.pid);
+      console.log('[LlamaServerManager] Total running processes:', this.processes.size);
       return status;
     } catch (error) {
       const errorMsg = error instanceof Error ? error.message : String(error);
       console.error('[LlamaServerManager] Failed to start server:', errorMsg);
 
-      this.process = null;
-      this.startTime = null;
-
       const status: LlamaServerStatus = {
-        running: false,
+        running: this.processes.size > 0,
         error: errorMsg
       };
 
@@ -180,55 +189,59 @@ export class LlamaServerManager {
   }
 
   /**
-   * Stop the llama.cpp server
+   * Stop all llama.cpp server processes
    */
   async stop(): Promise<LlamaServerStatus> {
-    if (!this.process) {
+    if (this.processes.size === 0) {
       return {
         running: false
       };
     }
 
     try {
-      console.log('[LlamaServerManager] Stopping server, PID:', this.process.pid);
+      console.log('[LlamaServerManager] Stopping all servers, count:', this.processes.size);
 
-      return new Promise((resolve) => {
-        if (!this.process) {
-          resolve({ running: false });
-          return;
-        }
-
-        // Set a timeout for forceful termination
-        const killTimeout = setTimeout(() => {
-          console.log('[LlamaServerManager] Force killing process');
-          if (this.process && !this.process.killed) {
-            this.process.kill('SIGKILL');
+      const stopPromises = Array.from(this.processes.values()).map(({ process }) => {
+        return new Promise<void>((resolve) => {
+          if (!process || process.killed) {
+            resolve();
+            return;
           }
-        }, 5000);
 
-        // Try graceful termination first
-        this.process.once('exit', () => {
-          clearTimeout(killTimeout);
-          this.process = null;
-          this.startTime = null;
+          // Set a timeout for forceful termination
+          const killTimeout = setTimeout(() => {
+            console.log('[LlamaServerManager] Force killing process', process.pid);
+            if (!process.killed) {
+              process.kill('SIGKILL');
+            }
+          }, 5000);
 
-          const status: LlamaServerStatus = {
-            running: false
-          };
+          // Try graceful termination first
+          process.once('exit', () => {
+            clearTimeout(killTimeout);
+            console.log('[LlamaServerManager] Process stopped:', process.pid);
+            resolve();
+          });
 
-          this.notifyStatus(status);
-          console.log('[LlamaServerManager] Server stopped');
-          resolve(status);
+          process.kill('SIGTERM');
         });
-
-        this.process.kill('SIGTERM');
       });
+
+      await Promise.all(stopPromises);
+      this.processes.clear();
+
+      const status: LlamaServerStatus = {
+        running: false
+      };
+
+      this.notifyStatus(status);
+      console.log('[LlamaServerManager] All servers stopped');
+      return status;
     } catch (error) {
       const errorMsg = error instanceof Error ? error.message : String(error);
-      console.error('[LlamaServerManager] Error stopping server:', errorMsg);
+      console.error('[LlamaServerManager] Error stopping servers:', errorMsg);
 
-      this.process = null;
-      this.startTime = null;
+      this.processes.clear();
 
       return {
         running: false,
@@ -241,16 +254,24 @@ export class LlamaServerManager {
    * Get current server status
    */
   getStatus(): LlamaServerStatus {
-    if (!this.process) {
+    if (this.processes.size === 0) {
+      return {
+        running: false
+      };
+    }
+
+    // Return status of the most recent process
+    const latestProcess = Array.from(this.processes.values()).pop();
+    if (!latestProcess) {
       return {
         running: false
       };
     }
 
     return {
-      running: !this.process.killed,
-      pid: this.process.pid,
-      startTime: this.startTime || undefined
+      running: !latestProcess.process.killed,
+      pid: latestProcess.process.pid,
+      startTime: latestProcess.startTime
     };
   }
 
@@ -314,7 +335,7 @@ export class LlamaServerManager {
    * Cleanup on shutdown
    */
   async cleanup(): Promise<void> {
-    if (this.process) {
+    if (this.processes.size > 0) {
       await this.stop();
     }
   }

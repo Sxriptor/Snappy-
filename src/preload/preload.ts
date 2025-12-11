@@ -179,6 +179,13 @@ const sessionAPI = {
   },
 
   /**
+   * Update session bot status
+   */
+  updateBotStatus: async (sessionId: string, botStatus: 'active' | 'inactive'): Promise<boolean> => {
+    return await ipcRenderer.invoke('session:updateBotStatus', { sessionId, botStatus });
+  },
+
+  /**
    * Listen for session events
    */
   onSessionCreated: (callback: (session: unknown) => void): void => {
@@ -191,6 +198,10 @@ const sessionAPI = {
 
   onSessionStateChanged: (callback: (data: { sessionId: string; state: string }) => void): void => {
     ipcRenderer.on('session:stateChanged', (_, data) => callback(data));
+  },
+
+  onSessionBotStatusChanged: (callback: (data: { sessionId: string; botStatus: 'active' | 'inactive' }) => void): void => {
+    ipcRenderer.on('session:botStatusChanged', (_, data) => callback(data));
   }
 };
 

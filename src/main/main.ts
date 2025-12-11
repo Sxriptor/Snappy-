@@ -453,6 +453,18 @@ export function setupIPCHandlers(): void {
     return sessionManager.duplicateSession(sessionId, newName);
   });
 
+  ipcMain.handle('session:updateBotStatus', async (event, { sessionId, botStatus }) => {
+    sessionManager.updateSessionBotStatus(sessionId, botStatus);
+    
+    // Broadcast bot status change to all renderer windows
+    const allWindows = BrowserWindow.getAllWindows();
+    allWindows.forEach(window => {
+      window.webContents.send('session:botStatusChanged', { sessionId, botStatus });
+    });
+    
+    return true;
+  });
+
   // ============================================================================
   // Proxy Management IPC Handlers
   // ============================================================================

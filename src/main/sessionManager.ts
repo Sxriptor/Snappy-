@@ -70,6 +70,7 @@ export class SessionManager extends EventEmitter {
       proxy: proxy || null,
       config: { ...DEFAULT_SESSION_CONFIG, ...config },
       state: 'active',
+      botStatus: 'inactive',
       createdAt: now,
       lastActiveAt: now
     };
@@ -156,6 +157,19 @@ export class SessionManager extends EventEmitter {
       session.state = state;
       session.lastActiveAt = Date.now();
       this.emit('sessionStateChanged', { sessionId, state });
+    }
+  }
+
+  /**
+   * Update session bot status
+   */
+  updateSessionBotStatus(sessionId: string, botStatus: 'active' | 'inactive'): void {
+    const session = this.sessions.get(sessionId);
+    if (session) {
+      session.botStatus = botStatus;
+      session.lastActiveAt = Date.now();
+      this.emit('sessionBotStatusChanged', { sessionId, botStatus });
+      this.schedulePersist();
     }
   }
 
@@ -269,7 +283,8 @@ export class SessionManager extends EventEmitter {
       for (const serialized of data.sessions) {
         const session: Session = {
           ...serialized,
-          state: 'active' // Start all sessions as active
+          state: 'active', // Start all sessions as active
+          botStatus: serialized.botStatus || 'inactive' // Restore bot status or default to inactive
         };
         this.sessions.set(session.id, session);
         this.fingerprintGenerator.markUsed(session.fingerprint);
@@ -317,6 +332,7 @@ export class SessionManager extends EventEmitter {
       fingerprint: session.fingerprint,
       proxy: session.proxy,
       config: session.config,
+      botStatus: session.botStatus,
       createdAt: session.createdAt,
       lastActiveAt: session.lastActiveAt
     }));

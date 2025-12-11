@@ -300,6 +300,7 @@ export interface Session {
   proxy: ProxyConfig | null;
   config: SessionConfig;
   state: SessionState;
+  botStatus: 'active' | 'inactive';
   createdAt: number;
   lastActiveAt: number;
 }
@@ -314,6 +315,7 @@ export interface SerializedSession {
   fingerprint: BrowserFingerprint;
   proxy: ProxyConfig | null;
   config: SessionConfig;
+  botStatus: 'active' | 'inactive';
   createdAt: number;
   lastActiveAt: number;
 }

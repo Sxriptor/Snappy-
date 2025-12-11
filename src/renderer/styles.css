@@ -746,6 +746,23 @@ input[type="number"] {
   background: #333;
 }
 
+.tab-bot-status {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  margin-left: 2px;
+}
+
+.tab-bot-status.active {
+  background: #5a8;
+  box-shadow: 0 0 4px rgba(85, 170, 136, 0.5);
+}
+
+.tab-bot-status.inactive {
+  background: #555;
+}
+
 .tab-name {
   overflow: hidden;
   text-overflow: ellipsis;

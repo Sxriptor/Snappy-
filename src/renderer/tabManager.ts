@@ -11,6 +11,7 @@ export interface TabState {
   sessionId: string;
   name: string;
   proxyStatus: 'connected' | 'disconnected' | 'error' | 'none';
+  botStatus: 'active' | 'inactive';
   isHibernated: boolean;
   isActive: boolean;
 }
@@ -86,6 +87,7 @@ export class TabManager {
       sessionId: session.id,
       name: session.name,
       proxyStatus: session.proxy ? 'connected' : 'none',
+      botStatus: session.botStatus || 'inactive',
       isHibernated: session.state === 'hibernated',
       isActive: false
     };
@@ -182,6 +184,7 @@ export class TabManager {
 
     tabElement.innerHTML = `
       <span class="tab-status ${tab.proxyStatus}"></span>
+      <span class="tab-bot-status ${tab.botStatus}" title="Bot Status: ${tab.botStatus}">●</span>
       <span class="tab-name">${this.escapeHtml(tab.name)}</span>
       <button class="tab-close" title="Close">&times;</button>
     `;
@@ -228,6 +231,12 @@ export class TabManager {
     const statusEl = tabElement.querySelector('.tab-status');
     if (statusEl) {
       statusEl.className = `tab-status ${tab.proxyStatus}`;
+    }
+
+    const botStatusEl = tabElement.querySelector('.tab-bot-status');
+    if (botStatusEl) {
+      botStatusEl.className = `tab-bot-status ${tab.botStatus}`;
+      botStatusEl.setAttribute('title', `Bot Status: ${tab.botStatus}`);
     }
 
     const nameEl = tabElement.querySelector('.tab-name');
