@@ -27,6 +27,7 @@ export function buildThreadsBotScript(config: Configuration): string {
   let isRunning = true;
   let pollInterval = null;
   let isProcessing = false;
+  let refreshInterval = null;
 
   const MIN_COMMENT_LENGTH = 3;
   const POLL_MS = (CONFIG?.threads && CONFIG.threads.pollIntervalMs) || 60000;
@@ -35,8 +36,26 @@ export function buildThreadsBotScript(config: Configuration): string {
   const ACTIVITY_PRIORITY = (CONFIG?.threads && CONFIG.threads.activityPriority) !== false;
   const typingDelayRange = CONFIG?.typingDelayRangeMs || [50, 150];
   const preReplyDelayRange = CONFIG?.preReplyDelayRangeMs || [2000, 6000];
-  
+
   let activityColumnSetup = false;
+
+  function scheduleNextRefresh() {
+    // Random interval between 2-8 seconds
+    const refreshDelay = Math.floor(Math.random() * 6000) + 2000;
+    refreshInterval = setTimeout(() => {
+      if (!isRunning) {
+        log('Skipping refresh - bot stopped');
+        return;
+      }
+      if (!isProcessing) {
+        log('Refreshing page (no processing in progress)');
+        location.reload();
+      } else {
+        log('Skipping refresh - processing in progress');
+        scheduleNextRefresh(); // Schedule next attempt
+      }
+    }, refreshDelay);
+  }
 
   function log(msg) {
     const formatted = '[Snappy][Threads] ' + msg;
@@ -167,6 +186,33 @@ export function buildThreadsBotScript(config: Configuration): string {
 
   function findActivityOption() {
     // Find the Activity option after clicking Add Column
+    // Look for the specific span structure containing "Activity" text
+    const spans = Array.from(document.querySelectorAll('span.x1lliihq.x193iq5w.x6ikm8r.x10wlt62.xlyipyv.xuxw1ft'));
+    const activitySpan = spans.find(span => {
+      const text = span.textContent?.trim().toLowerCase();
+      return text === 'activity';
+    });
+
+    if (activitySpan) {
+      // Return the clickable parent div that contains this span
+      // Navigate up to find the clickable container
+      let parent = activitySpan.parentElement;
+      while (parent) {
+        if (parent.getAttribute('role') === 'button' || parent.getAttribute('tabindex') === '0') {
+          return parent;
+        }
+        // Check if parent has the clickable div characteristics
+        const classes = parent.className || '';
+        if (classes.includes('x78zum5') && classes.includes('xdt5ytf')) {
+          return parent;
+        }
+        parent = parent.parentElement;
+      }
+      // If we can't find a specific clickable parent, return the closest interactive ancestor
+      return activitySpan.closest('[role="button"], a, button') || activitySpan.parentElement;
+    }
+
+    // Fallback to original method
     const activityLinks = Array.from(document.querySelectorAll('a[href="/"]'));
     return activityLinks.find(link => {
       const text = link.textContent?.trim().toLowerCase();
@@ -174,46 +220,134 @@ export function buildThreadsBotScript(config: Configuration): string {
     });
   }
 
+  function findActivityFilterDropdown() {
+    // Find the dropdown button with "All" filter
+    const buttons = Array.from(document.querySelectorAll('div[role="button"][aria-expanded][aria-haspopup="menu"]'));
+    return buttons.find(btn => {
+      const svg = btn.querySelector('svg[aria-label="All"]');
+      return svg !== null;
+    });
+  }
+
+  function findRepliesOption() {
+    // Find the "Replies" option in the dropdown menu
+    // Target based on text content (most stable method)
+    const allSpans = Array.from(document.querySelectorAll('span'));
+    log('Searching through ' + allSpans.length + ' spans for "Replies"');
+
+    const repliesSpan = allSpans.find(span => {
+      const text = span.textContent?.trim();
+      return text === 'Replies'; // Exact match, case-sensitive
+    });
+
+    if (repliesSpan) {
+      log('Found Replies span');
+      // Try clicking parents up to depth 5 to find something clickable
+      let current = repliesSpan;
+      for (let i = 0; i <= 5; i++) {
+        const role = current.getAttribute('role');
+        const tabindex = current.getAttribute('tabindex');
+        log('Depth ' + i + ': tag=' + current.tagName + ', role=' + role + ', tabindex=' + tabindex);
+
+        // Return first element that looks clickable
+        if (role === 'menuitem' || role === 'button' || tabindex === '0') {
+          log('Returning clickable element at depth ' + i);
+          return current;
+        }
+
+        if (!current.parentElement) break;
+        current = current.parentElement;
+      }
+
+      // If nothing clickable found, return the span's parent (or span itself if no parent)
+      log('No explicit clickable found, returning span parent');
+      return repliesSpan.parentElement || repliesSpan;
+    }
+
+    log('Replies span not found');
+    return null;
+  }
+
   async function setupActivityColumn() {
     if (!ACTIVITY_ENABLED) {
       log('Activity column disabled in config');
       return false;
     }
-    
-    if (activityColumnSetup) return true;
-    
+
     log('Checking if Activity column is open...');
-    
+
     if (isActivityColumnOpen()) {
-      log('Activity column already open');
+      // Column is open, but check if we need to set the filter
+      if (!activityColumnSetup) {
+        log('Activity column already open, setting filter...');
+      } else {
+        log('Activity column open, ensuring filter is set...');
+      }
+
+      // Always set filter to Replies (in case page was refreshed)
+      const filterDropdown = findActivityFilterDropdown();
+      if (filterDropdown) {
+        log('Setting filter to Replies...');
+        filterDropdown.click();
+        await sleep(1200); // Increased wait time for dropdown to fully render
+
+        const repliesOption = findRepliesOption();
+        if (repliesOption) {
+          log('Found Replies option, clicking...');
+          repliesOption.click();
+          await sleep(500);
+          log('Filter set to Replies');
+        } else {
+          log('Replies option not found in dropdown');
+        }
+      }
+
       activityColumnSetup = true;
       return true;
     }
-    
+
     log('Activity column not found, attempting to add it...');
-    
+
     // Click "Add a column" button
     const addColumnBtn = findAddColumnButton();
     if (!addColumnBtn) {
       log('Add column button not found');
       return false;
     }
-    
+
     log('Clicking Add Column button...');
     addColumnBtn.click();
     await sleep(1000);
-    
+
     // Click Activity option
     const activityOption = findActivityOption();
     if (!activityOption) {
       log('Activity option not found');
       return false;
     }
-    
+
     log('Clicking Activity option...');
     activityOption.click();
     await sleep(1500);
-    
+
+    // Set filter to Replies
+    const filterDropdown = findActivityFilterDropdown();
+    if (filterDropdown) {
+      log('Setting filter to Replies...');
+      filterDropdown.click();
+      await sleep(1200); // Increased wait time for dropdown to fully render
+
+      const repliesOption = findRepliesOption();
+      if (repliesOption) {
+        log('Found Replies option, clicking...');
+        repliesOption.click();
+        await sleep(500);
+        log('Filter set to Replies');
+      } else {
+        log('Replies option not found in dropdown');
+      }
+    }
+
     activityColumnSetup = true;
     log('Activity column setup complete');
     return true;
@@ -628,15 +762,17 @@ export function buildThreadsBotScript(config: Configuration): string {
   function stop() {
     isRunning = false;
     if (pollInterval) clearInterval(pollInterval);
+    if (refreshInterval) clearTimeout(refreshInterval);
     window.__SNAPPY_RUNNING__ = false;
     window.__SNAPPY_THREADS_RUNNING__ = false;
     log('Threads bot stopped');
   }
 
-  // Start polling
+  // Start polling and refresh scheduler
   log('🚀 Threads bot started');
   poll();
   pollInterval = setInterval(poll, POLL_MS);
+  scheduleNextRefresh();
 
   window.__SNAPPY_STOP__ = stop;
 })();
