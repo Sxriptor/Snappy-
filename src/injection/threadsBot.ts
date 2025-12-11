@@ -27,6 +27,7 @@ export function buildThreadsBotScript(config: Configuration): string {
   let isRunning = true;
   let pollInterval = null;
   let isProcessing = false;
+  let refreshInterval = null;
 
   const MIN_COMMENT_LENGTH = 3;
   const POLL_MS = (CONFIG?.threads && CONFIG.threads.pollIntervalMs) || 60000;
@@ -35,8 +36,22 @@ export function buildThreadsBotScript(config: Configuration): string {
   const ACTIVITY_PRIORITY = (CONFIG?.threads && CONFIG.threads.activityPriority) !== false;
   const typingDelayRange = CONFIG?.typingDelayRangeMs || [50, 150];
   const preReplyDelayRange = CONFIG?.preReplyDelayRangeMs || [2000, 6000];
-  
+
   let activityColumnSetup = false;
+
+  function scheduleNextRefresh() {
+    // Random interval between 2-8 seconds
+    const refreshDelay = Math.floor(Math.random() * 6000) + 2000;
+    refreshInterval = setTimeout(() => {
+      if (!isProcessing) {
+        log('Refreshing page (no processing in progress)');
+        location.reload();
+      } else {
+        log('Skipping refresh - processing in progress');
+        scheduleNextRefresh(); // Schedule next attempt
+      }
+    }, refreshDelay);
+  }
 
   function log(msg) {
     const formatted = '[Snappy][Threads] ' + msg;
@@ -255,14 +270,17 @@ export function buildThreadsBotScript(config: Configuration): string {
       return false;
     }
 
-    if (activityColumnSetup) return true;
-
     log('Checking if Activity column is open...');
 
     if (isActivityColumnOpen()) {
-      log('Activity column already open');
+      // Column is open, but check if we need to set the filter
+      if (!activityColumnSetup) {
+        log('Activity column already open, setting filter...');
+      } else {
+        log('Activity column open, ensuring filter is set...');
+      }
 
-      // Set filter to Replies
+      // Always set filter to Replies (in case page was refreshed)
       const filterDropdown = findActivityFilterDropdown();
       if (filterDropdown) {
         log('Setting filter to Replies...');
@@ -740,15 +758,17 @@ export function buildThreadsBotScript(config: Configuration): string {
   function stop() {
     isRunning = false;
     if (pollInterval) clearInterval(pollInterval);
+    if (refreshInterval) clearTimeout(refreshInterval);
     window.__SNAPPY_RUNNING__ = false;
     window.__SNAPPY_THREADS_RUNNING__ = false;
     log('Threads bot stopped');
   }
 
-  // Start polling
+  // Start polling and refresh scheduler
   log('🚀 Threads bot started');
   poll();
   pollInterval = setInterval(poll, POLL_MS);
+  scheduleNextRefresh();
 
   window.__SNAPPY_STOP__ = stop;
 })();

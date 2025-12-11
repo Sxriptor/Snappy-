@@ -29,6 +29,7 @@ function buildThreadsBotScript(config: any): string {
   let isRunning = true;
   let pollInterval = null;
   let isProcessing = false;
+  let refreshInterval = null;
   const MIN_COMMENT_LENGTH = 3;
   const POLL_MS = (CONFIG?.threads && CONFIG.threads.pollIntervalMs) || 60000;
   const MAX_PER_POLL = (CONFIG?.threads && CONFIG.threads.maxCommentsPerPoll) || 5;
@@ -37,6 +38,18 @@ function buildThreadsBotScript(config: any): string {
   const typingDelayRange = CONFIG?.typingDelayRangeMs || [50, 150];
   const preReplyDelayRange = CONFIG?.preReplyDelayRangeMs || [2000, 6000];
   let activityColumnSetup = false;
+  function scheduleNextRefresh() {
+    const refreshDelay = Math.floor(Math.random() * 6000) + 2000;
+    refreshInterval = setTimeout(() => {
+      if (!isProcessing) {
+        log('Refreshing page (no processing in progress)');
+        location.reload();
+      } else {
+        log('Skipping refresh - processing in progress');
+        scheduleNextRefresh();
+      }
+    }, refreshDelay);
+  }
   function log(msg) {
     const formatted = '[Snappy][Threads] ' + msg;
     console.log(formatted);
@@ -170,10 +183,10 @@ function buildThreadsBotScript(config: any): string {
   }
   async function setupActivityColumn() {
     if (!ACTIVITY_ENABLED) { log('Activity column disabled in config'); return false; }
-    if (activityColumnSetup) return true;
     log('Checking if Activity column is open...');
     if (isActivityColumnOpen()) {
-      log('Activity column already open');
+      if (!activityColumnSetup) { log('Activity column already open, setting filter...'); }
+      else { log('Activity column open, ensuring filter is set...'); }
       const filterDropdown = findActivityFilterDropdown();
       if (filterDropdown) {
         log('Setting filter to Replies...');
@@ -453,6 +466,7 @@ function buildThreadsBotScript(config: any): string {
   function stop() {
     isRunning = false;
     if (pollInterval) clearInterval(pollInterval);
+    if (refreshInterval) clearTimeout(refreshInterval);
     window.__SNAPPY_RUNNING__ = false;
     window.__SNAPPY_THREADS_RUNNING__ = false;
     log('Threads bot stopped');
@@ -460,6 +474,7 @@ function buildThreadsBotScript(config: any): string {
   log('🚀 Threads bot started');
   poll();
   pollInterval = setInterval(poll, POLL_MS);
+  scheduleNextRefresh();
   window.__SNAPPY_STOP__ = stop;
 })();
 `;
