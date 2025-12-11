@@ -41,6 +41,10 @@ function buildThreadsBotScript(config: any): string {
   function scheduleNextRefresh() {
     const refreshDelay = Math.floor(Math.random() * 6000) + 2000;
     refreshInterval = setTimeout(() => {
+      if (!isRunning) {
+        log('Skipping refresh - bot stopped');
+        return;
+      }
       if (!isProcessing) {
         log('Refreshing page (no processing in progress)');
         location.reload();

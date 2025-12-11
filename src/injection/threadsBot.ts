@@ -43,6 +43,10 @@ export function buildThreadsBotScript(config: Configuration): string {
     // Random interval between 2-8 seconds
     const refreshDelay = Math.floor(Math.random() * 6000) + 2000;
     refreshInterval = setTimeout(() => {
+      if (!isRunning) {
+        log('Skipping refresh - bot stopped');
+        return;
+      }
       if (!isProcessing) {
         log('Refreshing page (no processing in progress)');
         location.reload();
