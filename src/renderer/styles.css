@@ -114,9 +114,6 @@ body {
   border-radius: 2px;
   border: 1px solid #2a2a2a;
 }
-  letter-spacing: 1px;
-  color: #666;
-}
 
 #panel-close {
   background: none;
@@ -386,6 +383,56 @@ input[type="number"] {
   background: #111;
   border-bottom: 1px solid #1a1a1a;
   cursor: pointer;
+}
+
+.log-tabs-container {
+  display: flex;
+  gap: 2px;
+  overflow-x: auto;
+  flex: 1;
+  margin-right: 12px;
+}
+
+.log-tabs-container::-webkit-scrollbar {
+  height: 2px;
+}
+
+.log-tabs-container::-webkit-scrollbar-thumb {
+  background: #2a2a2a;
+}
+
+.log-tab {
+  padding: 4px 8px;
+  background: #0a0a0a;
+  border: 1px solid #1a1a1a;
+  color: #555;
+  font-size: 9px;
+  cursor: pointer;
+  white-space: nowrap;
+  border-radius: 2px 2px 0 0;
+  position: relative;
+}
+
+.log-tab:hover {
+  background: #151515;
+  color: #777;
+}
+
+.log-tab.active {
+  background: #1a1a1a;
+  color: #888;
+  border-color: #2a2a2a;
+}
+
+.log-tab.has-logs::after {
+  content: '';
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  width: 4px;
+  height: 4px;
+  background: #5a8;
+  border-radius: 50%;
 }
 
 #log-header span {
@@ -1121,8 +1168,9 @@ b Actions */
   background: #1a1a1a;
   color: #666;
   cursor: not-allowed;
-}/
-* Tab Settings Indicator */
+}
+
+/* Tab Settings Indicator */
 .tab-settings-indicator {
   color: #0eadff;
   font-size: 8px;

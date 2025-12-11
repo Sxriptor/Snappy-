@@ -188,7 +188,7 @@ function createSessionTab(session: SessionData): HTMLElement {
 }
 
 // Activate a session (show its webview, highlight tab)
-function activateSession(sessionId: string) {
+function activateSession(sessionId: string, suppressLog: boolean = false) {
   // Hide all webviews
   sessionWebviews.forEach((wv, id) => {
     wv.classList.add('hidden');
@@ -209,14 +209,19 @@ function activateSession(sessionId: string) {
   
   activeSessionId = sessionId;
   
+  // Switch to this session's log view
+  switchToLogSession(sessionId);
+  
   // Load configuration for this session
   loadSessionConfig(sessionId);
   updateSettingsPanelTitle(sessionId);
   updateTabSettingsButtons();
   
-  const hasCustomConfig = sessionConfigs.has(sessionId);
-  const configStatus = hasCustomConfig ? 'custom settings' : 'default settings';
-  addLog(`Switched to ${getSessionName(sessionId)} (${configStatus})`, 'info');
+  if (!suppressLog) {
+    const hasCustomConfig = sessionConfigs.has(sessionId);
+    const configStatus = hasCustomConfig ? 'custom settings' : 'default settings';
+    addLog(`Switched to ${getSessionName(sessionId)} (${configStatus})`, 'info', sessionId);
+  }
 }
 
 // Delete a session
@@ -238,6 +243,9 @@ async function deleteSession(sessionId: string) {
     const tab = document.getElementById(`tab-${sessionId}`);
     if (tab) tab.remove();
     
+    // Remove log tab
+    removeLogTab(sessionId);
+    
     // If this was active, activate another
     if (activeSessionId === sessionId) {
       const remaining = Array.from(sessionWebviews.keys());
@@ -253,7 +261,7 @@ async function deleteSession(sessionId: string) {
       }
     }
     
-    addLog(`Session deleted`, 'info');
+    addLog(`Session deleted`, 'info', sessionId);
   } catch (e) {
     addLog(`Failed to delete session: ${e}`, 'error');
   }
@@ -267,14 +275,14 @@ async function detachSession(sessionId: string) {
     // Get webview before detaching
     const wv = sessionWebviews.get(sessionId);
     if (!wv) {
-      addLog('No webview found for session', 'error');
+      addLog('No webview found for session', 'error', sessionId);
       return;
     }
     
     // Create detached window
     const result = await (window as any).windowManager.detachSession(sessionId, sessionName);
     if (!result.success) {
-      addLog(`Failed to detach session: ${result.error}`, 'error');
+      addLog(`Failed to detach session: ${result.error}`, 'error', sessionId);
       return;
     }
     
@@ -353,6 +361,8 @@ function setupContextMenu() {
             const tab = document.getElementById(`tab-${sessionId}`);
             const nameEl = tab?.querySelector('.tab-name');
             if (nameEl) nameEl.textContent = newName;
+            // Also update the log tab name
+            renameLogTab(sessionId, newName);
           }
           break;
         case 'duplicate':
@@ -387,8 +397,8 @@ function setupContextMenu() {
   });
 }
 
-// Add a session to the UI (tab + webview)
-function addSessionToUI(session: SessionData) {
+// Add a session to the UI without activating it (for startup)
+function addSessionToUIWithoutActivation(session: SessionData) {
   const tabsContainer = document.getElementById('tabs-container');
   if (!tabsContainer) return;
   
@@ -399,16 +409,24 @@ function addSessionToUI(session: SessionData) {
   // Create webview
   createSessionWebview(session);
   
+  // Create log tab (don't auto-activate during startup)
+  createLogTab(session.id, session.name, false);
+  
   // Initialize session config if it has one
   if (session.config) {
     sessionConfigs.set(session.id, session.config as Config);
   }
   
-  // Activate it
-  activateSession(session.id);
-  
   // Update button states since we now have a new tab
   updateTabSettingsButtons();
+}
+
+// Add a session to the UI (tab + webview) and activate it
+function addSessionToUI(session: SessionData) {
+  addSessionToUIWithoutActivation(session);
+  
+  // Activate it
+  activateSession(session.id);
 }
 
 // Update settings panel title to show which session is active
@@ -606,6 +624,13 @@ function setupDetachedWindowMode(sessionId: string, sessionName: string) {
     tabsContainer.innerHTML = '';
   }
   
+  // Clear log tabs and create one for this session
+  const logTabsContainer = document.getElementById('log-tabs-container');
+  if (logTabsContainer) {
+    logTabsContainer.innerHTML = '';
+  }
+  createLogTab(sessionId, sessionName);
+  
   // Load only the detached session
   loadDetachedSession(sessionId, sessionName);
   
@@ -793,14 +818,27 @@ async function loadExistingSessions() {
     return;
   }
   
+  // Create a global log tab for system messages (auto-activate)
+  createLogTab('global', 'System', true);
+  
   try {
     const sessions = await (window as any).session.getAllSessions();
     if (sessions && sessions.length > 0) {
-      sessions.forEach((s: SessionData) => addSessionToUI(s));
-      addLog(`Loaded ${sessions.length} session(s)`, 'info');
+      // Add all sessions to UI without activating them
+      sessions.forEach((s: SessionData) => addSessionToUIWithoutActivation(s));
+      
+      // Now activate the first session (suppress log during startup)
+      if (sessions.length > 0) {
+        activateSession(sessions[0].id, true);
+      }
+      
+      addLog(`Loaded ${sessions.length} session(s)`, 'info', 'global');
+    } else {
+      addLog('No existing sessions found', 'info', 'global');
     }
   } catch (e) {
     console.log('Could not load sessions:', e);
+    addLog('Could not load sessions', 'error', 'global');
   }
 }
 
@@ -848,6 +886,21 @@ function setupMultiSessionUI() {
   
   // Set up detached window handlers
   setupDetachedWindowHandlers();
+  
+  // Initialize log tabs container
+  initializeLogTabs();
+}
+
+function initializeLogTabs() {
+  // Ensure log tabs container exists
+  const logTabsContainer = document.getElementById('log-tabs-container');
+  if (!logTabsContainer) {
+    console.error('Log tabs container not found');
+    return;
+  }
+  
+  // Add some initial styling if needed
+  logTabsContainer.style.display = 'flex';
 }
 
 // ============================================================================
@@ -994,20 +1047,155 @@ testConnectionBtn?.addEventListener('click', async () => {
   }
 });
 
+// ============================================================================
+// Per-Session Activity Logs
+// ============================================================================
+
+interface LogEntry {
+  message: string;
+  type: 'info' | 'success' | 'error' | 'highlight';
+  timestamp: Date;
+}
+
+// Store logs per session
+const sessionLogs = new Map<string, LogEntry[]>();
+let activeLogSessionId: string | null = null;
+
 // Log functions
-function addLog(message: string, type: 'info' | 'success' | 'error' | 'highlight' = 'info') {
-  const entry = document.createElement('div');
-  entry.className = `log-entry ${type}`;
+function addLog(message: string, type: 'info' | 'success' | 'error' | 'highlight' = 'info', targetSessionId?: string) {
+  const sessionId = targetSessionId || activeSessionId || 'global';
   
-  const time = new Date().toLocaleTimeString();
-  entry.innerHTML = `<span class="log-time">${time}</span>${escapeHtml(message)}`;
+  // Create log entry
+  const logEntry: LogEntry = {
+    message,
+    type,
+    timestamp: new Date()
+  };
+  
+  // Store in session logs
+  if (!sessionLogs.has(sessionId)) {
+    sessionLogs.set(sessionId, []);
+  }
+  
+  const logs = sessionLogs.get(sessionId)!;
+  logs.push(logEntry);
+  
+  // Keep only last 100 entries per session
+  if (logs.length > 100) {
+    logs.shift();
+  }
+  
+  // Update UI if this is the active log session
+  if (activeLogSessionId === sessionId) {
+    renderLogEntry(logEntry);
+  }
+  
+  // Update log tab indicator
+  updateLogTabIndicator(sessionId);
+}
+
+function renderLogEntry(logEntry: LogEntry) {
+  const entry = document.createElement('div');
+  entry.className = `log-entry ${logEntry.type}`;
+  
+  const time = logEntry.timestamp.toLocaleTimeString();
+  entry.innerHTML = `<span class="log-time">${time}</span>${escapeHtml(logEntry.message)}`;
   
   logContent.appendChild(entry);
   logContent.scrollTop = logContent.scrollHeight;
+}
+
+function switchToLogSession(sessionId: string) {
+  activeLogSessionId = sessionId;
   
-  // Keep only last 100 entries
-  while (logContent.children.length > 100) {
-    logContent.removeChild(logContent.firstChild!);
+  // Clear current log content
+  logContent.innerHTML = '';
+  
+  // Render logs for this session
+  const logs = sessionLogs.get(sessionId) || [];
+  logs.forEach(logEntry => renderLogEntry(logEntry));
+  
+  // Update active log tab
+  updateActiveLogTab(sessionId);
+}
+
+function updateLogTabIndicator(sessionId: string) {
+  const logTab = document.getElementById(`log-tab-${sessionId}`);
+  if (logTab) {
+    const logs = sessionLogs.get(sessionId) || [];
+    const hasNewLogs = logs.length > 0;
+    
+    // Add indicator if there are logs and this isn't the active session
+    if (hasNewLogs && activeLogSessionId !== sessionId) {
+      logTab.classList.add('has-logs');
+    }
+  }
+}
+
+function updateActiveLogTab(sessionId: string) {
+  // Remove active class from all log tabs
+  document.querySelectorAll('.log-tab').forEach(tab => {
+    tab.classList.remove('active');
+    tab.classList.remove('has-logs'); // Clear indicator when viewing
+  });
+  
+  // Add active class to current tab
+  const activeTab = document.getElementById(`log-tab-${sessionId}`);
+  if (activeTab) {
+    activeTab.classList.add('active');
+  }
+}
+
+function createLogTab(sessionId: string, sessionName: string, autoActivate: boolean = true) {
+  const logTabsContainer = document.getElementById('log-tabs-container');
+  if (!logTabsContainer) return;
+  
+  const logTab = document.createElement('div');
+  logTab.id = `log-tab-${sessionId}`;
+  logTab.className = 'log-tab';
+  logTab.textContent = sessionName;
+  logTab.title = `Activity log for ${sessionName}`;
+  
+  logTab.addEventListener('click', () => {
+    switchToLogSession(sessionId);
+  });
+  
+  logTabsContainer.appendChild(logTab);
+  
+  // If this is the first tab and auto-activate is enabled, make it active
+  if (autoActivate && logTabsContainer.children.length === 1) {
+    switchToLogSession(sessionId);
+  }
+}
+
+function removeLogTab(sessionId: string) {
+  const logTab = document.getElementById(`log-tab-${sessionId}`);
+  if (logTab) {
+    logTab.remove();
+  }
+  
+  // Remove session logs
+  sessionLogs.delete(sessionId);
+  
+  // Switch to another tab if this was active
+  if (activeLogSessionId === sessionId) {
+    const logTabsContainer = document.getElementById('log-tabs-container');
+    if (logTabsContainer && logTabsContainer.children.length > 0) {
+      const firstTab = logTabsContainer.children[0] as HTMLElement;
+      const firstSessionId = firstTab.id.replace('log-tab-', '');
+      switchToLogSession(firstSessionId);
+    } else {
+      activeLogSessionId = null;
+      logContent.innerHTML = '';
+    }
+  }
+}
+
+function renameLogTab(sessionId: string, newName: string) {
+  const logTab = document.getElementById(`log-tab-${sessionId}`);
+  if (logTab) {
+    logTab.textContent = newName;
+    logTab.title = `Activity log for ${newName}`;
   }
 }
 
@@ -1042,8 +1230,9 @@ function loadUrl() {
   if (!url.startsWith('http')) url = 'https://' + url;
   const currentWebview = getActiveWebview();
   if (currentWebview) {
+    const webviewSessionId = getSessionIdForWebview(currentWebview) || activeSessionId;
     currentWebview.src = url;
-    addLog(`Navigating to: ${url}`, 'info');
+    addLog(`Navigating to: ${url}`, 'info', webviewSessionId || undefined);
   } else {
     addLog('No active webview', 'error');
   }
@@ -1059,6 +1248,9 @@ async function injectBotIntoWebview() {
     addLog('No active webview or session for injection', 'error');
     return false;
   }
+  
+  // Get the session ID for this specific webview
+  const webviewSessionId = getSessionIdForWebview(currentWebview) || activeSessionId;
   
   try {
     // Use session-specific configuration
@@ -1084,7 +1276,7 @@ async function injectBotIntoWebview() {
       hostname = '';
     }
     
-    addLog(`Injecting bot for host: ${hostname || 'unknown'}`, 'info');
+    addLog(`Injecting bot for host: ${hostname || 'unknown'}`, 'info', webviewSessionId);
 
     // Inject the bot script into the webview
     const botScript = getBotScript(config!, hostname);
@@ -1092,7 +1284,7 @@ async function injectBotIntoWebview() {
     // Try injection with error details
     try {
       await currentWebview.executeJavaScript(botScript);
-      addLog('Bot injected successfully', 'success');
+      addLog('Bot injected successfully', 'success', webviewSessionId);
       
       // Verify bot is running
       setTimeout(async () => {
@@ -1105,24 +1297,24 @@ async function injectBotIntoWebview() {
           // Force a log message
           await wv.executeJavaScript('console.log("[Snappy] Verification ping")');
         } catch (e) {
-          addLog('Could not verify bot status', 'error');
+          addLog('Could not verify bot status', 'error', webviewSessionId);
         }
       }, 1000);
       
       return true;
     } catch (injErr: any) {
-      addLog(`Script error: ${injErr.message || injErr}`, 'error');
+      addLog(`Script error: ${injErr.message || injErr}`, 'error', webviewSessionId);
       // Try a simpler test script
       try {
         await currentWebview.executeJavaScript('console.log("[Snappy] Test injection works")');
-        addLog('Basic injection works - bot script has syntax error', 'error');
+        addLog('Basic injection works - bot script has syntax error', 'error', webviewSessionId);
       } catch {
-        addLog('Webview not ready for injection', 'error');
+        addLog('Webview not ready for injection', 'error', webviewSessionId);
       }
       return false;
     }
   } catch (e) {
-    addLog(`Injection failed: ${e}`, 'error');
+    addLog(`Injection failed: ${e}`, 'error', webviewSessionId);
     return false;
   }
 }
@@ -1130,11 +1322,14 @@ async function injectBotIntoWebview() {
 async function stopBotInWebview() {
   const currentWebview = getActiveWebview();
   if (!currentWebview) return;
+  
+  const webviewSessionId = getSessionIdForWebview(currentWebview) || activeSessionId;
+  
   try {
     await currentWebview.executeJavaScript('if(window.__SNAPPY_STOP__) window.__SNAPPY_STOP__();');
-    addLog('Bot stopped', 'info');
+    addLog('Bot stopped', 'info', webviewSessionId || undefined);
   } catch (e) {
-    addLog(`Stop failed: ${e}`, 'error');
+    addLog(`Stop failed: ${e}`, 'error', webviewSessionId || undefined);
   }
 }
 
@@ -2980,6 +3175,16 @@ function getBotScript(config: Config, hostname: string): string {
   }
 }
 
+// Helper function to find which session a webview belongs to
+function getSessionIdForWebview(wv: Electron.WebviewTag): string | null {
+  for (const [sessionId, webview] of sessionWebviews.entries()) {
+    if (webview === wv) {
+      return sessionId;
+    }
+  }
+  return null;
+}
+
 // Listen for console messages from webview
 function setupWebviewListeners(wv: Electron.WebviewTag) {
   wv.addEventListener('console-message', (e) => {
@@ -2989,12 +3194,14 @@ function setupWebviewListeners(wv: Electron.WebviewTag) {
     
     if (msg.includes('[Snappy]')) {
       const cleanMsg = msg.replace(/\[Snappy\]\s*/g, '');
+      const sessionId = getSessionIdForWebview(wv) || undefined;
+      
       if (msg.includes('SUCCESS') || msg.includes('FOUND')) {
-        addLog(cleanMsg, 'success');
+        addLog(cleanMsg, 'success', sessionId);
       } else if (msg.includes('ERROR') || msg.includes('NOT FOUND')) {
-        addLog(cleanMsg, 'error');
+        addLog(cleanMsg, 'error', sessionId);
       } else {
-        addLog(cleanMsg, 'info');
+        addLog(cleanMsg, 'info', sessionId);
       }
     }
   });
@@ -3020,7 +3227,8 @@ setInterval(async () => {
       })();
     `);
     if (logs && logs.length > 0) {
-      logs.forEach((log: string) => addLog(log, 'info'));
+      const sessionId = getSessionIdForWebview(currentWebview) || undefined;
+      logs.forEach((log: string) => addLog(log, 'info', sessionId));
     }
   } catch (e) {
     // Ignore errors
@@ -3099,7 +3307,8 @@ setInterval(async () => {
 // Webview ready handler - set up for any webview
 function setupWebviewReadyHandler(wv: Electron.WebviewTag) {
   wv.addEventListener('dom-ready', () => {
-    addLog('Page loaded: ' + wv.getURL(), 'info');
+    const sessionId = getSessionIdForWebview(wv) || undefined;
+    addLog('Page loaded: ' + wv.getURL(), 'info', sessionId);
   
     // Inject compatibility fixes (wrapped in try-catch to avoid errors)
     wv.executeJavaScript(`
@@ -3116,7 +3325,8 @@ function setupWebviewReadyHandler(wv: Electron.WebviewTag) {
 
   // Handle webview errors
   wv.addEventListener('did-fail-load', (e) => {
-    addLog('Load failed: ' + e.errorDescription, 'error');
+    const sessionId = getSessionIdForWebview(wv) || undefined;
+    addLog('Load failed: ' + e.errorDescription, 'error', sessionId);
   });
 }
 
