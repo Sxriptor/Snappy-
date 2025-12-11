@@ -11,7 +11,7 @@ export function detectSiteFromHost(hostname: string | null | undefined): Support
   if (!hostname) return 'unknown';
   const host = hostname.toLowerCase();
 
-  if (host.includes('threads.net')) return 'threads';
+  if (host.includes('threads.net') || host.includes('threads.com')) return 'threads';
   if (host.includes('reddit.com')) return 'reddit';
   if (host.includes('snapchat.com')) return 'snapchat';
 

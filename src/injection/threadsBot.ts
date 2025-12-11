@@ -167,6 +167,33 @@ export function buildThreadsBotScript(config: Configuration): string {
 
   function findActivityOption() {
     // Find the Activity option after clicking Add Column
+    // Look for the specific span structure containing "Activity" text
+    const spans = Array.from(document.querySelectorAll('span.x1lliihq.x193iq5w.x6ikm8r.x10wlt62.xlyipyv.xuxw1ft'));
+    const activitySpan = spans.find(span => {
+      const text = span.textContent?.trim().toLowerCase();
+      return text === 'activity';
+    });
+
+    if (activitySpan) {
+      // Return the clickable parent div that contains this span
+      // Navigate up to find the clickable container
+      let parent = activitySpan.parentElement;
+      while (parent) {
+        if (parent.getAttribute('role') === 'button' || parent.getAttribute('tabindex') === '0') {
+          return parent;
+        }
+        // Check if parent has the clickable div characteristics
+        const classes = parent.className || '';
+        if (classes.includes('x78zum5') && classes.includes('xdt5ytf')) {
+          return parent;
+        }
+        parent = parent.parentElement;
+      }
+      // If we can't find a specific clickable parent, return the closest interactive ancestor
+      return activitySpan.closest('[role="button"], a, button') || activitySpan.parentElement;
+    }
+
+    // Fallback to original method
     const activityLinks = Array.from(document.querySelectorAll('a[href="/"]'));
     return activityLinks.find(link => {
       const text = link.textContent?.trim().toLowerCase();
