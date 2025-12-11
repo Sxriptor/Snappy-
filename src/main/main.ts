@@ -303,7 +303,15 @@ export function setupIPCHandlers(): void {
     try {
       config.ai = aiSettings;
       saveConfiguration(config);
-      console.log('[Shell] AI settings saved');
+      
+      // Update the running AIBrain with new settings (hot reload)
+      if (aiBrain) {
+        aiBrain.updateConfig(aiSettings);
+        console.log('[Shell] AI settings saved and applied to running AIBrain');
+      } else {
+        console.log('[Shell] AI settings saved (AIBrain not initialized)');
+      }
+      
       return true;
     } catch (error) {
       console.error('[Shell] Error saving AI settings:', error);

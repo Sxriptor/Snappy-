@@ -3744,11 +3744,6 @@ async function loadLlamaConfig() {
 
 // Save llama.cpp configuration
 async function saveLlamaConfig() {
-  if (!activeSessionId) {
-    addLog('No active session to save Llama config for', 'error');
-    return;
-  }
-
   const llamaConfig = {
     buildPath: llamaBuildPathInput.value.trim(),
     startCommand: llamaStartCommandInput.value.trim(),
@@ -3758,21 +3753,30 @@ async function saveLlamaConfig() {
   // Update global config for immediate use
   llamaServerConfig = llamaConfig;
 
-  // Update session config
-  const sessionConfig = sessionConfigs.get(activeSessionId);
-  if (sessionConfig) {
-    sessionConfig.llama = llamaConfig;
-    sessionConfigs.set(activeSessionId, sessionConfig);
-    
-    // Save to persistent storage
-    try {
-      await (window as any).session.updateSessionConfig(activeSessionId, sessionConfig);
-    } catch (e) {
-      console.log('Session API not available, using local storage only');
+  // Save to global llama-config.json (used by llama:start handler)
+  try {
+    await (window as any).llama.saveConfig(llamaConfig);
+    addLog('Llama.cpp configuration saved', 'success');
+  } catch (e) {
+    addLog(`Failed to save Llama config: ${e}`, 'error');
+    return;
+  }
+
+  // Also update session config if available
+  if (activeSessionId) {
+    const sessionConfig = sessionConfigs.get(activeSessionId);
+    if (sessionConfig) {
+      sessionConfig.llama = llamaConfig;
+      sessionConfigs.set(activeSessionId, sessionConfig);
+      
+      try {
+        await (window as any).session.updateSessionConfig(activeSessionId, sessionConfig);
+      } catch (e) {
+        console.log('Session API not available, using local storage only');
+      }
     }
   }
 
-  addLog(`Llama.cpp configuration saved for session: ${activeSessionId.substring(0, 8)}...`, 'success');
   llamaSaveConfigBtn.textContent = 'Saved';
   setTimeout(() => {
     llamaSaveConfigBtn.textContent = 'Save Config';
