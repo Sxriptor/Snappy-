@@ -1449,6 +1449,22 @@ botBtn.addEventListener('click', async () => {
     statusText.textContent = 'Inactive';
     botBtn.textContent = 'Start';
     
+    // Stop llama server if it was running
+    if (llamaServerConfig.enabled) {
+      addLog('Stopping Llama.cpp server...', 'info');
+      try {
+        const stopResult = await (window as any).llama.stop();
+        if (!stopResult.running) {
+          addLog('Llama.cpp server stopped', 'success');
+        } else {
+          addLog(`Warning: Llama server may still be running: ${stopResult.error}`, 'error');
+        }
+        updateLlamaUI();
+      } catch (e) {
+        addLog(`Error stopping Llama server: ${e}`, 'error');
+      }
+    }
+    
     // Update session bot status across all windows
     await (window as any).session.updateBotStatus(activeSessionId, 'inactive');
   } else {

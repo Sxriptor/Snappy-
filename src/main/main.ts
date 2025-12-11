@@ -522,10 +522,12 @@ export function setupIPCHandlers(): void {
   });
 
   ipcMain.handle('llama:stop', async () => {
+    console.log('[Shell] llama:stop IPC handler called');
     try {
       const { llamaServerManager } = await import('./llamaServerManager');
+      console.log('[Shell] llamaServerManager imported, calling stop()...');
       const status = await llamaServerManager.stop();
-      console.log('[Shell] Llama server stopped');
+      console.log('[Shell] Llama server stopped, status:', status);
       return status;
     } catch (error) {
       console.error('[Shell] Error stopping llama server:', error);

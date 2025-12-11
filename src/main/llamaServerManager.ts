@@ -5,12 +5,12 @@
  * Handles process lifecycle, error handling, and status tracking.
  */
 
-import { spawn, ChildProcess } from 'child_process';
-import * as path from 'path';
+import { spawn, ChildProcess, exec } from 'child_process';
 import { LlamaServerConfig, LlamaServerStatus } from '../types';
 
 export class LlamaServerManager {
-  private processes: Map<number, { process: ChildProcess; startTime: number }> = new Map();
+  private processes: Map<number, { process: ChildProcess; startTime: number; cmdPid?: number }> = new Map();
+  private cmdPids: Set<number> = new Set(); // Track CMD window PIDs separately
   private config: LlamaServerConfig | null = null;
   private statusCallback: ((status: LlamaServerStatus) => void) | null = null;
 
@@ -75,17 +75,56 @@ export class LlamaServerManager {
         const cleanedCommand = [executable, ...args].join(' ');
         console.log('[LlamaServerManager] Cleaned command for cmd:', cleanedCommand);
         
-        // Use start command to open a new visible command prompt window
-        const newProcess = spawn('cmd.exe', ['/c', `start "Llama Server" /wait cmd.exe /k "${cleanedCommand}"`], {
-          cwd: buildPath,
-          stdio: 'ignore',
-          shell: true,
-          detached: false
+        const startTime = Date.now();
+        
+        // Use PowerShell to start CMD and capture its PID
+        const psScript = `
+          $process = Start-Process cmd.exe -ArgumentList '/k ${cleanedCommand.replace(/'/g, "''")}' -WorkingDirectory '${buildPath.replace(/'/g, "''")}' -PassThru
+          Write-Output $process.Id
+        `;
+        
+        // Wait for PowerShell to return the CMD PID
+        const cmdPid = await new Promise<number | null>((resolve) => {
+          const newProcess = spawn('powershell.exe', ['-Command', psScript], {
+            cwd: buildPath,
+            stdio: ['ignore', 'pipe', 'pipe'],
+            shell: false
+          });
+          
+          let capturedPid: number | null = null;
+          
+          newProcess.stdout?.on('data', (data) => {
+            const output = data.toString().trim();
+            const pid = parseInt(output, 10);
+            if (!isNaN(pid)) {
+              capturedPid = pid;
+              console.log(`[LlamaServerManager] Captured CMD PID from PowerShell: ${pid}`);
+            }
+          });
+          
+          newProcess.stderr?.on('data', (data) => {
+            console.log(`[LlamaServerManager] PowerShell stderr: ${data.toString().trim()}`);
+          });
+          
+          newProcess.on('exit', () => {
+            resolve(capturedPid);
+          });
+          
+          newProcess.on('error', (err) => {
+            console.error(`[LlamaServerManager] PowerShell error: ${err.message}`);
+            resolve(null);
+          });
+          
+          if (newProcess.pid) {
+            this.processes.set(newProcess.pid, { process: newProcess, startTime });
+          }
         });
         
-        const startTime = Date.now();
-        if (newProcess.pid) {
-          this.processes.set(newProcess.pid, { process: newProcess, startTime });
+        if (cmdPid) {
+          this.cmdPids.add(cmdPid);
+          console.log(`[LlamaServerManager] Added CMD PID ${cmdPid} to tracking set. Total tracked: ${this.cmdPids.size}`);
+        } else {
+          console.error('[LlamaServerManager] Failed to capture CMD PID!');
         }
       } else {
         // Parse the command for non-Windows platforms
@@ -192,15 +231,58 @@ export class LlamaServerManager {
    * Stop all llama.cpp server processes
    */
   async stop(): Promise<LlamaServerStatus> {
-    if (this.processes.size === 0) {
-      return {
-        running: false
-      };
-    }
-
     try {
-      console.log('[LlamaServerManager] Stopping all servers, count:', this.processes.size);
+      console.log('[LlamaServerManager] Stopping all servers...');
+      console.log('[LlamaServerManager] Tracked CMD PIDs:', Array.from(this.cmdPids));
 
+      // On Windows, kill by tracked PIDs first, then cleanup
+      if (process.platform === 'win32') {
+        // Kill each tracked CMD PID directly using taskkill with /T to kill child processes too
+        const killByPidPromises = Array.from(this.cmdPids).map(pid => {
+          return new Promise<void>((resolve) => {
+            console.log(`[LlamaServerManager] Killing CMD PID ${pid} and its children...`);
+            // Use taskkill with /T to kill the process tree (CMD + llama-server)
+            exec(`taskkill /F /T /PID ${pid}`, (error, stdout, stderr) => {
+              if (error) {
+                console.log(`[LlamaServerManager] taskkill PID ${pid} error (may already be closed): ${error.message}`);
+              } else {
+                console.log(`[LlamaServerManager] Successfully killed PID ${pid}: ${stdout.trim()}`);
+              }
+              resolve();
+            });
+          });
+        });
+        
+        await Promise.all(killByPidPromises);
+        
+        // Clear tracked PIDs
+        this.cmdPids.clear();
+        
+        // Also run PowerShell cleanup as fallback for any orphaned processes
+        console.log('[LlamaServerManager] Running PowerShell cleanup for any remaining processes...');
+        const killWithPowerShell = new Promise<void>((resolve) => {
+          const psScript = `
+            Get-Process -Name "*llama*" -ErrorAction SilentlyContinue | Stop-Process -Force
+            Get-WmiObject Win32_Process | Where-Object { $_.CommandLine -like "*llama*" -and $_.Name -ne "powershell.exe" } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+          `;
+          
+          const psProcess = spawn('powershell.exe', ['-Command', psScript], {
+            stdio: 'pipe',
+            shell: false
+          });
+          
+          psProcess.on('exit', (code) => {
+            console.log(`[LlamaServerManager] PowerShell cleanup exited with code: ${code}`);
+            resolve();
+          });
+          
+          psProcess.on('error', () => resolve());
+        });
+        
+        await killWithPowerShell;
+      }
+
+      // Also kill the tracked launcher processes
       const stopPromises = Array.from(this.processes.values()).map(({ process }) => {
         return new Promise<void>((resolve) => {
           if (!process || process.killed) {
@@ -210,16 +292,16 @@ export class LlamaServerManager {
 
           // Set a timeout for forceful termination
           const killTimeout = setTimeout(() => {
-            console.log('[LlamaServerManager] Force killing process', process.pid);
+            console.log('[LlamaServerManager] Force killing launcher process', process.pid);
             if (!process.killed) {
               process.kill('SIGKILL');
             }
-          }, 5000);
+          }, 2000);
 
           // Try graceful termination first
           process.once('exit', () => {
             clearTimeout(killTimeout);
-            console.log('[LlamaServerManager] Process stopped:', process.pid);
+            console.log('[LlamaServerManager] Launcher process stopped:', process.pid);
             resolve();
           });
 
