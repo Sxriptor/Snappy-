@@ -1,9 +1,25 @@
 /**
  * Renderer - Settings Panel with Activity Log
  */
-import { detectSiteFromHost } from '../injection/siteRouter';
-import { buildThreadsBotScript } from '../injection/threadsBot';
-import { buildRedditBotScript } from '../injection/redditBotEmbed';
+
+// Inline essential functions to avoid CommonJS imports in browser
+function detectSiteFromHost(hostname: string | null | undefined): string {
+  if (!hostname) return 'unknown';
+  const host = hostname.toLowerCase();
+  if (host.includes('threads.net')) return 'threads';
+  if (host.includes('reddit.com')) return 'reddit';
+  if (host.includes('snapchat.com')) return 'snapchat';
+  return 'unknown';
+}
+
+// Placeholder functions for bot scripts - these will be implemented inline
+function buildThreadsBotScript(config: any): string {
+  return '/* Threads bot script placeholder */';
+}
+
+function buildRedditBotScript(config: any): string {
+  return '/* Reddit bot script placeholder */';
+}
 
 interface ReplyRule {
   match: string;
