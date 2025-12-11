@@ -31,8 +31,12 @@ export function buildThreadsBotScript(config: Configuration): string {
   const MIN_COMMENT_LENGTH = 3;
   const POLL_MS = (CONFIG?.threads && CONFIG.threads.pollIntervalMs) || 60000;
   const MAX_PER_POLL = (CONFIG?.threads && CONFIG.threads.maxCommentsPerPoll) || 5;
+  const ACTIVITY_ENABLED = (CONFIG?.threads && CONFIG.threads.activityColumnEnabled) !== false;
+  const ACTIVITY_PRIORITY = (CONFIG?.threads && CONFIG.threads.activityPriority) !== false;
   const typingDelayRange = CONFIG?.typingDelayRangeMs || [50, 150];
   const preReplyDelayRange = CONFIG?.preReplyDelayRangeMs || [2000, 6000];
+  
+  let activityColumnSetup = false;
 
   function log(msg) {
     const formatted = '[Snappy][Threads] ' + msg;
@@ -141,6 +145,106 @@ export function buildThreadsBotScript(config: Configuration): string {
       results.push(link);
     });
     return results;
+  }
+
+  function isActivityColumnOpen() {
+    // Check if Activity column is already visible
+    const activityLinks = Array.from(document.querySelectorAll('a[href="/"]'));
+    return activityLinks.some(link => {
+      const text = link.textContent?.trim().toLowerCase();
+      return text === 'activity';
+    });
+  }
+
+  function findAddColumnButton() {
+    // Find the "Add a column" button with the specific SVG
+    const buttons = Array.from(document.querySelectorAll('div[role="button"]'));
+    return buttons.find(btn => {
+      const svg = btn.querySelector('svg[aria-label="Add a column"]');
+      return svg !== null;
+    });
+  }
+
+  function findActivityOption() {
+    // Find the Activity option after clicking Add Column
+    const activityLinks = Array.from(document.querySelectorAll('a[href="/"]'));
+    return activityLinks.find(link => {
+      const text = link.textContent?.trim().toLowerCase();
+      return text === 'activity';
+    });
+  }
+
+  async function setupActivityColumn() {
+    if (!ACTIVITY_ENABLED) {
+      log('Activity column disabled in config');
+      return false;
+    }
+    
+    if (activityColumnSetup) return true;
+    
+    log('Checking if Activity column is open...');
+    
+    if (isActivityColumnOpen()) {
+      log('Activity column already open');
+      activityColumnSetup = true;
+      return true;
+    }
+    
+    log('Activity column not found, attempting to add it...');
+    
+    // Click "Add a column" button
+    const addColumnBtn = findAddColumnButton();
+    if (!addColumnBtn) {
+      log('Add column button not found');
+      return false;
+    }
+    
+    log('Clicking Add Column button...');
+    addColumnBtn.click();
+    await sleep(1000);
+    
+    // Click Activity option
+    const activityOption = findActivityOption();
+    if (!activityOption) {
+      log('Activity option not found');
+      return false;
+    }
+    
+    log('Clicking Activity option...');
+    activityOption.click();
+    await sleep(1500);
+    
+    activityColumnSetup = true;
+    log('Activity column setup complete');
+    return true;
+  }
+
+  function findActivityItems() {
+    // Find activity items that have the blue arrow icon (replies to us)
+    const activityItems = Array.from(document.querySelectorAll('div[class*="x1a2a7pz x1n2onr6"]'));
+    const replyItems = [];
+    
+    activityItems.forEach(item => {
+      // Look for the blue arrow icon indicating a reply
+      const blueArrow = item.querySelector('div[style*="--x-backgroundColor: #24C3FF"]');
+      if (blueArrow) {
+        const arrowSvg = blueArrow.querySelector('svg path[d*="M8.62523 12.5C8.5337 12.5"]');
+        if (arrowSvg) {
+          replyItems.push(item);
+        }
+      }
+    });
+    
+    return replyItems;
+  }
+
+  function findReplyButtonInActivity(activityItem) {
+    // Find the reply button within an activity item
+    const replyButton = activityItem.querySelector('div[role="button"] span');
+    if (replyButton && replyButton.textContent?.includes('Reply to')) {
+      return replyButton.closest('div[role="button"]');
+    }
+    return null;
   }
 
   function findNewNotification() {
@@ -340,12 +444,144 @@ export function buildThreadsBotScript(config: Configuration): string {
     }
   }
 
+  async function processActivityItem(activityItem, currentUser) {
+    try {
+      // Extract information from the activity item
+      const authorLink = activityItem.querySelector('a[href^="/@"]');
+      const author = authorLink?.textContent?.trim()?.replace(/^@/, '') || 'unknown';
+      
+      // Get the message text from the activity item
+      const textSpans = Array.from(activityItem.querySelectorAll('span'));
+      let messageText = '';
+      for (const span of textSpans) {
+        const text = span.textContent?.trim();
+        if (text && text.length > MIN_COMMENT_LENGTH && !text.includes('Reply to') && !text.includes('d ago')) {
+          messageText = text;
+          break;
+        }
+      }
+      
+      if (!messageText || messageText.length < MIN_COMMENT_LENGTH) {
+        log('No valid message text found in activity item');
+        return false;
+      }
+      
+      if (sameHandle(author, currentUser)) {
+        log('Skipping own activity item');
+        return false;
+      }
+      
+      const itemId = 'activity-' + author + '-' + messageText.substring(0, 50);
+      if (seenComments.has(itemId)) {
+        return false;
+      }
+      
+      seenComments.add(itemId);
+      
+      log('Processing activity item from @' + author + ': ' + messageText.substring(0, 60));
+      
+      // Generate reply
+      const reply = await generateReply(messageText, author);
+      if (!reply) {
+        log('No reply generated for activity item');
+        return false;
+      }
+      
+      // Random skip
+      const skipProb = CONFIG?.randomSkipProbability || 0.15;
+      if (Math.random() < skipProb) {
+        log('Randomly skipping reply (prob ' + Math.round(skipProb * 100) + '%)');
+        return false;
+      }
+      
+      // Pre delay
+      const delay = Math.floor(Math.random() * (preReplyDelayRange[1] - preReplyDelayRange[0])) + preReplyDelayRange[0];
+      log('Waiting ' + delay + 'ms before replying to activity');
+      await sleep(delay);
+      
+      // Find and click the reply button
+      const replyBtn = findReplyButtonInActivity(activityItem);
+      if (!replyBtn) {
+        log('Reply button not found in activity item');
+        return false;
+      }
+      
+      log('Clicking reply button in activity...');
+      replyBtn.click();
+      await sleep(1000);
+      
+      // Find the composer (should appear after clicking reply)
+      const composer = findComposer(activityItem);
+      if (!composer) {
+        log('Reply composer not found after clicking activity reply');
+        return false;
+      }
+      
+      // Type the reply
+      const composedText = '@' + author + ' ' + reply;
+      const typed = await typeIntoComposer(composer, composedText);
+      if (!typed) {
+        log('Failed to type reply in activity composer');
+        return false;
+      }
+      
+      await sleep(400);
+      
+      // Find and click post button
+      const postBtn = findPostButton(activityItem);
+      if (postBtn) {
+        postBtn.click();
+        await sleep(800);
+        log('✓ Replied to activity from @' + author + ': ' + reply.substring(0, 60));
+        return true;
+      } else {
+        // Fallback: Enter key
+        composer.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', keyCode: 13, bubbles: true }));
+        composer.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', keyCode: 13, bubbles: true }));
+        await sleep(800);
+        log('✓ Replied to activity from @' + author + ' (Enter key): ' + reply.substring(0, 60));
+        return true;
+      }
+    } catch (err) {
+      log('Error processing activity item: ' + err);
+      return false;
+    }
+  }
+
   async function poll() {
     if (!isRunning) return;
     if (isProcessing) return;
     isProcessing = true;
     try {
-      // If not on a post page, try to open the latest notification that looks like a comment on our post
+      // First, ensure Activity column is set up (if enabled)
+      if (ACTIVITY_ENABLED) {
+        const activityReady = await setupActivityColumn();
+        if (!activityReady) {
+          log('Activity column setup failed, falling back to post monitoring');
+        } else {
+          // Check for activity items (replies/comments to us)
+          const activityItems = findActivityItems();
+          if (activityItems.length > 0) {
+            log('Found ' + activityItems.length + ' activity item(s) with replies');
+            const currentUser = detectLoggedInHandle();
+            
+            const toProcess = activityItems.slice(0, MAX_PER_POLL);
+            for (const item of toProcess) {
+              if (!isRunning) break;
+              await processActivityItem(item, currentUser);
+              await sleep(1200);
+            }
+            
+            // If activity priority is enabled, skip other checks when we have activity
+            if (ACTIVITY_PRIORITY) {
+              isProcessing = false;
+              return;
+            }
+          }
+        }
+      }
+      
+      // Fallback to original logic for post pages
       if (!isOnPostPage()) {
         const notif = findNewNotification();
         if (notif) {
@@ -354,7 +590,7 @@ export function buildThreadsBotScript(config: Configuration): string {
           notif.element.click();
           await sleep(1500);
         } else {
-          log('No new notifications with comments');
+          log('No new notifications or activity items');
         }
         isProcessing = false;
         return;
