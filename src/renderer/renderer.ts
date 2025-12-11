@@ -1108,9 +1108,6 @@ const refreshMemoriesBtn = document.getElementById('refresh-memories')!;
 // AI Settings elements
 const aiEnabled = document.getElementById('ai-enabled') as HTMLInputElement;
 const aiStatus = document.getElementById('ai-status')!;
-const aiEndpoint = document.getElementById('ai-endpoint') as HTMLInputElement;
-const aiPort = document.getElementById('ai-port') as HTMLInputElement;
-const aiModel = document.getElementById('ai-model') as HTMLInputElement;
 const aiTemp = document.getElementById('ai-temp') as HTMLInputElement;
 const aiTempVal = document.getElementById('ai-temp-val')!;
 const aiTokens = document.getElementById('ai-tokens') as HTMLInputElement;
@@ -1543,9 +1540,9 @@ saveBtn.addEventListener('click', async () => {
     randomSkipProbability: (parseInt(skipRate.value) || 15) / 100,
     ai: {
       enabled: aiEnabled?.checked || false,
-      llmEndpoint: aiEndpoint?.value || 'localhost',
-      llmPort: parseInt(aiPort?.value) || 8080,
-      modelName: aiModel?.value || 'local-model',
+      llmEndpoint: '127.0.0.1', // Configured via llama server
+      llmPort: 8081, // Configured via llama server start command
+      modelName: 'llama', // Configured via llama server start command
       systemPrompt: aiPrompt?.value || '',
       temperature: parseFloat(aiTemp?.value) || 0.7,
       maxTokens: parseInt(aiTokens?.value) || 150,
@@ -1678,9 +1675,6 @@ function loadConfigIntoUI(config: Config) {
   // Load AI settings
   if (config.ai) {
     if (aiEnabled) aiEnabled.checked = config.ai.enabled || false;
-    if (aiEndpoint) aiEndpoint.value = config.ai.llmEndpoint || 'localhost';
-    if (aiPort) aiPort.value = String(config.ai.llmPort || 8080);
-    if (aiModel) aiModel.value = config.ai.modelName || 'local-model';
     if (aiPrompt) aiPrompt.value = config.ai.systemPrompt || '';
     if (aiTemp) {
       aiTemp.value = String(config.ai.temperature || 0.7);
