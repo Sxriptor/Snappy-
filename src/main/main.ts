@@ -303,7 +303,15 @@ export function setupIPCHandlers(): void {
     try {
       config.ai = aiSettings;
       saveConfiguration(config);
-      console.log('[Shell] AI settings saved');
+      
+      // Update the running AIBrain with new settings (hot reload)
+      if (aiBrain) {
+        aiBrain.updateConfig(aiSettings);
+        console.log('[Shell] AI settings saved and applied to running AIBrain');
+      } else {
+        console.log('[Shell] AI settings saved (AIBrain not initialized)');
+      }
+      
       return true;
     } catch (error) {
       console.error('[Shell] Error saving AI settings:', error);
@@ -522,10 +530,12 @@ export function setupIPCHandlers(): void {
   });
 
   ipcMain.handle('llama:stop', async () => {
+    console.log('[Shell] llama:stop IPC handler called');
     try {
       const { llamaServerManager } = await import('./llamaServerManager');
+      console.log('[Shell] llamaServerManager imported, calling stop()...');
       const status = await llamaServerManager.stop();
-      console.log('[Shell] Llama server stopped');
+      console.log('[Shell] Llama server stopped, status:', status);
       return status;
     } catch (error) {
       console.error('[Shell] Error stopping llama server:', error);
@@ -540,6 +550,37 @@ export function setupIPCHandlers(): void {
     } catch (error) {
       console.error('[Shell] Error getting llama status:', error);
       return { running: false, error: String(error) };
+    }
+  });
+
+  ipcMain.handle('llama:stopByPid', async (event, pid: number) => {
+    try {
+      const { llamaServerManager } = await import('./llamaServerManager');
+      return await llamaServerManager.stopByPid(pid);
+    } catch (error) {
+      console.error('[Shell] Error stopping llama server by PID:', error);
+      return { running: false, error: String(error) };
+    }
+  });
+
+  ipcMain.handle('llama:getTrackedPids', async () => {
+    try {
+      const { llamaServerManager } = await import('./llamaServerManager');
+      return llamaServerManager.getTrackedPids();
+    } catch (error) {
+      console.error('[Shell] Error getting tracked PIDs:', error);
+      return [];
+    }
+  });
+
+  ipcMain.handle('llama:clearTracking', async () => {
+    try {
+      const { llamaServerManager } = await import('./llamaServerManager');
+      llamaServerManager.clearTracking();
+      return { success: true };
+    } catch (error) {
+      console.error('[Shell] Error clearing llama tracking:', error);
+      return { success: false, error: String(error) };
     }
   });
 

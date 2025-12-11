@@ -5,12 +5,12 @@
  * Handles process lifecycle, error handling, and status tracking.
  */
 
-import { spawn, ChildProcess } from 'child_process';
-import * as path from 'path';
+import { spawn, ChildProcess, exec } from 'child_process';
 import { LlamaServerConfig, LlamaServerStatus } from '../types';
 
 export class LlamaServerManager {
-  private processes: Map<number, { process: ChildProcess; startTime: number }> = new Map();
+  private processes: Map<number, { process: ChildProcess; startTime: number; cmdPid?: number }> = new Map();
+  private cmdPids: Set<number> = new Set(); // Track CMD window PIDs separately
   private config: LlamaServerConfig | null = null;
   private statusCallback: ((status: LlamaServerStatus) => void) | null = null;
 
@@ -31,6 +31,15 @@ export class LlamaServerManager {
    */
   onStatusChange(callback: (status: LlamaServerStatus) => void): void {
     this.statusCallback = callback;
+  }
+
+  /**
+   * Clear all tracking (call on app startup to reset stale state)
+   */
+  clearTracking(): void {
+    console.log('[LlamaServerManager] Clearing all tracked PIDs');
+    this.cmdPids.clear();
+    this.processes.clear();
   }
 
   /**
@@ -75,17 +84,67 @@ export class LlamaServerManager {
         const cleanedCommand = [executable, ...args].join(' ');
         console.log('[LlamaServerManager] Cleaned command for cmd:', cleanedCommand);
         
-        // Use start command to open a new visible command prompt window
-        const newProcess = spawn('cmd.exe', ['/c', `start "Llama Server" /wait cmd.exe /k "${cleanedCommand}"`], {
-          cwd: buildPath,
-          stdio: 'ignore',
-          shell: true,
-          detached: false
+        const startTime = Date.now();
+        
+        // Use PowerShell to start CMD and capture its PID
+        const psScript = `
+          $process = Start-Process cmd.exe -ArgumentList '/k ${cleanedCommand.replace(/'/g, "''")}' -WorkingDirectory '${buildPath.replace(/'/g, "''")}' -PassThru
+          Write-Output $process.Id
+        `;
+        
+        // Wait for PowerShell to return the CMD PID
+        const cmdPid = await new Promise<number | null>((resolve) => {
+          const newProcess = spawn('powershell.exe', ['-Command', psScript], {
+            cwd: buildPath,
+            stdio: ['ignore', 'pipe', 'pipe'],
+            shell: false
+          });
+          
+          let capturedPid: number | null = null;
+          
+          newProcess.stdout?.on('data', (data) => {
+            const output = data.toString().trim();
+            const pid = parseInt(output, 10);
+            if (!isNaN(pid)) {
+              capturedPid = pid;
+              console.log(`[LlamaServerManager] Captured CMD PID from PowerShell: ${pid}`);
+            }
+          });
+          
+          newProcess.stderr?.on('data', (data) => {
+            console.log(`[LlamaServerManager] PowerShell stderr: ${data.toString().trim()}`);
+          });
+          
+          newProcess.on('exit', () => {
+            resolve(capturedPid);
+          });
+          
+          newProcess.on('error', (err) => {
+            console.error(`[LlamaServerManager] PowerShell error: ${err.message}`);
+            resolve(null);
+          });
+          
+          if (newProcess.pid) {
+            this.processes.set(newProcess.pid, { process: newProcess, startTime });
+          }
         });
         
-        const startTime = Date.now();
-        if (newProcess.pid) {
-          this.processes.set(newProcess.pid, { process: newProcess, startTime });
+        if (cmdPid) {
+          this.cmdPids.add(cmdPid);
+          console.log(`[LlamaServerManager] Added CMD PID ${cmdPid} to tracking set. Total tracked: ${this.cmdPids.size}`);
+          
+          // Return early with the CMD PID for Windows
+          const status: LlamaServerStatus = {
+            running: true,
+            pid: cmdPid,  // Return the CMD PID, not the PowerShell launcher PID
+            startTime
+          };
+          this.notifyStatus(status);
+          console.log('[LlamaServerManager] Server started successfully, CMD PID:', cmdPid);
+          return status;
+        } else {
+          console.error('[LlamaServerManager] Failed to capture CMD PID!');
+          throw new Error('Failed to capture CMD process ID');
         }
       } else {
         // Parse the command for non-Windows platforms
@@ -189,18 +248,97 @@ export class LlamaServerManager {
   }
 
   /**
-   * Stop all llama.cpp server processes
+   * Stop a specific llama.cpp server by its CMD PID
+   */
+  async stopByPid(pid: number): Promise<LlamaServerStatus> {
+    try {
+      console.log(`[LlamaServerManager] Stopping server with PID ${pid}...`);
+      console.log(`[LlamaServerManager] Currently tracked PIDs: ${Array.from(this.cmdPids).join(', ')}`);
+
+      if (!this.cmdPids.has(pid)) {
+        console.log(`[LlamaServerManager] PID ${pid} not found in tracked processes`);
+        return { running: this.cmdPids.size > 0, error: `PID ${pid} not tracked` };
+      }
+
+      // On Windows, kill the CMD and its child processes (llama-server.exe)
+      // /T kills the process tree, /F forces termination
+      if (process.platform === 'win32') {
+        await new Promise<void>((resolve) => {
+          console.log(`[LlamaServerManager] Executing: taskkill /F /T /PID ${pid}`);
+          exec(`taskkill /F /T /PID ${pid}`, (error, stdout) => {
+            if (error) {
+              console.log(`[LlamaServerManager] taskkill PID ${pid} error: ${error.message}`);
+            } else {
+              console.log(`[LlamaServerManager] Successfully killed PID ${pid} and children: ${stdout.trim()}`);
+            }
+            resolve();
+          });
+        });
+      }
+
+      // Remove from tracking
+      this.cmdPids.delete(pid);
+
+      const status: LlamaServerStatus = {
+        running: this.cmdPids.size > 0
+      };
+
+      this.notifyStatus(status);
+      console.log(`[LlamaServerManager] Server PID ${pid} stopped. Remaining tracked: ${Array.from(this.cmdPids).join(', ') || 'none'}`);
+      return status;
+    } catch (error) {
+      const errorMsg = error instanceof Error ? error.message : String(error);
+      console.error(`[LlamaServerManager] Error stopping PID ${pid}:`, errorMsg);
+      return { running: this.cmdPids.size > 0, error: errorMsg };
+    }
+  }
+
+  /**
+   * Get all tracked PIDs
+   */
+  getTrackedPids(): number[] {
+    return Array.from(this.cmdPids);
+  }
+
+  /**
+   * Stop all llama.cpp server processes started by this manager
+   * Only kills processes we explicitly tracked - does not affect other sessions
    */
   async stop(): Promise<LlamaServerStatus> {
-    if (this.processes.size === 0) {
-      return {
-        running: false
-      };
-    }
-
     try {
-      console.log('[LlamaServerManager] Stopping all servers, count:', this.processes.size);
+      console.log('[LlamaServerManager] Stopping tracked servers only...');
+      console.log('[LlamaServerManager] Tracked CMD PIDs:', Array.from(this.cmdPids));
 
+      if (this.cmdPids.size === 0 && this.processes.size === 0) {
+        console.log('[LlamaServerManager] No tracked processes to stop');
+        return { running: false };
+      }
+
+      // On Windows, kill only the tracked PIDs
+      if (process.platform === 'win32') {
+        // Kill each tracked CMD PID directly using taskkill with /T to kill child processes too
+        const killByPidPromises = Array.from(this.cmdPids).map(pid => {
+          return new Promise<void>((resolve) => {
+            console.log(`[LlamaServerManager] Killing tracked CMD PID ${pid} and its children...`);
+            // Use taskkill with /T to kill the process tree (CMD + llama-server)
+            exec(`taskkill /F /T /PID ${pid}`, (error, stdout) => {
+              if (error) {
+                console.log(`[LlamaServerManager] taskkill PID ${pid} error (may already be closed): ${error.message}`);
+              } else {
+                console.log(`[LlamaServerManager] Successfully killed PID ${pid}: ${stdout.trim()}`);
+              }
+              resolve();
+            });
+          });
+        });
+        
+        await Promise.all(killByPidPromises);
+        
+        // Clear tracked PIDs
+        this.cmdPids.clear();
+      }
+
+      // Also kill the tracked launcher processes
       const stopPromises = Array.from(this.processes.values()).map(({ process }) => {
         return new Promise<void>((resolve) => {
           if (!process || process.killed) {
@@ -210,16 +348,16 @@ export class LlamaServerManager {
 
           // Set a timeout for forceful termination
           const killTimeout = setTimeout(() => {
-            console.log('[LlamaServerManager] Force killing process', process.pid);
+            console.log('[LlamaServerManager] Force killing launcher process', process.pid);
             if (!process.killed) {
               process.kill('SIGKILL');
             }
-          }, 5000);
+          }, 2000);
 
           // Try graceful termination first
           process.once('exit', () => {
             clearTimeout(killTimeout);
-            console.log('[LlamaServerManager] Process stopped:', process.pid);
+            console.log('[LlamaServerManager] Launcher process stopped:', process.pid);
             resolve();
           });
 
@@ -235,13 +373,14 @@ export class LlamaServerManager {
       };
 
       this.notifyStatus(status);
-      console.log('[LlamaServerManager] All servers stopped');
+      console.log('[LlamaServerManager] Tracked servers stopped');
       return status;
     } catch (error) {
       const errorMsg = error instanceof Error ? error.message : String(error);
       console.error('[LlamaServerManager] Error stopping servers:', errorMsg);
 
       this.processes.clear();
+      this.cmdPids.clear();
 
       return {
         running: false,
@@ -252,15 +391,23 @@ export class LlamaServerManager {
 
   /**
    * Get current server status
+   * Note: This returns aggregate status. Per-session tracking is done in the renderer.
    */
   getStatus(): LlamaServerStatus {
+    // On Windows, we track CMD PIDs
+    if (this.cmdPids.size > 0) {
+      return {
+        running: true
+      };
+    }
+
+    // For non-Windows or fallback
     if (this.processes.size === 0) {
       return {
         running: false
       };
     }
 
-    // Return status of the most recent process
     const latestProcess = Array.from(this.processes.values()).pop();
     if (!latestProcess) {
       return {
