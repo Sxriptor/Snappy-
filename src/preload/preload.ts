@@ -394,6 +394,39 @@ const electronAPI = {
   }
 };
 
+/**
+ * System Tray API for minimize to tray functionality
+ */
+const trayAPI = {
+  /**
+   * Hide all windows to system tray
+   */
+  hide: async (): Promise<{ success: boolean }> => {
+    return await ipcRenderer.invoke('tray:hide');
+  },
+
+  /**
+   * Show all windows from system tray
+   */
+  show: async (): Promise<{ success: boolean }> => {
+    return await ipcRenderer.invoke('tray:show');
+  },
+
+  /**
+   * Check if windows are hidden
+   */
+  isHidden: async (): Promise<boolean> => {
+    return await ipcRenderer.invoke('tray:isHidden');
+  },
+
+  /**
+   * Quit the application completely
+   */
+  quit: async (): Promise<{ success: boolean }> => {
+    return await ipcRenderer.invoke('tray:quit');
+  }
+};
+
 // Expose the APIs to the renderer
 contextBridge.exposeInMainWorld('bot', botAPI);
 contextBridge.exposeInMainWorld('updater', updaterAPI);
@@ -402,5 +435,6 @@ contextBridge.exposeInMainWorld('proxy', proxyAPI);
 contextBridge.exposeInMainWorld('llama', llamaAPI);
 contextBridge.exposeInMainWorld('windowManager', windowAPI);
 contextBridge.exposeInMainWorld('electronAPI', electronAPI);
+contextBridge.exposeInMainWorld('tray', trayAPI);
 
-console.log('[Preload] Bridge initialized with multi-session support, llama.cpp server management, and window detachment');
+console.log('[Preload] Bridge initialized with multi-session support, llama.cpp server management, window detachment, and system tray');

@@ -1148,6 +1148,7 @@ let isLogCollapsed = false;
 const panel = document.getElementById('settings-panel')!;
 const toggleBtn = document.getElementById('settings-toggle')!;
 const closeBtn = document.getElementById('panel-close')!;
+const minimizeToTrayBtn = document.getElementById('minimize-to-tray');
 
 // Multi-session: webview is now dynamically created per session
 // Get the active webview or null if none exists
@@ -2391,11 +2392,26 @@ function togglePanel() {
   isPanelOpen = !isPanelOpen;
   panel.classList.toggle('open', isPanelOpen);
   toggleBtn.classList.toggle('shifted', isPanelOpen);
+  if (minimizeToTrayBtn) {
+    minimizeToTrayBtn.classList.toggle('shifted', isPanelOpen);
+  }
   document.getElementById('app')!.classList.toggle('panel-open', isPanelOpen);
 }
 
 toggleBtn.addEventListener('click', togglePanel);
 closeBtn.addEventListener('click', togglePanel);
+
+// Minimize to tray
+if (minimizeToTrayBtn) {
+  minimizeToTrayBtn.addEventListener('click', async () => {
+    try {
+      await (window as any).tray.hide();
+      addLog('Minimized to system tray', 'info');
+    } catch (e) {
+      console.error('Failed to minimize to tray:', e);
+    }
+  });
+}
 
 // URL
 function loadUrl() {

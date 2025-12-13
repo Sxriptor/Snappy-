@@ -14,6 +14,7 @@ import { FingerprintGenerator } from './fingerprintGenerator';
 import { createFingerprintInjectorScript } from '../injection/fingerprintInjector';
 import { AIBrain } from '../brain/aiBrain';
 import { windowManager } from './windowManager';
+import { trayManager } from './trayManager';
 
 let mainWindow: BrowserWindow | null = null;
 let config: Configuration = DEFAULT_CONFIG;
@@ -629,7 +630,30 @@ export function setupIPCHandlers(): void {
     }
   });
 
-  console.log('[Shell] IPC handlers set up with multi-session support and window management');
+  // ============================================================================
+  // System Tray IPC Handlers
+  // ============================================================================
+
+  ipcMain.handle('tray:hide', async () => {
+    trayManager.hideAllWindows();
+    return { success: true };
+  });
+
+  ipcMain.handle('tray:show', async () => {
+    trayManager.showAllWindows();
+    return { success: true };
+  });
+
+  ipcMain.handle('tray:isHidden', async () => {
+    return trayManager.isHidden();
+  });
+
+  ipcMain.handle('tray:quit', async () => {
+    trayManager.quitApp();
+    return { success: true };
+  });
+
+  console.log('[Shell] IPC handlers set up with multi-session support, window management, and system tray');
 }
 
 /**
@@ -763,6 +787,9 @@ async function initializeApp(): Promise<void> {
     // Bot injection is now handled by renderer.ts directly into the webview
   });
   
+  // Initialize system tray (must be before window close handler)
+  trayManager.initialize(mainWindow);
+  
   // Handle window close
   mainWindow.on('closed', () => {
     mainWindow = null;
@@ -782,9 +809,16 @@ async function initializeApp(): Promise<void> {
 app.whenReady().then(initializeApp);
 
 app.on('window-all-closed', () => {
-  if (process.platform !== 'darwin') {
+  // Don't quit when windows are closed - keep running in tray
+  // Only quit on macOS if explicitly quitting
+  if (process.platform === 'darwin' && trayManager.getIsQuitting()) {
     app.quit();
   }
+  // On Windows/Linux, the tray keeps the app alive
+});
+
+app.on('before-quit', () => {
+  trayManager.setQuitting(true);
 });
 
 app.on('activate', () => {

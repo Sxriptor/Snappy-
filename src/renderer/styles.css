@@ -39,6 +39,36 @@ body {
   position: relative;
 }
 
+#minimize-to-tray {
+  position: fixed;
+  top: 8px;
+  right: 48px;
+  width: 32px;
+  height: 32px;
+  background: #1a1a1a;
+  border: 1px solid #2a2a2a;
+  cursor: pointer;
+  color: #888;
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+#minimize-to-tray:hover {
+  color: #0eadff;
+  border-color: #0eadff;
+}
+
+#minimize-to-tray.shifted {
+  right: 288px;
+}
+
+#minimize-to-tray svg {
+  width: 16px;
+  height: 16px;
+}
+
 #settings-toggle {
   position: fixed;
   top: 8px;
