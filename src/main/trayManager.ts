@@ -4,12 +4,14 @@
 
 import { app, BrowserWindow, Menu, Tray, nativeImage } from 'electron';
 import * as path from 'path';
+import { llamaServerManager } from './llamaServerManager';
 
 class TrayManager {
   private tray: Tray | null = null;
   private isQuitting: boolean = false;
   private mainWindow: BrowserWindow | null = null;
   private hiddenWindows: Set<number> = new Set();
+  private serverStartCallback: (() => Promise<void>) | null = null;
 
   /**
    * Initialize the system tray
@@ -53,6 +55,13 @@ class TrayManager {
   }
 
   /**
+   * Set callback for starting all servers
+   */
+  setServerStartCallback(callback: () => Promise<void>): void {
+    this.serverStartCallback = callback;
+  }
+
+  /**
    * Update the tray context menu
    */
   private updateContextMenu(): void {
@@ -69,12 +78,53 @@ class TrayManager {
       },
       { type: 'separator' },
       {
+        label: 'Start All Bots',
+        click: () => this.startAllServers()
+      },
+      {
+        label: 'Stop All Bots',
+        click: () => this.killAllServers()
+      },
+      { type: 'separator' },
+      {
         label: 'Quit',
         click: () => this.quitApp()
       }
     ]);
 
     this.tray.setContextMenu(contextMenu);
+  }
+
+  /**
+   * Start all llama.cpp servers - sends message to renderer to start servers for all sessions
+   */
+  private async startAllServers(): Promise<void> {
+    console.log('[TrayManager] Requesting start of all servers...');
+    
+    // Send message to all windows to start their servers
+    const allWindows = BrowserWindow.getAllWindows();
+    allWindows.forEach(window => {
+      if (!window.isDestroyed()) {
+        window.webContents.send('tray:startAllServers');
+      }
+    });
+  }
+
+  /**
+   * Kill all llama.cpp servers
+   */
+  private async killAllServers(): Promise<void> {
+    console.log('[TrayManager] Killing all servers...');
+    const status = await llamaServerManager.stop();
+    console.log(`[TrayManager] All servers stopped. Running: ${status.running}`);
+    
+    // Notify renderer to update UI
+    const allWindows = BrowserWindow.getAllWindows();
+    allWindows.forEach(window => {
+      if (!window.isDestroyed()) {
+        window.webContents.send('tray:allServersStopped');
+      }
+    });
   }
 
   /**

@@ -424,6 +424,20 @@ const trayAPI = {
    */
   quit: async (): Promise<{ success: boolean }> => {
     return await ipcRenderer.invoke('tray:quit');
+  },
+
+  /**
+   * Listen for start all servers command from tray
+   */
+  onStartAllServers: (callback: () => void): void => {
+    ipcRenderer.on('tray:startAllServers', () => callback());
+  },
+
+  /**
+   * Listen for all servers stopped notification from tray
+   */
+  onAllServersStopped: (callback: () => void): void => {
+    ipcRenderer.on('tray:allServersStopped', () => callback());
   }
 };
 

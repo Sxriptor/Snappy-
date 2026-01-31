@@ -5169,3 +5169,189 @@ function updateAllTabIndicators() {
     updateTabCustomSettingsIndicator(sessionId);
   });
 }
+
+// ============================================================================
+// System Tray Bot Control Handlers
+// ============================================================================
+
+/**
+ * Start bots for all sessions (like clicking Start on each tab)
+ */
+async function startAllSessionBots(): Promise<void> {
+  addLog('Starting bots for all sessions...', 'highlight');
+  
+  let startedCount = 0;
+  const originalActiveSession = activeSessionId;
+  
+  for (const [sessionId, webview] of sessionWebviews.entries()) {
+    const sessionName = getSessionName(sessionId);
+    
+    // Get session config
+    const config = sessionConfigs.get(sessionId);
+    const llamaConfig = (config as any)?.llama;
+    
+    // Start llama server if enabled for this session
+    if (llamaConfig?.enabled && llamaConfig?.buildPath && llamaConfig?.startCommand) {
+      // Skip if already running
+      if (!sessionServerPids.has(sessionId)) {
+        try {
+          await (window as any).llama.saveConfig(llamaConfig);
+          const startResult = await (window as any).llama.start();
+          if (startResult.running && startResult.pid) {
+            sessionServerPids.set(sessionId, { pid: startResult.pid, startTime: startResult.startTime || Date.now() });
+            addLog(`Llama server started for ${sessionName} (PID: ${startResult.pid})`, 'success', sessionId);
+          }
+        } catch (e) {
+          addLog(`Failed to start llama for ${sessionName}: ${e}`, 'error', sessionId);
+        }
+      }
+    }
+    
+    // Inject bot into webview
+    try {
+      const injected = await injectBotIntoSpecificWebview(webview, sessionId);
+      if (injected) {
+        await (window as any).session.updateBotStatus(sessionId, 'active');
+        // Update tab bot status indicator
+        const tab = document.getElementById(`tab-${sessionId}`);
+        if (tab) {
+          const botStatusEl = tab.querySelector('.tab-bot-status');
+          if (botStatusEl) {
+            botStatusEl.className = 'tab-bot-status active';
+            botStatusEl.setAttribute('title', 'Bot Status: active');
+          }
+        }
+        addLog(`Bot started for ${sessionName}`, 'success', sessionId);
+        startedCount++;
+      }
+    } catch (e) {
+      addLog(`Failed to start bot for ${sessionName}: ${e}`, 'error', sessionId);
+    }
+    
+    // Small delay between starts
+    await new Promise(resolve => setTimeout(resolve, 300));
+  }
+  
+  // Update UI for active session
+  if (originalActiveSession && sessionWebviews.has(originalActiveSession)) {
+    isBotActive = true;
+    statusDot.classList.add('active');
+    statusText.textContent = 'Active';
+    botBtn.textContent = 'Stop';
+  }
+  
+  addLog(`Started ${startedCount} bot(s)`, 'success');
+  updateLlamaUI();
+}
+
+/**
+ * Stop bots for all sessions (like clicking Stop on each tab)
+ */
+async function stopAllSessionBots(): Promise<void> {
+  addLog('Stopping all bots...', 'highlight');
+  
+  let stoppedCount = 0;
+  
+  for (const [sessionId, webview] of sessionWebviews.entries()) {
+    const sessionName = getSessionName(sessionId);
+    
+    // Stop bot in webview
+    try {
+      await stopBotInSpecificWebview(webview);
+      await (window as any).session.updateBotStatus(sessionId, 'inactive');
+      // Update tab bot status indicator
+      const tab = document.getElementById(`tab-${sessionId}`);
+      if (tab) {
+        const botStatusEl = tab.querySelector('.tab-bot-status');
+        if (botStatusEl) {
+          botStatusEl.className = 'tab-bot-status inactive';
+          botStatusEl.setAttribute('title', 'Bot Status: inactive');
+        }
+      }
+      stoppedCount++;
+    } catch (e) {
+      addLog(`Failed to stop bot for ${sessionName}: ${e}`, 'error', sessionId);
+    }
+    
+    // Stop llama server if running for this session
+    const serverInfo = sessionServerPids.get(sessionId);
+    if (serverInfo) {
+      try {
+        await (window as any).llama.stopByPid(serverInfo.pid);
+        sessionServerPids.delete(sessionId);
+        addLog(`Llama server stopped for ${sessionName}`, 'info', sessionId);
+      } catch (e) {
+        addLog(`Failed to stop llama for ${sessionName}: ${e}`, 'error', sessionId);
+      }
+    }
+  }
+  
+  // Update UI
+  isBotActive = false;
+  statusDot.classList.remove('active');
+  statusText.textContent = 'Inactive';
+  botBtn.textContent = 'Start';
+  
+  addLog(`Stopped ${stoppedCount} bot(s)`, 'success');
+  updateLlamaUI();
+}
+
+/**
+ * Inject bot into a specific webview
+ */
+async function injectBotIntoSpecificWebview(webview: Electron.WebviewTag, sessionId: string): Promise<boolean> {
+  if (!webview) return false;
+  
+  const config = sessionConfigs.get(sessionId) as any || {};
+  
+  try {
+    const hostname = new URL(webview.getURL()).hostname;
+    const site = detectSiteFromHost(hostname);
+    
+    let botScript = '';
+    if (site === 'snapchat') {
+      botScript = getSnapchatBotScript(config as Config);
+    } else if (site === 'threads') {
+      botScript = buildThreadsBotScript(config);
+    } else if (site === 'instagram') {
+      botScript = buildInstagramBotScript(config);
+    } else {
+      addLog(`Unknown site: ${site}`, 'error', sessionId);
+      return false;
+    }
+    
+    await webview.executeJavaScript(botScript);
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+
+/**
+ * Stop bot in a specific webview
+ */
+async function stopBotInSpecificWebview(webview: Electron.WebviewTag): Promise<void> {
+  if (!webview) return;
+  
+  try {
+    await webview.executeJavaScript(`
+      if (window.__SNAPPY_STOP__) {
+        window.__SNAPPY_STOP__();
+      }
+      window.__SNAPPY_RUNNING__ = false;
+    `);
+  } catch (e) {
+    // Ignore errors
+  }
+}
+
+// Register tray event listeners
+if ((window as any).tray) {
+  (window as any).tray.onStartAllServers(() => {
+    startAllSessionBots();
+  });
+  
+  (window as any).tray.onAllServersStopped(() => {
+    stopAllSessionBots();
+  });
+}

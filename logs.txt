@@ -1,0 +1,123 @@
+
+-----Llama.cpp----
+
+downloaded the git clone 
+https://github.com/ggml-org/llama.cpp.git
+visual studio 2022 - dev command prompt - cmake build (make sure to spec x64 for windows)- curl wont download - install or ignore
+
+cmake -B build -A x64 -DLLAMA_CURL=OFF -DLLAMA_BUILD_SERVER=ON -DLLAMA_CUDA=ON
+
+cmake --build build --config Release
+- above is the old version?
+
+
+
+cd C:\Users\coler\Desktop\Backup\development\llama.cpp
+cmake -B build -A x64 -DLLAMA_CUDA=ON -DLLAMA_BUILD_SERVER=ON
+cmake --build build --config Release
+
+can then run with llama-server.exe -m mythomax.gguf --api --chat-template "" --system "" --instruct "" --prompt-format none
+
+
+- build to release folder 
+
+-
+put it in models folder
+
+C:\Users\coler\Desktop\Backup\development\llama.cpp\models\mythomax.gguf
+
+-cd into here before running commands below - C:\Users\coler\Desktop\Backup\development\llama.cpp\build\bin\Release
+
+
+llama-server.exe -m ..\..\..\models\mythomax.gguf --port 8081
+
+--uncensed - should be even tho it wont accept those commands...
+llama-server.exe -m ..\..\..\models\mythomax.gguf ^
+  --port 8081 ^
+  --n-gpu-layers 35 ^
+  --no-mmap
+
+llama-server.exe ^
+  -m ..\..\..\models\mythomax.gguf ^
+  --port 8081 ^
+  --threads 4 ^
+  --n-gpu-layers 36 ^
+  --no-mmap ^
+  --no-context-shift
+
+
+
+- Run over the web - you could run this from a DGX spark and become chatgpt without API cost. 
+llama-server.exe ^
+  -m ..\..\..\models\mythomax.gguf ^
+  --host 0.0.0.0 --port 8765 ^
+  --threads 4 ^
+  --n-gpu-layers 36 ^
+  --no-mmap ^
+  --no-context-shift
+
+
+
+
+
+🔧 If you DO want CURL support later
+
+Install vcpkg + curl:
+
+vcpkg install curl:x64-windows
+
+
+Then configure CMake like this:
+
+cmake -B build -DCMAKE_TOOLCHAIN_FILE=C:\path\to\vcpkg\scripts\buildsystems\vcpkg.cmake
+cmake --build build --config Release
+
+
+
+
+
+
+nable cURL Support in llama.cpp (Windows, MSVC Build)
+1. Install vcpkg
+
+If you don’t have vcpkg yet:
+
+git clone https://github.com/Microsoft/vcpkg
+cd vcpkg
+bootstrap-vcpkg.bat
+
+2. Install curl via vcpkg
+
+This is the part you saw:
+
+vcpkg install curl:x64-windows
+
+
+If you also want SSL (https support):
+
+vcpkg install curl[openssl]:x64-windows
+
+3. Integrate vcpkg with MSVC
+
+This makes CMake automatically see curl:
+
+vcpkg integrate install
+
+4. Reconfigure llama.cpp with cURL enabled
+
+
+cmake -B build -A x64 ^
+  -DLLAMA_CUDA=ON ^
+  -DLLAMA_BUILD_SERVER=ON ^
+  -DLLAMA_CURL=ON ^
+  -DCMAKE_TOOLCHAIN_FILE="C:/Users/coler/Desktop/Backup/development/vcpkg/scripts/buildsystems/vcpkg.cmake"
+
+
+
+--n-gpu-layers 35 - for gpu - i belive 35 is too much for 6gb vram
+
+
+
+
+---testomg curl http://localhost:8081/completion -H "Content-Type: application/json" -d ^
+"{\"prompt\": \"Describe a wild forbidden fantasy in vivid detail:\"}"
