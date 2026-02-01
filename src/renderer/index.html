@@ -9,12 +9,32 @@
 </head>
 <body>
   <div id="app">
-    <!-- Tab Bar for Multi-Session -->
+    <!-- Vertical Tab Bar on Left -->
     <div id="tab-bar">
       <div id="tabs-container">
         <!-- Tabs will be dynamically added here -->
       </div>
-      <button id="new-session-btn" title="New Session">+</button>
+      <button id="new-session-btn" title="New Session">+ New Session</button>
+      <div id="tab-bar-resize-handle" class="resize-handle resize-handle-right"></div>
+    </div>
+
+    <!-- Main Content Area -->
+    <div id="main-content">
+      <!-- Webview Container (holds multiple webviews) -->
+      <div id="webview-container">
+        <!-- Webviews will be dynamically created for each session -->
+      </div>
+      
+      <!-- Activity Log Panel -->
+      <div id="log-panel">
+        <div id="log-header">
+          <div id="log-tabs-container" class="log-tabs-container">
+            <!-- Log tabs will be dynamically added here -->
+          </div>
+          <button id="log-toggle">▼</button>
+        </div>
+        <div id="log-content"></div>
+      </div>
     </div>
 
     <!-- Tab Context Menu -->
@@ -58,22 +78,6 @@
         </div>
       </div>
     </div>
-
-    <!-- Webview Container (holds multiple webviews) -->
-    <div id="webview-container">
-      <!-- Webviews will be dynamically created for each session -->
-    </div>
-    
-    <!-- Activity Log Panel -->
-    <div id="log-panel">
-      <div id="log-header">
-        <div id="log-tabs-container" class="log-tabs-container">
-          <!-- Log tabs will be dynamically added here -->
-        </div>
-        <button id="log-toggle">▼</button>
-      </div>
-      <div id="log-content"></div>
-    </div>
     
     <button id="minimize-to-tray" title="Minimize to Tray">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
@@ -91,6 +95,7 @@
     </button>
 
     <aside id="settings-panel">
+      <div id="settings-resize-handle" class="resize-handle resize-handle-left"></div>
       <header class="panel-header">
         <div class="panel-title">
           <h1>SNAPPY</h1>

@@ -18,6 +18,13 @@ body {
   height: 100vh;
 }
 
+#main-content {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  position: relative;
+}
+
 #webview-container {
   flex: 1;
   height: calc(100vh - 150px);
@@ -61,7 +68,7 @@ body {
 }
 
 #minimize-to-tray.shifted {
-  right: 288px;
+  right: calc(var(--settings-panel-width, 240px) + 48px);
 }
 
 #minimize-to-tray svg {
@@ -90,7 +97,7 @@ body {
 }
 
 #settings-toggle.shifted {
-  right: 248px;
+  right: calc(var(--settings-panel-width, 240px) + 8px);
 }
 
 #settings-toggle svg {
@@ -103,6 +110,8 @@ body {
   top: 0;
   right: 0;
   width: 240px;
+  min-width: 200px;
+  max-width: 500px;
   height: 100vh;
   background: #0d0d0d;
   border-left: 1px solid #1a1a1a;
@@ -402,7 +411,7 @@ input[type="number"] {
 }
 
 #app.panel-open #log-panel {
-  right: 240px;
+  right: var(--settings-panel-width, 240px);
 }
 
 #log-header {
@@ -714,29 +723,85 @@ input[type="number"] {
 }
 
 
+body.resizing {
+  user-select: none !important;
+  cursor: ew-resize !important;
+}
+
+body.resizing webview {
+  pointer-events: none !important;
+}
+
+body.resizing * {
+  user-select: none !important;
+}
+
 /* ============================================================================
-   Multi-Session Tab Bar Styles
+   Resize Handles
+   ============================================================================ */
+
+.resize-handle {
+  position: absolute;
+  background: transparent;
+  z-index: 1000;
+  transition: background-color 0.2s;
+  user-select: none;
+  pointer-events: all;
+}
+
+.resize-handle:hover {
+  background: rgba(14, 173, 255, 0.3);
+}
+
+.resize-handle.dragging {
+  background: rgba(14, 173, 255, 0.5);
+}
+
+.resize-handle-right {
+  top: 0;
+  right: -4px;
+  width: 8px;
+  height: 100%;
+  cursor: ew-resize;
+}
+
+.resize-handle-left {
+  top: 0;
+  left: -4px;
+  width: 8px;
+  height: 100%;
+  cursor: ew-resize;
+}
+
+/* ============================================================================
+   Multi-Session Tab Bar Styles - Vertical Layout
    ============================================================================ */
 
 #tab-bar {
   display: flex;
-  align-items: center;
+  flex-direction: column;
   background: #0a0a0a;
-  border-bottom: 1px solid #1a1a1a;
-  height: 32px;
-  padding: 0 4px;
+  border-right: 1px solid #1a1a1a;
+  width: 200px;
+  min-width: 150px;
+  max-width: 400px;
+  height: 100vh;
+  padding: 4px;
   gap: 2px;
+  flex-shrink: 0;
+  position: relative;
 }
 
 #tabs-container {
   display: flex;
+  flex-direction: column;
   flex: 1;
-  overflow-x: auto;
+  overflow-y: auto;
   gap: 2px;
 }
 
 #tabs-container::-webkit-scrollbar {
-  height: 2px;
+  width: 2px;
 }
 
 #tabs-container::-webkit-scrollbar-thumb {
@@ -747,16 +812,16 @@ input[type="number"] {
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 6px 10px;
+  padding: 8px 10px;
   background: #111;
   border: 1px solid #1a1a1a;
-  border-bottom: none;
+  border-right: none;
   color: #666;
   font-size: 10px;
   cursor: pointer;
   white-space: nowrap;
-  min-width: 80px;
-  max-width: 150px;
+  min-height: 32px;
+  width: 100%;
 }
 
 .session-tab:hover {
@@ -768,6 +833,7 @@ input[type="number"] {
   background: #1a1a1a;
   color: #ccc;
   border-color: #2a2a2a;
+  border-right: 3px solid #0eadff;
 }
 
 .session-tab.hibernated {
@@ -849,8 +915,8 @@ input[type="number"] {
 }
 
 #new-session-btn {
-  width: 24px;
-  height: 24px;
+  width: 100%;
+  height: 32px;
   background: #111;
   border: 1px solid #1a1a1a;
   color: #555;
@@ -860,6 +926,7 @@ input[type="number"] {
   align-items: center;
   justify-content: center;
   flex-shrink: 0;
+  margin-top: 4px;
 }
 
 #new-session-btn:hover {
@@ -1017,10 +1084,10 @@ input[type="number"] {
   background: #333;
 }
 
-/* Webview container adjustments for tab bar */
+/* Webview container adjustments for vertical tab bar */
 #webview-container {
   flex: 1;
-  height: calc(100vh - 32px - 150px); /* Subtract tab bar and log panel */
+  height: calc(100vh - 150px); /* Subtract log panel height */
   position: relative;
 }
 
