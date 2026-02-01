@@ -22,7 +22,7 @@ const MIN_MESSAGE_LENGTH = 5; // Minimum message length to process
 const SNAPCHAT_SELECTORS = {
   // Chat list items (conversations in sidebar)
   chatListItem: '.O4POs, [class*="ChatListItem"], [class*="conversationListItem"], [class*="conversation-"]',
-  chatListContainer: '[class*="ChatList"], [class*="conversationList"], [class*="chat-list"]',
+  chatListContainer: '[class*="ChatList"], [class*="conversationList"], [class*="chat-list"], [class*="sidebar"], nav, aside',
 
   // Unread indicator - more specific based on actual HTML
   unreadBadge: '.HEkDJ.DEp5Z.UW13F, .HEkDJ.DEp5Z, [class*="unread"], [class*="badge"]',
@@ -529,6 +529,142 @@ function findUnreadChats(): HTMLElement[] {
 }
 
 /**
+ * Navigate back to the main Snapchat homepage/chat list
+ */
+async function navigateToHomepage(): Promise<boolean> {
+  try {
+    snapLog('Navigating back to homepage...');
+    
+    // Method 1: Look for a back button or close button in the conversation header
+    const conversationHeader = findElement(SNAPCHAT_SELECTORS.conversationHeader);
+    if (conversationHeader) {
+      const backBtn = conversationHeader.querySelector('[aria-label*="Back"], [aria-label*="Close"], button[class*="back"]') as HTMLElement;
+      if (backBtn && backBtn.offsetParent !== null) {
+        backBtn.click();
+        snapLog('Clicked back button in conversation header');
+        await sleep(1500);
+        return true;
+      }
+    }
+    
+    // Method 2: Press Escape key to close current view
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', keyCode: 27, bubbles: true }));
+    document.dispatchEvent(new KeyboardEvent('keyup', { key: 'Escape', keyCode: 27, bubbles: true }));
+    snapLog('Pressed Escape to close conversation');
+    await sleep(1000);
+    
+    // Method 3: Click on the Snapchat logo/brand area (usually top-left)
+    const logoSelectors = [
+      '[aria-label*="Snapchat"]',
+      'svg[class*="logo"]',
+      '[class*="Logo"]',
+      'header [class*="brand"]',
+      'nav [class*="logo"]'
+    ];
+    
+    for (const selector of logoSelectors) {
+      const logo = document.querySelector(selector) as HTMLElement;
+      if (logo && logo.offsetParent !== null) {
+        logo.click();
+        snapLog('Clicked Snapchat logo to return to homepage');
+        await sleep(1500);
+        return true;
+      }
+    }
+    
+    // Method 4: Click on an empty area of the chat list (but avoid "My AI")
+    const chatListContainer = findElement(SNAPCHAT_SELECTORS.chatListContainer);
+    if (chatListContainer) {
+      // Find a safe area to click that's not on "My AI" or any specific chat
+      const rect = chatListContainer.getBoundingClientRect();
+      
+      // Click near the top of the chat list, but not on the first item (which might be My AI)
+      const clickX = rect.left + rect.width * 0.3; // 30% from left edge
+      const clickY = rect.top + 30; // 30px from top
+      
+      // Make sure we're not clicking on any chat item
+      const elementAtPoint = document.elementFromPoint(clickX, clickY);
+      const chatItem = elementAtPoint?.closest(SNAPCHAT_SELECTORS.chatListItem);
+      
+      if (!chatItem) {
+        const clickEvent = new MouseEvent('click', {
+          bubbles: true,
+          clientX: clickX,
+          clientY: clickY
+        });
+        chatListContainer.dispatchEvent(clickEvent);
+        snapLog('Clicked on empty area of chat list');
+        await sleep(1000);
+      }
+    }
+    
+    // Method 5: Try to find and click a "Chats" or "Messages" tab/button
+    const chatsTabSelectors = [
+      '[aria-label*="Chats"]',
+      '[aria-label*="Messages"]',
+      'button[class*="chat"]',
+      '[data-testid*="chat"]',
+      'nav button:first-child' // Often the first nav button is "Chats"
+    ];
+    
+    for (const selector of chatsTabSelectors) {
+      const chatsTab = document.querySelector(selector) as HTMLElement;
+      if (chatsTab && chatsTab.offsetParent !== null) {
+        // Make sure it's not "My AI" by checking text content
+        const text = chatsTab.textContent?.toLowerCase() || '';
+        if (!text.includes('ai') && !text.includes('my ai')) {
+          chatsTab.click();
+          snapLog('Clicked Chats tab to return to homepage');
+          await sleep(1500);
+          return true;
+        }
+      }
+    }
+    
+    snapLog('Successfully attempted to navigate to homepage');
+    return true;
+  } catch (e) {
+    snapLog(`Error navigating to homepage: ${e}`);
+    return false;
+  }
+}
+
+/**
+ * Ensure the chat is still open and focused
+ * Re-clicks the chat element if needed
+ */
+async function ensureChatIsOpen(chatElement: HTMLElement, expectedSender: string): Promise<boolean> {
+  // Check if we're still in the correct conversation
+  const currentSender = getCurrentSender();
+  
+  if (currentSender === expectedSender) {
+    // We're still in the right chat
+    snapLog(`Chat with ${expectedSender} is still open`);
+    return true;
+  }
+  
+  // We're not in the right chat anymore, re-open it
+  snapLog(`Chat closed or switched, re-opening chat with ${expectedSender}`);
+  
+  try {
+    chatElement.click();
+    await sleep(1000); // Wait for chat to open
+    
+    const newSender = getCurrentSender();
+    if (newSender === expectedSender) {
+      snapLog(`Successfully re-opened chat with ${expectedSender}`);
+      return true;
+    } else {
+      snapLog(`Failed to re-open correct chat. Expected: ${expectedSender}, Got: ${newSender}`);
+      return false;
+    }
+  } catch (e) {
+    snapLog(`Error re-opening chat: ${e}`);
+    return false;
+  }
+}
+
+/**
  * Click on a chat to open it
  */
 async function openChat(chatElement: HTMLElement): Promise<boolean> {
@@ -536,8 +672,29 @@ async function openChat(chatElement: HTMLElement): Promise<boolean> {
     chatElement.click();
     snapLog('Clicked on chat to open');
     
-    // Wait for conversation to load
-    await sleep(1500);
+    // Wait for conversation to load with multiple checks
+    let attempts = 0;
+    const maxAttempts = 5;
+    
+    while (attempts < maxAttempts) {
+      await sleep(500);
+      attempts++;
+      
+      // Check if we have a conversation loaded by looking for message container
+      const messageContainer = findElement(SNAPCHAT_SELECTORS.messageContainer);
+      const inputField = findElement(SNAPCHAT_SELECTORS.inputField);
+      
+      if (messageContainer && inputField) {
+        snapLog(`Chat opened successfully after ${attempts * 500}ms`);
+        return true;
+      }
+      
+      if (attempts < maxAttempts) {
+        snapLog(`Chat not fully loaded yet, waiting... (attempt ${attempts}/${maxAttempts})`);
+      }
+    }
+    
+    snapLog('Chat may not be fully loaded, but proceeding');
     return true;
   } catch (e) {
     snapLog(`Error opening chat: ${e}`);
@@ -549,14 +706,14 @@ async function openChat(chatElement: HTMLElement): Promise<boolean> {
  * Type text into input field with human-like delays
  */
 async function typeMessage(text: string): Promise<boolean> {
-  const input = findElement(SNAPCHAT_SELECTORS.inputField);
+  let input = findElement(SNAPCHAT_SELECTORS.inputField);
   
   if (!input) {
     snapLog('Error: Input field not found');
     return false;
   }
   
-  // Focus the input
+  // Focus the input and ensure it stays focused
   input.focus();
   snapLog('Input field focused');
   
@@ -573,6 +730,21 @@ async function typeMessage(text: string): Promise<boolean> {
   
   for (let i = 0; i < text.length; i++) {
     const char = text[i];
+    
+    // Re-find input field periodically to handle DOM changes
+    if (i % 10 === 0) {
+      const currentInput = findElement(SNAPCHAT_SELECTORS.inputField);
+      if (currentInput && currentInput !== input) {
+        input = currentInput;
+        input.focus();
+        snapLog('Re-focused input field during typing');
+      }
+    }
+    
+    // Ensure input is still focused
+    if (document.activeElement !== input) {
+      input.focus();
+    }
     
     if (input.getAttribute('contenteditable') === 'true') {
       input.textContent = (input.textContent || '') + char;
@@ -598,24 +770,62 @@ async function typeMessage(text: string): Promise<boolean> {
  * Click the send button
  */
 async function clickSend(): Promise<boolean> {
-  const sendBtn = findElement(SNAPCHAT_SELECTORS.sendButton);
+  let sendBtn = findElement(SNAPCHAT_SELECTORS.sendButton);
   
   if (!sendBtn) {
     // Try pressing Enter as fallback
     const input = findElement(SNAPCHAT_SELECTORS.inputField);
     if (input) {
+      input.focus();
       input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', keyCode: 13, bubbles: true }));
       input.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', keyCode: 13, bubbles: true }));
       snapLog('Sent via Enter key');
+      
+      // Wait a moment to see if message was sent
+      await sleep(500);
       return true;
     }
-    snapLog('Error: Send button not found');
+    snapLog('Error: Send button not found and Enter fallback failed');
     return false;
   }
   
-  sendBtn.click();
-  snapLog('Send button clicked');
-  return true;
+  // Ensure send button is clickable
+  if (sendBtn.style.display === 'none' || sendBtn.style.visibility === 'hidden') {
+    snapLog('Send button is hidden, trying Enter key instead');
+    const input = findElement(SNAPCHAT_SELECTORS.inputField);
+    if (input) {
+      input.focus();
+      input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', keyCode: 13, bubbles: true }));
+      input.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', keyCode: 13, bubbles: true }));
+      snapLog('Sent via Enter key (hidden button)');
+      await sleep(500);
+      return true;
+    }
+  }
+  
+  try {
+    sendBtn.click();
+    snapLog('Send button clicked');
+    
+    // Wait a moment to ensure the message is sent
+    await sleep(500);
+    return true;
+  } catch (e) {
+    snapLog(`Error clicking send button: ${e}`);
+    
+    // Try Enter key as final fallback
+    const input = findElement(SNAPCHAT_SELECTORS.inputField);
+    if (input) {
+      input.focus();
+      input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', keyCode: 13, bubbles: true }));
+      input.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', keyCode: 13, bubbles: true }));
+      snapLog('Sent via Enter key (click failed)');
+      await sleep(500);
+      return true;
+    }
+    
+    return false;
+  }
 }
 
 /**
@@ -865,15 +1075,31 @@ async function processConversation(chatElement: HTMLElement): Promise<void> {
   snapLog(`Waiting ${delay}ms before replying...`);
   await sleep(delay);
   
+  // Ensure we're still in the correct chat before typing
+  await ensureChatIsOpen(chatElement, sender);
+  
   // Type and send
   const typed = await typeMessage(reply);
-  if (!typed) return;
+  if (!typed) {
+    snapLog('Failed to type message, ensuring chat is still open');
+    await ensureChatIsOpen(chatElement, sender);
+    return;
+  }
   
   await sleep(500); // Brief pause before sending
+  
+  // Ensure we're still in the correct chat before sending
+  await ensureChatIsOpen(chatElement, sender);
   
   const sent = await clickSend();
   if (sent) {
     snapLog(`✓ Reply sent to ${sender}: "${reply}"`);
+    
+    // Wait a moment to ensure message is fully sent before leaving
+    await sleep(1000);
+    
+    // Navigate back to homepage instead of staying in chat
+    await navigateToHomepage();
     
     // Mark our own reply as seen to avoid replying to it
     const botMsgId = `${sender}-${reply.substring(0, 100)}`;
