@@ -4762,9 +4762,163 @@ function createDefaultWebview(url: string = 'https://web.snapchat.com'): Electro
   return wv;
 }
 
+// ============================================================================
+// Resize Handles Setup
+// ============================================================================
+
+function setupResizeHandles() {
+  setupTabBarResize();
+  setupSettingsPanelResize();
+}
+
+function setupTabBarResize() {
+  const tabBar = document.getElementById('tab-bar');
+  const resizeHandle = document.getElementById('tab-bar-resize-handle');
+  
+  if (!tabBar || !resizeHandle) return;
+
+  let isResizing = false;
+  let startX = 0;
+  let startWidth = 0;
+
+  const startResize = (e: MouseEvent) => {
+    isResizing = true;
+    startX = e.clientX;
+    startWidth = tabBar.offsetWidth;
+    resizeHandle.classList.add('dragging');
+    document.body.classList.add('resizing');
+    
+    e.preventDefault();
+    e.stopPropagation();
+  };
+
+  const doResize = (e: MouseEvent) => {
+    if (!isResizing) return;
+    
+    const deltaX = e.clientX - startX;
+    const newWidth = Math.max(150, Math.min(400, startWidth + deltaX));
+    
+    tabBar.style.width = `${newWidth}px`;
+    
+    // Store the width for persistence
+    localStorage.setItem('tabBarWidth', newWidth.toString());
+    
+    e.preventDefault();
+    e.stopPropagation();
+  };
+
+  const stopResize = (e?: MouseEvent) => {
+    if (!isResizing) return;
+    
+    isResizing = false;
+    resizeHandle.classList.remove('dragging');
+    document.body.classList.remove('resizing');
+    
+    if (e) {
+      e.preventDefault();
+      e.stopPropagation();
+    }
+  };
+
+  resizeHandle.addEventListener('mousedown', startResize);
+  document.addEventListener('mousemove', doResize);
+  document.addEventListener('mouseup', stopResize);
+  
+  // Handle escape key to cancel resize
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && isResizing) {
+      stopResize();
+    }
+  });
+
+  // Restore saved width
+  const savedWidth = localStorage.getItem('tabBarWidth');
+  if (savedWidth) {
+    tabBar.style.width = `${savedWidth}px`;
+  }
+}
+
+function setupSettingsPanelResize() {
+  const settingsPanel = document.getElementById('settings-panel');
+  const resizeHandle = document.getElementById('settings-resize-handle');
+  
+  if (!settingsPanel || !resizeHandle) return;
+
+  let isResizing = false;
+  let startX = 0;
+  let startWidth = 0;
+
+  const startResize = (e: MouseEvent) => {
+    isResizing = true;
+    startX = e.clientX;
+    startWidth = settingsPanel.offsetWidth;
+    resizeHandle.classList.add('dragging');
+    document.body.classList.add('resizing');
+    
+    e.preventDefault();
+    e.stopPropagation();
+  };
+
+  const doResize = (e: MouseEvent) => {
+    if (!isResizing) return;
+    
+    const deltaX = startX - e.clientX; // Reverse direction for right panel
+    const newWidth = Math.max(200, Math.min(500, startWidth + deltaX));
+    
+    settingsPanel.style.width = `${newWidth}px`;
+    
+    // Update CSS custom property for other elements
+    document.documentElement.style.setProperty('--settings-panel-width', `${newWidth}px`);
+    
+    // Store the width for persistence
+    localStorage.setItem('settingsPanelWidth', newWidth.toString());
+    
+    e.preventDefault();
+    e.stopPropagation();
+  };
+
+  const stopResize = (e?: MouseEvent) => {
+    if (!isResizing) return;
+    
+    isResizing = false;
+    resizeHandle.classList.remove('dragging');
+    document.body.classList.remove('resizing');
+    
+    if (e) {
+      e.preventDefault();
+      e.stopPropagation();
+    }
+  };
+
+  resizeHandle.addEventListener('mousedown', startResize);
+  document.addEventListener('mousemove', doResize);
+  document.addEventListener('mouseup', stopResize);
+  
+  // Handle escape key to cancel resize
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && isResizing) {
+      stopResize();
+    }
+  });
+
+  // Restore saved width
+  const savedWidth = localStorage.getItem('settingsPanelWidth');
+  if (savedWidth) {
+    settingsPanel.style.width = `${savedWidth}px`;
+    document.documentElement.style.setProperty('--settings-panel-width', `${savedWidth}px`);
+  }
+}
+
+// ============================================================================
+// Main Initialization
+// ============================================================================
+
 document.addEventListener('DOMContentLoaded', async () => {
   loadConfig();
   addLog('Snappy initialized', 'highlight');
+  
+  // Set up resize handles for panels
+  setupResizeHandles();
   
   // Clear stale llama server tracking from previous runs
   try {
