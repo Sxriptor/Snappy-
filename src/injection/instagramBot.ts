@@ -117,6 +117,53 @@ export function buildInstagramBotScript(config: Configuration): string {
   }
 
   /**
+   * Check if we're in a specific conversation (not the main DMs list)
+   */
+  function isInConversation() {
+    return window.location.href.includes('/direct/t/');
+  }
+
+  /**
+   * Navigate back to the main DMs page (leave current conversation)
+   */
+  function navigateBackToDMs() {
+    // Look for the DM/Messages tab/link to go back to main DMs page
+    const dmLinks = Array.from(document.querySelectorAll('a[href*="/direct/"], a[href="/direct/inbox/"]'));
+    for (const link of dmLinks) {
+      // Skip if this is a specific conversation link
+      if (link.href.includes('/direct/t/')) continue;
+      
+      log('Navigating back to main DMs page');
+      link.click();
+      return true;
+    }
+    
+    // Alternative: look for back button or inbox button
+    const backButtons = Array.from(document.querySelectorAll('button, div[role="button"]')).filter(btn => {
+      const text = btn.textContent?.toLowerCase();
+      const ariaLabel = btn.getAttribute('aria-label')?.toLowerCase();
+      return (text && (text.includes('back') || text.includes('inbox'))) || 
+             (ariaLabel && (ariaLabel.includes('back') || ariaLabel.includes('inbox')));
+    });
+    
+    if (backButtons.length > 0) {
+      log('Clicking back button to return to DMs');
+      backButtons[0].click();
+      return true;
+    }
+    
+    log('Could not find way to navigate back to DMs');
+    return false;
+  }
+
+  /**
+   * Check if we're in a specific conversation (not the main DMs list)
+   */
+  function isInConversation() {
+    return window.location.href.includes('/direct/t/');
+  }
+
+  /**
    * Find all conversation items in the DM list
    */
   function findConversations() {
@@ -163,7 +210,7 @@ export function buildInstagramBotScript(config: Configuration): string {
       if (!hasUnread) continue;
 
       const fullText = item.textContent || '';
-      const convId = 'conv-' + fullText.substring(0, 50).replace(/\\s+/g, '-');
+      const convId = 'conv-' + fullText.substring(0, 50).replace(/\\\\s+/g, '-');
 
       if (!seenMessages.has(convId)) {
         log('✓ Found unread conversation: ' + convId.substring(0, 60));
@@ -323,7 +370,7 @@ export function buildInstagramBotScript(config: Configuration): string {
     for (let i = messages.length - 1; i >= 0; i--) {
       const msg = messages[i];
       if (msg.isIncoming) {
-        const msgId = 'msg-' + msg.text.substring(0, 100).replace(/\\s+/g, '-');
+        const msgId = 'msg-' + msg.text.substring(0, 100).replace(/\\\\s+/g, '-');
         if (!seenMessages.has(msgId)) {
           return { text: msg.text, id: msgId };
         }
@@ -411,23 +458,32 @@ export function buildInstagramBotScript(config: Configuration): string {
    */
   async function typeMessage(text) {
     // Find the message input - Instagram typically uses a contenteditable div or textarea
-    const input = document.querySelector('[contenteditable="true"][role="textbox"], textarea[placeholder*="Message"], textarea');
+    const input = document.querySelector('[contenteditable="true"][role="textbox"], textarea[placeholder*="Message"], textarea, [data-testid="message-input"]');
 
     if (!input) {
       log('Input field not found');
       return false;
     }
 
+    log('Found input field: ' + input.tagName + (input.getAttribute('role') ? '[role="' + input.getAttribute('role') + '"]' : ''));
+    
     input.focus();
-    await sleep(200);
+    await sleep(500); // Longer wait for focus
 
-    // Clear existing content
+    // Clear existing content more thoroughly
     if (input.getAttribute('contenteditable') === 'true') {
       input.innerHTML = '';
       input.textContent = '';
+      // Trigger events to ensure Instagram knows content changed
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      input.dispatchEvent(new Event('change', { bubbles: true }));
     } else if (input.value !== undefined) {
       input.value = '';
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      input.dispatchEvent(new Event('change', { bubbles: true }));
     }
+
+    await sleep(200);
 
     // Type character by character
     for (let i = 0; i < text.length; i++) {
@@ -435,19 +491,23 @@ export function buildInstagramBotScript(config: Configuration): string {
 
       if (input.getAttribute('contenteditable') === 'true') {
         input.textContent = (input.textContent || '') + char;
+        // Trigger input events after each character
+        input.dispatchEvent(new Event('input', { bubbles: true }));
       } else if (input.value !== undefined) {
         input.value += char;
+        input.dispatchEvent(new Event('input', { bubbles: true }));
       }
-
-      input.dispatchEvent(new Event('input', { bubbles: true }));
-      input.dispatchEvent(new KeyboardEvent('keydown', { key: char, bubbles: true }));
-      input.dispatchEvent(new KeyboardEvent('keyup', { key: char, bubbles: true }));
 
       const delay = Math.floor(Math.random() * (typingDelayRange[1] - typingDelayRange[0])) + typingDelayRange[0];
       await sleep(delay);
     }
 
-    log('Typed message: "' + text.substring(0, 30) + '..."');
+    // Final events to ensure Instagram recognizes the complete message
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+    input.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', bubbles: true }));
+
+    log('Typed message: "' + text.substring(0, 30) + '..." - Final content: "' + (input.textContent || input.value || '').substring(0, 30) + '..."');
     return true;
   }
 
@@ -455,32 +515,79 @@ export function buildInstagramBotScript(config: Configuration): string {
    * Send the message
    */
   async function sendMessage() {
-    // Find the send button - usually a button with "Send" text or specific SVG
+    // Wait a moment for typing to settle
+    await sleep(300);
+    
+    // Find the send button - try multiple approaches
+    let sendBtn = null;
+    
+    // Method 1: Look for button with "Send" text or aria-label
     const buttons = Array.from(document.querySelectorAll('button, div[role="button"]'));
-    const sendBtn = buttons.find(btn => {
+    sendBtn = buttons.find(btn => {
       const text = btn.textContent?.toLowerCase();
       const ariaLabel = btn.getAttribute('aria-label')?.toLowerCase();
       return (text && text.includes('send')) || (ariaLabel && ariaLabel.includes('send'));
     });
 
+    // Method 2: Look for SVG send icons (paper plane, arrow, etc.)
+    if (!sendBtn) {
+      sendBtn = buttons.find(btn => {
+        const svg = btn.querySelector('svg');
+        return svg && (svg.innerHTML.includes('M2.01') || svg.innerHTML.includes('plane') || svg.innerHTML.includes('arrow'));
+      });
+    }
+
+    // Method 3: Look for buttons near the input field
+    if (!sendBtn) {
+      const input = document.querySelector('[contenteditable="true"][role="textbox"], textarea');
+      if (input) {
+        const parent = input.closest('form, div');
+        if (parent) {
+          sendBtn = parent.querySelector('button, div[role="button"]');
+        }
+      }
+    }
+
     if (sendBtn) {
+      log('Found send button: ' + sendBtn.tagName + ' - clicking...');
       sendBtn.click();
-      log('Send button clicked');
-      await sleep(800);
-      return true;
+      await sleep(1000); // Wait longer for message to send
+      
+      // Verify message was sent by checking if input is cleared
+      const input = document.querySelector('[contenteditable="true"][role="textbox"], textarea');
+      const inputEmpty = !input || !(input.textContent || input.value || '').trim();
+      
+      if (inputEmpty) {
+        log('✓ Message sent successfully (input cleared)');
+        return true;
+      } else {
+        log('⚠ Send button clicked but input not cleared - message may not have sent');
+        return false;
+      }
     }
 
     // Fallback: Try Enter key
     const input = document.querySelector('[contenteditable="true"][role="textbox"], textarea');
     if (input) {
+      log('No send button found, trying Enter key...');
+      input.focus();
       input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', keyCode: 13, bubbles: true }));
+      input.dispatchEvent(new KeyboardEvent('keypress', { key: 'Enter', keyCode: 13, bubbles: true }));
       input.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', keyCode: 13, bubbles: true }));
-      log('Sent via Enter key');
-      await sleep(800);
-      return true;
+      await sleep(1000);
+      
+      // Check if input cleared
+      const inputEmpty = !(input.textContent || input.value || '').trim();
+      if (inputEmpty) {
+        log('✓ Message sent via Enter key');
+        return true;
+      } else {
+        log('⚠ Enter key pressed but input not cleared');
+        return false;
+      }
     }
 
-    log('Could not send message');
+    log('❌ Could not send message - no send button or input found');
     return false;
   }
 
@@ -490,36 +597,51 @@ export function buildInstagramBotScript(config: Configuration): string {
   async function processConversation(conversation) {
     try {
       const opened = await openConversation(conversation);
-      if (!opened) return;
+      if (!opened) {
+        // Mark as seen even if we couldn't open it
+        seenMessages.add(conversation.id);
+        return;
+      }
 
       const messages = getConversationMessages();
       log('Found ' + messages.length + ' messages in conversation');
 
       if (messages.length === 0) {
-        log('No messages found');
+        log('No messages found - marking conversation as seen and navigating back to DMs');
+        seenMessages.add(conversation.id);
+        await sleep(1000);
+        navigateBackToDMs();
         return;
       }
 
       const latestMsg = getLatestIncomingMessage(messages);
       if (!latestMsg) {
-        log('No new incoming messages');
+        log('No new incoming messages - marking conversation as seen and navigating back to DMs');
+        seenMessages.add(conversation.id);
+        await sleep(1000);
+        navigateBackToDMs();
         return;
       }
 
       log('Latest incoming message: "' + latestMsg.text.substring(0, 50) + '..."');
 
+      // Mark both message and conversation as seen
       seenMessages.add(latestMsg.id);
       seenMessages.add(conversation.id);
 
       const reply = await generateReply(latestMsg.text);
       if (!reply) {
-        log('No reply generated');
+        log('No reply generated - navigating back to DMs');
+        await sleep(1000);
+        navigateBackToDMs();
         return;
       }
 
       const skipProb = CONFIG?.randomSkipProbability || 0.15;
       if (Math.random() < skipProb) {
-        log('Randomly skipping reply (prob ' + Math.round(skipProb * 100) + '%)');
+        log('Randomly skipping reply (prob ' + Math.round(skipProb * 100) + '%) - navigating back to DMs');
+        await sleep(1000);
+        navigateBackToDMs();
         return;
       }
 
@@ -528,16 +650,31 @@ export function buildInstagramBotScript(config: Configuration): string {
       await sleep(delay);
 
       const typed = await typeMessage(reply);
-      if (!typed) return;
+      if (!typed) {
+        log('Failed to type message - navigating back to DMs');
+        await sleep(1000);
+        navigateBackToDMs();
+        return;
+      }
 
       await sleep(500);
 
       const sent = await sendMessage();
       if (sent) {
-        log('✓ Reply sent: "' + reply.substring(0, 60) + '..."');
+        log('✓ Reply sent: "' + reply.substring(0, 60) + '..." - navigating back to DMs');
+      } else {
+        log('Failed to send message - navigating back to DMs');
       }
+      
+      // Always navigate back to DMs after processing
+      await sleep(2000); // Wait longer to ensure message is sent/processed
+      navigateBackToDMs();
+      
     } catch (err) {
-      log('Error processing conversation: ' + err);
+      log('Error processing conversation: ' + err + ' - marking as seen and navigating back to DMs');
+      seenMessages.add(conversation.id);
+      await sleep(1000);
+      navigateBackToDMs();
     }
   }
 
@@ -549,11 +686,21 @@ export function buildInstagramBotScript(config: Configuration): string {
     isProcessing = true;
 
     try {
+      // If we're not on the DMs page at all, navigate there
       if (!isOnDMsPage()) {
         const navigated = navigateToDMs();
         if (navigated) {
           await sleep(2000);
         }
+        isProcessing = false;
+        return;
+      }
+      
+      // If we're in a specific conversation, navigate back to main DMs first
+      if (isInConversation()) {
+        log('Currently in conversation, navigating back to main DMs');
+        navigateBackToDMs();
+        await sleep(2000);
         isProcessing = false;
         return;
       }
