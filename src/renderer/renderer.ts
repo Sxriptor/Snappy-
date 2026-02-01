@@ -1310,6 +1310,9 @@ function activateSession(sessionId: string, suppressLog: boolean = false) {
   // Sync bot status UI with the active session's bot status
   syncBotStatusUI(sessionId);
   
+  // Refresh site settings UI for the new session
+  refreshSiteSettingsForSession();
+  
   if (!suppressLog) {
     const hasCustomConfig = sessionConfigs.has(sessionId);
     const configStatus = hasCustomConfig ? 'custom settings' : 'default settings';
@@ -2428,8 +2431,404 @@ function togglePanel() {
   document.getElementById('app')!.classList.toggle('panel-open', isPanelOpen);
 }
 
-toggleBtn.addEventListener('click', togglePanel);
-closeBtn.addEventListener('click', togglePanel);
+// Override the original togglePanel function to handle both panels
+function togglePanelWithSiteSupport() {
+  togglePanel();
+  
+  // Initialize site settings when panel opens
+  if (isPanelOpen) {
+    initializeSiteSettings();
+  }
+}
+
+toggleBtn.addEventListener('click', togglePanelWithSiteSupport);
+closeBtn.addEventListener('click', togglePanelWithSiteSupport);
+
+// ============================================================================
+// Site-Specific Settings (Integrated)
+// ============================================================================
+
+let isSiteSettingsCollapsed = false;
+const siteSettingsSection = document.getElementById('site-settings-section')!;
+const siteSettingsHeader = document.querySelector('.site-settings-header')!;
+const siteCollapseBtn = document.getElementById('site-settings-collapse')!;
+const sitePlatformSelect = document.getElementById('site-platform-select') as HTMLSelectElement;
+const saveSiteSettingsBtn = document.getElementById('save-site-settings-btn')!;
+
+// Site settings storage
+let currentSiteSettings: any = {};
+
+function toggleSiteSettingsCollapse() {
+  isSiteSettingsCollapsed = !isSiteSettingsCollapsed;
+  siteSettingsSection.classList.toggle('collapsed', isSiteSettingsCollapsed);
+  
+  // Save collapse state
+  localStorage.setItem('siteSettingsCollapsed', isSiteSettingsCollapsed.toString());
+}
+
+function detectCurrentPlatform(): string {
+  const currentWebview = getActiveWebview();
+  if (!currentWebview) {
+    // Fallback to reddit if no webview
+    sitePlatformSelect.value = 'reddit';
+    switchPlatformSettings('reddit');
+    updateSiteSettingsIndicator('reddit');
+    return 'reddit';
+  }
+  
+  try {
+    // Try to get hostname from webview synchronously first
+    const src = currentWebview.src || '';
+    let platform = detectPlatformFromUrl(src);
+    
+    if (platform !== 'unknown') {
+      sitePlatformSelect.value = platform;
+      switchPlatformSettings(platform);
+      updateSiteSettingsIndicator(platform);
+      return platform;
+    }
+    
+    // If URL detection fails, try async hostname detection
+    currentWebview.executeJavaScript('location.hostname').then((hostname: string) => {
+      const detectedPlatform = detectPlatformFromHostname(hostname);
+      
+      // Only update if we got a valid platform and it's different from current
+      if (detectedPlatform !== 'unknown' && detectedPlatform !== sitePlatformSelect.value) {
+        sitePlatformSelect.value = detectedPlatform;
+        switchPlatformSettings(detectedPlatform);
+        updateSiteSettingsIndicator(detectedPlatform);
+      }
+    }).catch(() => {
+      // If async detection fails, keep current selection or default to reddit
+      if (!sitePlatformSelect.value) {
+        sitePlatformSelect.value = 'reddit';
+        switchPlatformSettings('reddit');
+        updateSiteSettingsIndicator('reddit');
+      }
+    });
+    
+    // Return current value or reddit as fallback
+    return sitePlatformSelect.value || 'reddit';
+    
+  } catch (e) {
+    // Fallback to reddit on any error
+    sitePlatformSelect.value = 'reddit';
+    switchPlatformSettings('reddit');
+    updateSiteSettingsIndicator('reddit');
+    return 'reddit';
+  }
+}
+
+function detectPlatformFromUrl(url: string): string {
+  const lowerUrl = url.toLowerCase();
+  
+  if (lowerUrl.includes('reddit.com')) return 'reddit';
+  if (lowerUrl.includes('instagram.com')) return 'instagram';
+  if (lowerUrl.includes('twitter.com') || lowerUrl.includes('x.com')) return 'twitter';
+  if (lowerUrl.includes('snapchat.com')) return 'snapchat';
+  if (lowerUrl.includes('threads.net')) return 'threads';
+  
+  return 'unknown';
+}
+
+function detectPlatformFromHostname(hostname: string): string {
+  const lowerHostname = hostname.toLowerCase();
+  
+  if (lowerHostname.includes('reddit.com')) return 'reddit';
+  if (lowerHostname.includes('instagram.com')) return 'instagram';
+  if (lowerHostname.includes('twitter.com') || lowerHostname.includes('x.com')) return 'twitter';
+  if (lowerHostname.includes('snapchat.com')) return 'snapchat';
+  if (lowerHostname.includes('threads.net')) return 'threads';
+  
+  return 'unknown';
+}
+
+function switchPlatformSettings(platform: string) {
+  // Hide all platform settings
+  const allPlatformSettings = document.querySelectorAll('.platform-settings');
+  allPlatformSettings.forEach(el => el.classList.add('hidden'));
+  
+  // Show selected platform settings
+  const selectedSettings = document.getElementById(`${platform}-settings`);
+  if (selectedSettings) {
+    selectedSettings.classList.remove('hidden');
+  }
+  
+  updateSiteSettingsIndicator(platform);
+}
+
+function updateSiteSettingsIndicator(platform: string) {
+  const indicator = document.getElementById('site-settings-indicator');
+  if (indicator) {
+    const platformNames: { [key: string]: string } = {
+      reddit: 'Reddit',
+      instagram: 'Instagram',
+      twitter: 'Twitter/X',
+      snapchat: 'Snapchat',
+      threads: 'Threads'
+    };
+    indicator.textContent = `Platform: ${platformNames[platform] || platform}`;
+  }
+}
+
+function loadSiteSettingsForCurrentPlatform() {
+  const platform = detectCurrentPlatform();
+  loadSiteSettingsFromStorage(platform);
+}
+
+function refreshSiteSettingsForSession() {
+  // Only refresh if the settings panel is open
+  if (!isPanelOpen) return;
+  
+  // Store the current platform to detect changes
+  const previousPlatform = sitePlatformSelect.value;
+  
+  // Detect platform for the new session and update UI
+  setTimeout(() => {
+    // Small delay to ensure webview is ready
+    const newPlatform = detectCurrentPlatform();
+    
+    // Always switch platform settings and load settings, even if platform is the same
+    // (because different sessions might have different settings for the same platform)
+    switchPlatformSettings(newPlatform);
+    loadSiteSettingsFromStorage(newPlatform);
+    
+    // Log the platform change if it's different
+    if (previousPlatform !== newPlatform) {
+      addLog(`Site settings switched from ${previousPlatform} to ${newPlatform}`, 'info');
+    } else {
+      // Even if platform is the same, we might have different settings for this session
+      addLog(`Site settings refreshed for ${newPlatform}`, 'info');
+    }
+  }, 500);
+}
+
+function loadSiteSettingsFromStorage(platform: string) {
+  try {
+    const stored = localStorage.getItem('siteSettings');
+    const allSettings = stored ? JSON.parse(stored) : {};
+    const platformSettings = allSettings[platform] || {};
+    
+    currentSiteSettings = platformSettings;
+    populateSettingsUI(platform, platformSettings);
+  } catch (e) {
+    console.error('Error loading site settings:', e);
+    currentSiteSettings = {};
+  }
+}
+
+function populateSettingsUI(platform: string, settings: any) {
+  // Reddit settings
+  if (platform === 'reddit') {
+    setCheckboxValue('reddit-watch-notifications', settings.watchNotifications ?? true);
+    setCheckboxValue('reddit-watch-pms', settings.watchPrivateMessages ?? true);
+    setTextValue('reddit-subreddits', (settings.watchSubreddits || []).join(', '));
+    setTextValue('reddit-keywords', (settings.subredditKeywords || []).join(', '));
+    setCheckboxValue('reddit-auto-reply-comments', settings.autoReplyToComments ?? true);
+    setCheckboxValue('reddit-auto-reply-pms', settings.autoReplyToPMs ?? true);
+    setCheckboxValue('reddit-auto-reply-posts', settings.autoReplyToPosts ?? false);
+    setNumberValue('reddit-poll-interval', settings.pollIntervalMs ?? 30000);
+    setNumberValue('reddit-max-items', settings.maxItemsPerPoll ?? 3);
+    setNumberValue('reddit-min-score', settings.minPostScore ?? 1);
+    setNumberValue('reddit-max-age', settings.maxPostAge ?? 24);
+    setCheckboxValue('reddit-skip-own-posts', settings.skipOwnPosts ?? true);
+  }
+  
+  // Instagram settings
+  if (platform === 'instagram') {
+    setCheckboxValue('instagram-watch-dms', settings.watchDirectMessages ?? true);
+    setCheckboxValue('instagram-watch-requests', settings.watchMessageRequests ?? true);
+    setCheckboxValue('instagram-auto-accept', settings.autoAcceptRequests ?? false);
+    setNumberValue('instagram-poll-interval', settings.pollIntervalMs ?? 15000);
+    setNumberValue('instagram-max-messages', settings.maxMessagesPerPoll ?? 5);
+  }
+  
+  // Twitter settings
+  if (platform === 'twitter') {
+    setCheckboxValue('twitter-watch-dms', settings.watchDirectMessages ?? true);
+    setCheckboxValue('twitter-watch-mentions', settings.watchMentions ?? true);
+    setCheckboxValue('twitter-auto-reply-mentions', settings.autoReplyToMentions ?? true);
+    setNumberValue('twitter-poll-interval', settings.pollIntervalMs ?? 20000);
+    setNumberValue('twitter-max-tweets', settings.maxTweetsPerPoll ?? 3);
+  }
+  
+  // Snapchat settings
+  if (platform === 'snapchat') {
+    setCheckboxValue('snapchat-watch-chats', settings.watchChats ?? true);
+    setCheckboxValue('snapchat-auto-open', settings.autoOpenSnaps ?? true);
+    setCheckboxValue('snapchat-skip-groups', settings.skipGroupChats ?? false);
+    setNumberValue('snapchat-poll-interval', settings.pollIntervalMs ?? 10000);
+    setNumberValue('snapchat-max-chats', settings.maxChatsPerPoll ?? 3);
+  }
+  
+  // Threads settings
+  if (platform === 'threads') {
+    setCheckboxValue('threads-watch-activity', settings.watchActivityColumn ?? true);
+    setCheckboxValue('threads-activity-priority', settings.activityPriority ?? true);
+    setCheckboxValue('threads-auto-reply', settings.autoReplyToComments ?? true);
+    setNumberValue('threads-poll-interval', settings.pollIntervalMs ?? 60000);
+    setNumberValue('threads-max-comments', settings.maxCommentsPerPoll ?? 5);
+  }
+}
+
+function setCheckboxValue(id: string, value: boolean) {
+  const checkbox = document.getElementById(id) as HTMLInputElement;
+  if (checkbox) checkbox.checked = value;
+}
+
+function setTextValue(id: string, value: string) {
+  const input = document.getElementById(id) as HTMLInputElement | HTMLTextAreaElement;
+  if (input) input.value = value;
+}
+
+function setNumberValue(id: string, value: number) {
+  const input = document.getElementById(id) as HTMLInputElement;
+  if (input) input.value = value.toString();
+}
+
+function getCheckboxValue(id: string): boolean {
+  const checkbox = document.getElementById(id) as HTMLInputElement;
+  return checkbox ? checkbox.checked : false;
+}
+
+function getTextValue(id: string): string {
+  const input = document.getElementById(id) as HTMLInputElement | HTMLTextAreaElement;
+  return input ? input.value.trim() : '';
+}
+
+function getNumberValue(id: string): number {
+  const input = document.getElementById(id) as HTMLInputElement;
+  return input ? parseInt(input.value) || 0 : 0;
+}
+
+function collectCurrentSettings(platform: string): any {
+  const settings: any = {};
+  
+  if (platform === 'reddit') {
+    settings.watchNotifications = getCheckboxValue('reddit-watch-notifications');
+    settings.watchPrivateMessages = getCheckboxValue('reddit-watch-pms');
+    settings.watchSubreddits = getTextValue('reddit-subreddits').split(',').map(s => s.trim()).filter(s => s);
+    settings.subredditKeywords = getTextValue('reddit-keywords').split(',').map(s => s.trim()).filter(s => s);
+    settings.autoReplyToComments = getCheckboxValue('reddit-auto-reply-comments');
+    settings.autoReplyToPMs = getCheckboxValue('reddit-auto-reply-pms');
+    settings.autoReplyToPosts = getCheckboxValue('reddit-auto-reply-posts');
+    settings.pollIntervalMs = getNumberValue('reddit-poll-interval');
+    settings.maxItemsPerPoll = getNumberValue('reddit-max-items');
+    settings.minPostScore = getNumberValue('reddit-min-score');
+    settings.maxPostAge = getNumberValue('reddit-max-age');
+    settings.skipOwnPosts = getCheckboxValue('reddit-skip-own-posts');
+  }
+  
+  if (platform === 'instagram') {
+    settings.watchDirectMessages = getCheckboxValue('instagram-watch-dms');
+    settings.watchMessageRequests = getCheckboxValue('instagram-watch-requests');
+    settings.autoAcceptRequests = getCheckboxValue('instagram-auto-accept');
+    settings.pollIntervalMs = getNumberValue('instagram-poll-interval');
+    settings.maxMessagesPerPoll = getNumberValue('instagram-max-messages');
+  }
+  
+  if (platform === 'twitter') {
+    settings.watchDirectMessages = getCheckboxValue('twitter-watch-dms');
+    settings.watchMentions = getCheckboxValue('twitter-watch-mentions');
+    settings.autoReplyToMentions = getCheckboxValue('twitter-auto-reply-mentions');
+    settings.pollIntervalMs = getNumberValue('twitter-poll-interval');
+    settings.maxTweetsPerPoll = getNumberValue('twitter-max-tweets');
+  }
+  
+  if (platform === 'snapchat') {
+    settings.watchChats = getCheckboxValue('snapchat-watch-chats');
+    settings.autoOpenSnaps = getCheckboxValue('snapchat-auto-open');
+    settings.skipGroupChats = getCheckboxValue('snapchat-skip-groups');
+    settings.pollIntervalMs = getNumberValue('snapchat-poll-interval');
+    settings.maxChatsPerPoll = getNumberValue('snapchat-max-chats');
+  }
+  
+  if (platform === 'threads') {
+    settings.watchActivityColumn = getCheckboxValue('threads-watch-activity');
+    settings.activityPriority = getCheckboxValue('threads-activity-priority');
+    settings.autoReplyToComments = getCheckboxValue('threads-auto-reply');
+    settings.pollIntervalMs = getNumberValue('threads-poll-interval');
+    settings.maxCommentsPerPoll = getNumberValue('threads-max-comments');
+  }
+  
+  return settings;
+}
+
+function saveSiteSettings() {
+  try {
+    const platform = sitePlatformSelect.value;
+    const settings = collectCurrentSettings(platform);
+    
+    // Load existing settings
+    const stored = localStorage.getItem('siteSettings');
+    const allSettings = stored ? JSON.parse(stored) : {};
+    
+    // Update settings for current platform
+    allSettings[platform] = settings;
+    
+    // Save back to storage
+    localStorage.setItem('siteSettings', JSON.stringify(allSettings));
+    
+    currentSiteSettings = settings;
+    
+    addLog(`Site settings saved for ${platform}`, 'success');
+    
+    // TODO: Send settings to main process for bot configuration
+    // await (window as any).siteSettings.updateSettings(platform, settings);
+    
+  } catch (e) {
+    console.error('Error saving site settings:', e);
+    addLog('Failed to save site settings', 'error');
+  }
+}
+
+// Initialize site settings when panel opens
+function initializeSiteSettings() {
+  // Restore collapse state
+  const savedCollapsed = localStorage.getItem('siteSettingsCollapsed');
+  if (savedCollapsed === 'true') {
+    isSiteSettingsCollapsed = true;
+    siteSettingsSection.classList.add('collapsed');
+  }
+  
+  // Load settings for current platform
+  loadSiteSettingsForCurrentPlatform();
+}
+
+// Event listeners for site settings
+siteSettingsHeader.addEventListener('click', toggleSiteSettingsCollapse);
+siteCollapseBtn.addEventListener('click', (e) => {
+  e.stopPropagation();
+  toggleSiteSettingsCollapse();
+});
+
+// Add refresh button listener
+const siteRefreshBtn = document.getElementById('site-settings-refresh')!;
+siteRefreshBtn.addEventListener('click', (e) => {
+  e.stopPropagation();
+  refreshSiteSettingsForSession();
+  addLog('Site settings manually refreshed', 'info');
+});
+
+sitePlatformSelect.addEventListener('change', (e) => {
+  const platform = (e.target as HTMLSelectElement).value;
+  switchPlatformSettings(platform);
+  loadSiteSettingsFromStorage(platform);
+});
+
+saveSiteSettingsBtn.addEventListener('click', saveSiteSettings);
+
+// Keyboard shortcut: Arrow Up to collapse site settings
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'ArrowUp' && isPanelOpen && !isSiteSettingsCollapsed) {
+    e.preventDefault();
+    toggleSiteSettingsCollapse();
+  }
+});
+
+// ============================================================================
+// End Site-Specific Settings
+// ============================================================================
 
 // Minimize to tray
 if (minimizeToTrayBtn) {
@@ -4488,6 +4887,36 @@ function setupWebviewListeners(wv: Electron.WebviewTag) {
     }
   });
 
+  // Listen for URL changes to refresh site settings
+  let lastUrl = wv.src;
+  
+  wv.addEventListener('did-navigate', () => {
+    const newUrl = wv.src;
+    if (newUrl !== lastUrl) {
+      lastUrl = newUrl;
+      
+      // Only refresh if this is the active webview and settings panel is open
+      if (wv === getActiveWebview() && isPanelOpen) {
+        setTimeout(() => {
+          refreshSiteSettingsForSession();
+        }, 1000); // Delay to ensure page is loaded
+      }
+    }
+  });
+  
+  wv.addEventListener('did-navigate-in-page', () => {
+    const newUrl = wv.src;
+    if (newUrl !== lastUrl) {
+      lastUrl = newUrl;
+      
+      // Only refresh if this is the active webview and settings panel is open
+      if (wv === getActiveWebview() && isPanelOpen) {
+        setTimeout(() => {
+          refreshSiteSettingsForSession();
+        }, 500); // Shorter delay for in-page navigation
+      }
+    }
+  });
 }
 
 // Set up listeners for initial webview if it exists

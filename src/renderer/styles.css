@@ -1412,3 +1412,155 @@ Reattach button for detached windows */
   background: #3a3a3a;
   color: #fff;
 }
+/* Site-Specific Settings Section (Integrated) */
+.site-settings-section {
+  border-bottom: 1px solid #2a2a2a;
+  margin-bottom: 20px;
+}
+
+.site-settings-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 20px;
+  background: #222;
+  border-bottom: 1px solid #2a2a2a;
+  cursor: pointer;
+  user-select: none;
+}
+
+.site-settings-header:hover {
+  background: #252525;
+}
+
+.site-settings-title {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.site-settings-title span {
+  font-size: 11px;
+  font-weight: bold;
+  color: #ff6b35;
+  letter-spacing: 0.5px;
+}
+
+.site-indicator {
+  font-size: 9px;
+  color: #888;
+}
+
+.site-header-buttons {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.site-refresh-btn,
+.site-collapse-btn {
+  background: none;
+  border: none;
+  color: #888;
+  cursor: pointer;
+  padding: 4px;
+  border-radius: 2px;
+  transition: all 0.2s ease;
+}
+
+.site-refresh-btn:hover {
+  color: #0eadff;
+  background: rgba(14, 173, 255, 0.1);
+}
+
+.site-collapse-btn:hover {
+  color: #ff6b35;
+  background: rgba(255, 107, 53, 0.1);
+}
+
+.site-refresh-btn svg,
+.site-collapse-btn svg {
+  width: 14px;
+  height: 14px;
+  transition: transform 0.2s ease;
+}
+
+.site-refresh-btn:active svg {
+  transform: rotate(180deg);
+}
+
+.site-settings-section.collapsed .site-collapse-btn svg {
+  transform: rotate(180deg);
+}
+
+.site-settings-content {
+  padding: 0 20px 20px 20px;
+  transition: all 0.3s ease;
+  overflow: hidden;
+}
+
+.site-settings-section.collapsed .site-settings-content {
+  max-height: 0;
+  padding-top: 0;
+  padding-bottom: 0;
+  opacity: 0;
+}
+
+/* Platform Settings Sections */
+.platform-settings {
+  display: block;
+}
+
+.platform-settings.hidden {
+  display: none;
+}
+
+/* Platform-specific color coding for section headers */
+#reddit-settings .section-header::before {
+  content: "●";
+  color: #ff4500;
+  margin-right: 8px;
+}
+
+#instagram-settings .section-header::before {
+  content: "●";
+  color: #e4405f;
+  margin-right: 8px;
+}
+
+#twitter-settings .section-header::before {
+  content: "●";
+  color: #1da1f2;
+  margin-right: 8px;
+}
+
+#snapchat-settings .section-header::before {
+  content: "●";
+  color: #fffc00;
+  margin-right: 8px;
+}
+
+#threads-settings .section-header::before {
+  content: "●";
+  color: #000;
+  margin-right: 8px;
+}
+
+/* Site settings save button */
+.site-save-btn {
+  background: #ff6b35 !important;
+  border-color: #ff6b35 !important;
+  margin-top: 15px;
+}
+
+.site-save-btn:hover {
+  background: #e55a2b !important;
+  border-color: #e55a2b !important;
+}
+
+/* Remove old site panel styles */
+#site-settings-panel,
+#site-settings-toggle,
+#site-settings-resize-handle {
+  display: none !important;
+}
