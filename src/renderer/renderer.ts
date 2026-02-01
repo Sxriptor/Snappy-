@@ -1104,6 +1104,7 @@ interface ReplyRule {
 
 interface AIConfig {
   enabled: boolean;
+  provider: 'local' | 'chatgpt';
   llmEndpoint: string;
   llmPort: number;
   modelName: string;
@@ -1112,6 +1113,12 @@ interface AIConfig {
   maxTokens: number;
   contextHistoryEnabled: boolean;
   maxContextMessages: number;
+  requestTimeoutMs: number;
+  maxRetries: number;
+  retryBackoffMs: number;
+  chatgptApiKey: string;
+  chatgptModel: string;
+  chatgptBaseUrl?: string;
 }
 
 interface LlamaConfig {
@@ -2183,6 +2190,7 @@ const refreshMemoriesBtn = document.getElementById('refresh-memories')!;
 
 // AI Settings elements
 const aiEnabled = document.getElementById('ai-enabled') as HTMLInputElement;
+const aiProvider = document.getElementById('ai-provider') as HTMLSelectElement;
 const aiStatus = document.getElementById('ai-status')!;
 const aiTemp = document.getElementById('ai-temp') as HTMLInputElement;
 const aiTempVal = document.getElementById('ai-temp-val')!;
@@ -2191,6 +2199,28 @@ const aiContext = document.getElementById('ai-context') as HTMLInputElement;
 const aiHistory = document.getElementById('ai-history') as HTMLInputElement;
 const aiPrompt = document.getElementById('ai-prompt') as HTMLTextAreaElement;
 const testConnectionBtn = document.getElementById('test-connection')!;
+
+// ChatGPT Settings elements
+const chatgptApiKey = document.getElementById('chatgpt-api-key') as HTMLInputElement;
+const chatgptModel = document.getElementById('chatgpt-model') as HTMLSelectElement;
+const chatgptBaseUrl = document.getElementById('chatgpt-base-url') as HTMLInputElement;
+const localSettings = document.getElementById('local-settings')!;
+const chatgptSettings = document.getElementById('chatgpt-settings')!;
+const llamaServerSection = document.getElementById('llama-server-section')!;
+
+// AI provider change handler
+aiProvider?.addEventListener('change', () => {
+  const provider = aiProvider.value;
+  if (provider === 'chatgpt') {
+    localSettings.style.display = 'none';
+    chatgptSettings.style.display = 'block';
+    llamaServerSection.style.display = 'none';
+  } else {
+    localSettings.style.display = 'block';
+    chatgptSettings.style.display = 'none';
+    llamaServerSection.style.display = 'block';
+  }
+});
 
 // AI temperature slider update
 aiTemp?.addEventListener('input', () => {
@@ -2566,8 +2596,9 @@ botBtn.addEventListener('click', async () => {
   } else {
     addLog('Starting bot...', 'highlight');
     
-    // Start llama server if enabled (always start new instance)
-    if (llamaServerConfig.enabled && activeSessionId) {
+    // Start llama server only if using local AI provider and server is enabled
+    const currentAIProvider = aiProvider?.value || 'local';
+    if (currentAIProvider === 'local' && llamaServerConfig.enabled && activeSessionId) {
       addLog('Starting Llama.cpp server...', 'info');
       console.log(`[Bot Start] Starting llama for session ${activeSessionId}`);
       const startResult = await (window as any).llama.start();
@@ -2582,6 +2613,8 @@ botBtn.addEventListener('click', async () => {
         addLog(`Warning: Failed to start Llama.cpp server: ${startResult.error}`, 'error');
         // Continue with bot startup anyway
       }
+    } else if (currentAIProvider === 'chatgpt') {
+      addLog('Using ChatGPT API (no local server needed)', 'info');
     }
     
     const success = await injectBotIntoWebview();
@@ -2644,6 +2677,7 @@ saveBtn.addEventListener('click', async () => {
     randomSkipProbability: (parseInt(skipRate.value) || 15) / 100,
     ai: {
       enabled: aiEnabled?.checked || false,
+      provider: aiProvider?.value as 'local' | 'chatgpt' || 'local',
       llmEndpoint: '127.0.0.1', // Configured via llama server
       llmPort: 8081, // Configured via llama server start command
       modelName: 'llama', // Configured via llama server start command
@@ -2651,7 +2685,13 @@ saveBtn.addEventListener('click', async () => {
       temperature: parseFloat(aiTemp?.value) || 0.7,
       maxTokens: parseInt(aiTokens?.value) || 150,
       contextHistoryEnabled: aiContext?.checked || true,
-      maxContextMessages: parseInt(aiHistory?.value) || 10
+      maxContextMessages: parseInt(aiHistory?.value) || 10,
+      requestTimeoutMs: 30000,
+      maxRetries: 3,
+      retryBackoffMs: 1000,
+      chatgptApiKey: chatgptApiKey?.value || '',
+      chatgptModel: chatgptModel?.value || 'gpt-3.5-turbo',
+      chatgptBaseUrl: chatgptBaseUrl?.value || 'https://api.openai.com/v1'
     },
     llama: {
       buildPath: llamaBuildPathInput?.value || '',
@@ -2739,6 +2779,7 @@ function loadSessionConfig(sessionId: string) {
       randomSkipProbability: 0.15,
       ai: {
         enabled: false,
+        provider: 'local' as 'local' | 'chatgpt',
         llmEndpoint: 'localhost',
         llmPort: 8080,
         modelName: 'local-model',
@@ -2746,7 +2787,13 @@ function loadSessionConfig(sessionId: string) {
         temperature: 0.7,
         maxTokens: 150,
         contextHistoryEnabled: true,
-        maxContextMessages: 10
+        maxContextMessages: 10,
+        requestTimeoutMs: 30000,
+        maxRetries: 3,
+        retryBackoffMs: 1000,
+        chatgptApiKey: '',
+        chatgptModel: 'gpt-3.5-turbo',
+        chatgptBaseUrl: 'https://api.openai.com/v1'
       },
       llama: {
         buildPath: '',
@@ -2754,10 +2801,10 @@ function loadSessionConfig(sessionId: string) {
         enabled: false
       }
     };
-    sessionConfigs.set(sessionId, config);
+    sessionConfigs.set(sessionId, config!);
   }
   
-  loadConfigIntoUI(config);
+  loadConfigIntoUI(config!);
 }
 
 // Load configuration into UI elements
@@ -2779,6 +2826,12 @@ function loadConfigIntoUI(config: Config) {
   // Load AI settings
   if (config.ai) {
     if (aiEnabled) aiEnabled.checked = config.ai.enabled || false;
+    if (aiProvider) {
+      aiProvider.value = config.ai.provider || 'local';
+      // Trigger provider change to show/hide appropriate settings
+      const event = new Event('change');
+      aiProvider.dispatchEvent(event);
+    }
     if (aiPrompt) aiPrompt.value = config.ai.systemPrompt || '';
     if (aiTemp) {
       aiTemp.value = String(config.ai.temperature || 0.7);
@@ -2787,6 +2840,11 @@ function loadConfigIntoUI(config: Config) {
     if (aiTokens) aiTokens.value = String(config.ai.maxTokens || 150);
     if (aiContext) aiContext.checked = config.ai.contextHistoryEnabled !== false;
     if (aiHistory) aiHistory.value = String(config.ai.maxContextMessages || 10);
+    
+    // Load ChatGPT settings
+    if (chatgptApiKey) chatgptApiKey.value = config.ai.chatgptApiKey || '';
+    if (chatgptModel) chatgptModel.value = config.ai.chatgptModel || 'gpt-3.5-turbo';
+    if (chatgptBaseUrl) chatgptBaseUrl.value = config.ai.chatgptBaseUrl || 'https://api.openai.com/v1';
   }
   
   // Load Llama settings
@@ -5090,6 +5148,7 @@ function resetSessionToDefault(sessionId: string) {
     randomSkipProbability: 0.15,
     ai: {
       enabled: false,
+      provider: 'local' as 'local' | 'chatgpt',
       llmEndpoint: 'localhost',
       llmPort: 8080,
       modelName: 'local-model',
@@ -5097,7 +5156,13 @@ function resetSessionToDefault(sessionId: string) {
       temperature: 0.7,
       maxTokens: 150,
       contextHistoryEnabled: true,
-      maxContextMessages: 10
+      maxContextMessages: 10,
+      requestTimeoutMs: 30000,
+      maxRetries: 3,
+      retryBackoffMs: 1000,
+      chatgptApiKey: '',
+      chatgptModel: 'gpt-3.5-turbo',
+      chatgptBaseUrl: 'https://api.openai.com/v1'
     },
     llama: {
       buildPath: '',
@@ -5189,9 +5254,11 @@ async function startAllSessionBots(): Promise<void> {
     // Get session config
     const config = sessionConfigs.get(sessionId);
     const llamaConfig = (config as any)?.llama;
+    const aiConfig = (config as any)?.ai;
     
-    // Start llama server if enabled for this session
-    if (llamaConfig?.enabled && llamaConfig?.buildPath && llamaConfig?.startCommand) {
+    // Start llama server only if using local AI provider and server is enabled for this session
+    const aiProvider = aiConfig?.provider || 'local';
+    if (aiProvider === 'local' && llamaConfig?.enabled && llamaConfig?.buildPath && llamaConfig?.startCommand) {
       // Skip if already running
       if (!sessionServerPids.has(sessionId)) {
         try {
@@ -5205,6 +5272,8 @@ async function startAllSessionBots(): Promise<void> {
           addLog(`Failed to start llama for ${sessionName}: ${e}`, 'error', sessionId);
         }
       }
+    } else if (aiProvider === 'chatgpt') {
+      addLog(`Using ChatGPT API for ${sessionName} (no local server needed)`, 'info', sessionId);
     }
     
     // Inject bot into webview

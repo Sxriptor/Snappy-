@@ -153,8 +153,46 @@
             </label>
           </div>
           <div class="setting-row">
+            <span>Provider</span>
+            <select id="ai-provider" class="select">
+              <option value="local">Local LLM Server</option>
+              <option value="chatgpt">ChatGPT API</option>
+            </select>
+          </div>
+          <div class="setting-row">
             <span>Connection</span>
             <span id="ai-status" class="ai-status disconnected">●</span>
+          </div>
+
+          <!-- Local LLM Settings -->
+          <div id="local-settings" class="provider-settings">
+            <div class="setting-row">
+              <span>Local Server</span>
+              <span class="setting-note">Managed via Llama Server section</span>
+            </div>
+          </div>
+
+          <!-- ChatGPT Settings -->
+          <div id="chatgpt-settings" class="provider-settings" style="display: none;">
+            <div class="setting-row">
+              <span>API Key</span>
+              <input type="password" id="chatgpt-api-key" placeholder="sk-..." class="input-wide">
+            </div>
+            <div class="setting-row">
+              <span>Model</span>
+              <select id="chatgpt-model" class="select">
+                <option value="gpt-3.5-turbo">GPT-3.5 Turbo</option>
+                <option value="gpt-3.5-turbo-16k">GPT-3.5 Turbo 16K</option>
+                <option value="gpt-4">GPT-4</option>
+                <option value="gpt-4-turbo-preview">GPT-4 Turbo</option>
+                <option value="gpt-4o">GPT-4o</option>
+                <option value="gpt-4o-mini">GPT-4o Mini</option>
+              </select>
+            </div>
+            <div class="setting-row">
+              <span>Base URL</span>
+              <input type="text" id="chatgpt-base-url" value="https://api.openai.com/v1" class="input-wide">
+            </div>
           </div>
 
           <div class="setting-row">
@@ -257,7 +295,7 @@
         </section>
 
         <!-- Llama.cpp Server -->
-        <section class="section">
+        <section id="llama-server-section" class="section">
           <div class="section-header">
             <span>LLAMA.CPP SERVER</span>
             <button id="open-llama-config" class="btn-text">⚙</button>

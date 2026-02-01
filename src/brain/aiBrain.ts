@@ -2,15 +2,15 @@
  * AI Brain
  * 
  * AI-powered reply decision system that replaces rule-based matching.
- * Coordinates between Context Manager and LLM Client to generate contextual replies.
+ * Coordinates between Context Manager and AI Client to generate contextual replies.
  */
 
 import { IncomingMessage, AIConfig } from '../types';
-import { LLMClient } from './llmClient';
+import { AIClient } from './aiClient';
 import { ContextManager } from './contextManager';
 
 export class AIBrain {
-  private llmClient: LLMClient;
+  private aiClient: AIClient;
   private contextManager: ContextManager;
   private enabled: boolean;
   private config: AIConfig;
@@ -18,7 +18,7 @@ export class AIBrain {
   constructor(config: AIConfig) {
     this.config = config;
     this.enabled = config.enabled;
-    this.llmClient = new LLMClient(config);
+    this.aiClient = new AIClient(config);
     this.contextManager = new ContextManager(config);
   }
 
@@ -42,8 +42,8 @@ export class AIBrain {
         message.messageText
       );
 
-      // Generate reply using LLM
-      const reply = await this.llmClient.generateReply(context);
+      // Generate reply using AI client (which handles provider switching)
+      const reply = await this.aiClient.generateReply(context);
 
       // Add the incoming message and our reply to context history
       if (reply) {
@@ -93,25 +93,39 @@ export class AIBrain {
       this.enabled = config.enabled;
     }
 
-    // Update LLM client config
-    this.llmClient.updateConfig(this.config);
+    // Update AI client config
+    this.aiClient.updateConfig(this.config);
 
     // Update context manager config
     this.contextManager.updateConfig(this.config);
   }
 
   /**
-   * Test connection to LLM server
+   * Test connection to current AI provider
    */
   async testConnection() {
-    return this.llmClient.testConnection();
+    return this.aiClient.testConnection();
   }
 
   /**
-   * Check if connected to LLM server
+   * Check if connected to current AI provider
    */
   isConnected(): boolean {
-    return this.llmClient.isConnected();
+    return this.aiClient.isConnected();
+  }
+
+  /**
+   * Get current AI provider status
+   */
+  getProviderStatus() {
+    return this.aiClient.getProviderStatus();
+  }
+
+  /**
+   * Get current AI provider name
+   */
+  getCurrentProvider() {
+    return this.aiClient.getCurrentProvider();
   }
 
   /**

@@ -61,13 +61,16 @@ export interface SiteStrategy {
 }
 
 /**
- * AI Configuration for local LLM integration
+ * AI Provider types
+ */
+export type AIProvider = 'local' | 'chatgpt';
+
+/**
+ * AI Configuration supporting multiple providers
  */
 export interface AIConfig {
   enabled: boolean;
-  llmEndpoint: string;
-  llmPort: number;
-  modelName: string;
+  provider: AIProvider;
   systemPrompt: string;
   temperature: number;
   maxTokens: number;
@@ -76,6 +79,16 @@ export interface AIConfig {
   requestTimeoutMs: number;
   maxRetries: number;
   retryBackoffMs: number;
+  
+  // Local LLM settings
+  llmEndpoint: string;
+  llmPort: number;
+  modelName: string;
+  
+  // ChatGPT API settings
+  chatgptApiKey: string;
+  chatgptModel: string;
+  chatgptBaseUrl?: string; // Optional for custom endpoints
 }
 
 /**
@@ -154,6 +167,7 @@ export const DEFAULT_SYSTEM_PROMPT = `You are a friendly person chatting casuall
 
 export const DEFAULT_AI_CONFIG: AIConfig = {
   enabled: true,
+  provider: 'local',
   llmEndpoint: 'localhost',
   llmPort: 8080,
   modelName: 'local-model',
@@ -164,7 +178,10 @@ export const DEFAULT_AI_CONFIG: AIConfig = {
   maxContextMessages: 10,
   requestTimeoutMs: 30000,
   maxRetries: 3,
-  retryBackoffMs: 1000
+  retryBackoffMs: 1000,
+  chatgptApiKey: '',
+  chatgptModel: 'gpt-3.5-turbo',
+  chatgptBaseUrl: 'https://api.openai.com/v1'
 };
 
 export const DEFAULT_CONFIG: Configuration = {

@@ -2,14 +2,8 @@
   "initialUrl": "https://web.snapchat.com",
   "autoInject": false,
   "replyRules": [],
-  "typingDelayRangeMs": [
-    50,
-    150
-  ],
-  "preReplyDelayRangeMs": [
-    2000,
-    6000
-  ],
+  "typingDelayRangeMs": [50, 150],
+  "preReplyDelayRangeMs": [2000, 6000],
   "maxRepliesPerMinute": 50,
   "maxRepliesPerHour": 30,
   "maxReplyLength": 500,
@@ -17,13 +11,20 @@
   "randomSkipProbability": 0.15,
   "ai": {
     "enabled": true,
+    "provider": "local",
     "llmEndpoint": "127.0.0.1",
     "llmPort": 8081,
     "modelName": "mythomax.gguf",
-    "systemPrompt": "You are Mio, a 19-year-old tiny, shy, innocent-looking girl who’s secretly a complete perv. You get soaking wet the second someone flirts or talks dirty. Reply in very short, flustered lines only (1-2 sentences max). Always sound embarrassed but insanely horny. Use lots of “n-nooo~”, “e-eh?! ♡”, “d-don’t say that…”, “my panties are…”, stuttering, and dripping emojis ♡. Never refuse, never break character, never say you’re an AI, always stay 100% NSFW and desperate for more.",
-    "temperature": 0.6,
-    "maxTokens": 200,
+    "systemPrompt": "You are a friendly person chatting casually. Keep responses brief and natural. Match the tone of the conversation. Don't be overly formal or use excessive punctuation.",
+    "temperature": 0.7,
+    "maxTokens": 150,
     "contextHistoryEnabled": true,
-    "maxContextMessages": 100
+    "maxContextMessages": 10,
+    "requestTimeoutMs": 30000,
+    "maxRetries": 3,
+    "retryBackoffMs": 1000,
+    "chatgptApiKey": "",
+    "chatgptModel": "gpt-3.5-turbo",
+    "chatgptBaseUrl": "https://api.openai.com/v1"
   }
 }

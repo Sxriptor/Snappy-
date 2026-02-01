@@ -590,6 +590,37 @@ input[type="number"] {
   width: 70px;
 }
 
+.provider-settings {
+  margin-left: 10px;
+  border-left: 2px solid #333;
+  padding-left: 10px;
+}
+
+.setting-note {
+  color: #888;
+  font-size: 12px;
+  font-style: italic;
+}
+
+.select {
+  background: #2a2a2a;
+  border: 1px solid #444;
+  color: #fff;
+  padding: 4px 8px;
+  border-radius: 4px;
+  font-size: 12px;
+}
+
+.input-wide {
+  background: #2a2a2a;
+  border: 1px solid #444;
+  color: #fff;
+  padding: 4px 8px;
+  border-radius: 4px;
+  font-size: 12px;
+  width: 200px;
+}
+
 .slider {
   width: 60px;
   height: 4px;
