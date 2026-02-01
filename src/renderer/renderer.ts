@@ -486,7 +486,495 @@ function buildThreadsBotScript(config: any): string {
 }
 
 function buildRedditBotScript(config: any): string {
-  return '/* Reddit bot script placeholder */';
+  const serializedConfig = JSON.stringify(config || {});
+  
+  return `
+(function() {
+  if (window.__SNAPPY_RUNNING__ && window.__SNAPPY_REDDIT_RUNNING__) {
+    console.log('[Snappy][Reddit] Already running');
+    return;
+  }
+
+  window.__SNAPPY_RUNNING__ = true;
+  window.__SNAPPY_REDDIT_RUNNING__ = true;
+
+  // Global error handler for the Reddit bot
+  const originalError = window.onerror;
+  window.onerror = function(message, source, lineno, colno, error) {
+    redditLog('Global error caught: ' + message + ' at ' + source + ':' + lineno);
+    if (originalError) {
+      return originalError.apply(this, arguments);
+    }
+    return false;
+  };
+
+  const CONFIG = ${serializedConfig};
+  const processedItems = new Set();
+  let isRunning = false;
+  let pollInterval = null;
+  let isProcessing = false;
+
+  // Reddit-specific configuration with defaults
+  const redditSettings = {
+    watchNotifications: true,
+    watchPrivateMessages: true,
+    watchSubreddits: [],
+    subredditKeywords: [],
+    autoReplyToComments: true,
+    autoReplyToPMs: true,
+    autoReplyToPosts: false,
+    pollIntervalMs: 30000,
+    maxItemsPerPoll: 3,
+    minPostScore: 1,
+    maxPostAge: 24,
+    skipOwnPosts: true,
+    skipOwnComments: true,
+    ...(CONFIG.reddit || {})
+  };
+
+  const MIN_MESSAGE_LENGTH = 5;
+
+  // Reddit selectors for different page types
+  const REDDIT_SELECTORS = {
+    notificationBell: '[data-testid="notification-bell"], .icon-notification',
+    notificationDropdown: '[data-testid="notification-dropdown"], .Dropdown__content',
+    notificationItems: '[data-testid="notification-item"], .notification-item',
+    unreadNotification: '.unread, [data-is-unread="true"]',
+    messageIcon: '[data-testid="chat-button"], .icon-message',
+    messagesList: '[data-testid="messages-list"], .messages-list',
+    messageItem: '[data-testid="message-item"], .message-item',
+    unreadMessage: '.unread, [data-unread="true"]',
+    commentReply: '[data-testid="comment-reply-button"], .reply-button',
+    commentText: '[data-testid="comment-content"], .comment-content, .md',
+    postTitle: '[data-testid="post-title"], .title',
+    postContent: '[data-testid="post-content"], .post-content',
+    subredditLink: 'a[href*="/r/"]',
+    replyInput: '[data-testid="reply-input"], textarea[name="text"], .reply-form textarea',
+    messageInput: '[data-testid="message-input"], .message-compose textarea',
+    submitButton: '[data-testid="submit-button"], button[type="submit"], .submit-button'
+  };
+
+  function redditLog(message) {
+    const timestamp = new Date().toLocaleTimeString();
+    const formatted = '[' + timestamp + '] [Reddit] ' + message;
+    console.log('%c' + formatted, 'color: #FF4500; background: #000; padding: 2px 5px;');
+    window.dispatchEvent(new CustomEvent('snappy-log', { detail: { message: formatted, timestamp: Date.now() } }));
+  }
+
+  function findElement(selectors) {
+    const selectorList = selectors.split(', ');
+    for (const selector of selectorList) {
+      try {
+        const el = document.querySelector(selector);
+        if (el) return el;
+      } catch (e) { /* invalid selector */ }
+    }
+    return null;
+  }
+
+  function findAllElements(selectors) {
+    const selectorList = selectors.split(', ');
+    const results = [];
+    for (const selector of selectorList) {
+      try {
+        document.querySelectorAll(selector).forEach(el => results.push(el));
+      } catch (e) { /* invalid selector */ }
+    }
+    return results;
+  }
+
+  function getPageType() {
+    const url = window.location.href;
+    if (url.includes('/message/')) return 'messages';
+    if (url.includes('/notifications/')) return 'notifications';
+    if (url.includes('/r/') && url.includes('/comments/')) return 'post';
+    if (url.includes('/r/')) return 'subreddit';
+    return 'unknown';
+  }
+
+  function generateItemId(element, type) {
+    const text = element.textContent?.substring(0, 100) || '';
+    const timestamp = Date.now();
+    return type + '-' + btoa(text).substring(0, 20) + '-' + timestamp;
+  }
+
+  function extractTextContent(element) {
+    const commentEl = element.querySelector(REDDIT_SELECTORS.commentText);
+    if (commentEl) {
+      return commentEl.textContent?.trim() || '';
+    }
+    
+    const titleEl = element.querySelector(REDDIT_SELECTORS.postTitle);
+    const contentEl = element.querySelector(REDDIT_SELECTORS.postContent);
+    
+    const title = titleEl?.textContent?.trim() || '';
+    const content = contentEl?.textContent?.trim() || '';
+    
+    return title || content || element.textContent?.trim() || '';
+  }
+
+  async function generateReply(text, context) {
+    // First try rule-based matching
+    const rules = CONFIG?.replyRules || [];
+    const lowerText = text.toLowerCase();
+    
+    for (const rule of rules) {
+      const matchStr = typeof rule.match === 'string' ? rule.match : '';
+      const match = rule.caseSensitive ? matchStr : matchStr.toLowerCase();
+      const target = rule.caseSensitive ? text : lowerText;
+      
+      if (match && target.includes(match)) {
+        redditLog('Rule matched: "' + matchStr + '" -> "' + rule.reply + '"');
+        return rule.reply;
+      }
+    }
+
+    // Try AI if enabled
+    const aiConfig = CONFIG?.ai;
+    if (aiConfig?.enabled) {
+      try {
+        const contextPrompts = {
+          notification: 'You are responding to a Reddit notification. Keep it brief and relevant.',
+          message: 'You are responding to a Reddit private message. Be helpful and conversational.',
+          post: 'You are commenting on a Reddit post. Add value to the discussion.'
+        };
+        
+        const messages = [
+          { role: 'system', content: aiConfig.systemPrompt || contextPrompts[context] },
+          { role: 'user', content: text }
+        ];
+        
+        const url = 'http://' + (aiConfig.llmEndpoint || 'localhost') + ':' + (aiConfig.llmPort || 8080) + '/v1/chat/completions';
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), aiConfig.requestTimeoutMs || 30000);
+        
+        const response = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            model: aiConfig.modelName || 'local-model',
+            messages,
+            temperature: aiConfig.temperature || 0.7,
+            max_tokens: aiConfig.maxTokens || 150
+          }),
+          signal: controller.signal
+        });
+        
+        clearTimeout(timeoutId);
+        
+        if (response.ok) {
+          const data = await response.json();
+          const aiReply = data.choices?.[0]?.message?.content?.trim();
+          if (aiReply) {
+            redditLog('AI reply generated for ' + context);
+            return aiReply;
+          }
+        }
+      } catch (error) {
+        redditLog('AI error: ' + error.message);
+      }
+    }
+    
+    // Fallback responses
+    const fallbacks = {
+      notification: "Thanks for the notification!",
+      message: "Thanks for reaching out! I'll get back to you soon.",
+      post: "Interesting post, thanks for sharing!"
+    };
+    
+    return fallbacks[context];
+  }
+
+  async function typeAndSubmitReply(text, inputSelector) {
+    try {
+      const input = findElement(inputSelector);
+      if (!input) {
+        redditLog('Reply input not found');
+        return false;
+      }
+      
+      input.focus();
+      if (input.getAttribute('contenteditable') === 'true') {
+        input.innerHTML = '';
+        input.textContent = '';
+      } else if (input.value !== undefined) {
+        input.value = '';
+      }
+      
+      await sleep(200);
+      
+      const typingDelay = CONFIG?.typingDelayRangeMs || [50, 150];
+      
+      for (let i = 0; i < text.length; i++) {
+        const char = text[i];
+        
+        if (input.getAttribute('contenteditable') === 'true') {
+          input.textContent = (input.textContent || '') + char;
+        } else if (input.value !== undefined) {
+          input.value += char;
+        }
+        
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        input.dispatchEvent(new KeyboardEvent('keydown', { key: char, bubbles: true }));
+        input.dispatchEvent(new KeyboardEvent('keyup', { key: char, bubbles: true }));
+        
+        const delay = Math.floor(Math.random() * (typingDelay[1] - typingDelay[0])) + typingDelay[0];
+        await sleep(delay);
+      }
+      
+      await sleep(500);
+      
+      const submitBtn = findElement(REDDIT_SELECTORS.submitButton);
+      if (submitBtn) {
+        submitBtn.click();
+        redditLog('Reply submitted: "' + text.substring(0, 50) + '..."');
+        return true;
+      } else {
+        input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', keyCode: 13, bubbles: true }));
+        input.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', keyCode: 13, bubbles: true }));
+        redditLog('Reply submitted via Enter: "' + text.substring(0, 50) + '..."');
+        return true;
+      }
+    } catch (e) {
+      redditLog('Error submitting reply: ' + e);
+      return false;
+    }
+  }
+
+  function findUnreadNotifications() {
+    const notifications = findAllElements(REDDIT_SELECTORS.notificationItems);
+    return notifications.filter(item => {
+      const isUnread = item.querySelector(REDDIT_SELECTORS.unreadNotification) !== null;
+      const itemId = generateItemId(item, 'notification');
+      return isUnread && !processedItems.has(itemId);
+    });
+  }
+
+  function findUnreadMessages() {
+    const messages = findAllElements(REDDIT_SELECTORS.messageItem);
+    return messages.filter(item => {
+      const isUnread = item.querySelector(REDDIT_SELECTORS.unreadMessage) !== null;
+      const itemId = generateItemId(item, 'message');
+      return isUnread && !processedItems.has(itemId);
+    });
+  }
+
+  async function processNotification(notification) {
+    try {
+      const itemId = generateItemId(notification, 'notification');
+      const text = extractTextContent(notification);
+      
+      if (!text || text.length < MIN_MESSAGE_LENGTH) {
+        redditLog('Notification text too short, skipping');
+        processedItems.add(itemId);
+        return;
+      }
+      
+      redditLog('Processing notification: "' + text.substring(0, 50) + '..."');
+      
+      notification.click();
+      await sleep(1500);
+      
+      if (redditSettings.autoReplyToComments) {
+        const reply = await generateReply(text, 'notification');
+        if (reply) {
+          const success = await typeAndSubmitReply(reply, REDDIT_SELECTORS.replyInput);
+          if (success) {
+            redditLog('✓ Replied to notification: "' + reply + '"');
+          }
+        }
+      }
+      
+      processedItems.add(itemId);
+    } catch (e) {
+      redditLog('Error processing notification: ' + e);
+    }
+  }
+
+  async function processMessage(message) {
+    try {
+      const itemId = generateItemId(message, 'message');
+      const text = extractTextContent(message);
+      
+      if (!text || text.length < MIN_MESSAGE_LENGTH) {
+        redditLog('Message text too short, skipping');
+        processedItems.add(itemId);
+        return;
+      }
+      
+      redditLog('Processing message: "' + text.substring(0, 50) + '..."');
+      
+      message.click();
+      await sleep(1500);
+      
+      if (redditSettings.autoReplyToPMs) {
+        const reply = await generateReply(text, 'message');
+        if (reply) {
+          const success = await typeAndSubmitReply(reply, REDDIT_SELECTORS.messageInput);
+          if (success) {
+            redditLog('✓ Replied to message: "' + reply + '"');
+          }
+        }
+      }
+      
+      processedItems.add(itemId);
+    } catch (e) {
+      redditLog('Error processing message: ' + e);
+    }
+  }
+
+  async function pollForActivity() {
+    if (!isRunning || isProcessing) return;
+    
+    isProcessing = true;
+    
+    try {
+      redditLog('Scanning for Reddit activity...');
+      
+      // Check notifications
+      if (redditSettings.watchNotifications) {
+        try {
+          const notifications = findUnreadNotifications();
+          
+          if (notifications.length > 0) {
+            redditLog('Found ' + notifications.length + ' unread notification(s)');
+            const toProcess = notifications.slice(0, redditSettings.maxItemsPerPoll);
+            
+            for (const notification of toProcess) {
+              if (!isRunning) break;
+              try {
+                await processNotification(notification);
+                await sleep(2000);
+              } catch (error) {
+                redditLog('Error processing notification: ' + error);
+              }
+            }
+          }
+        } catch (error) {
+          redditLog('Error checking notifications: ' + error);
+        }
+      }
+      
+      // Check private messages
+      if (redditSettings.watchPrivateMessages) {
+        try {
+          const messages = findUnreadMessages();
+          
+          if (messages.length > 0) {
+            redditLog('Found ' + messages.length + ' unread message(s)');
+            const toProcess = messages.slice(0, redditSettings.maxItemsPerPoll);
+            
+            for (const message of toProcess) {
+              if (!isRunning) break;
+              try {
+                await processMessage(message);
+                await sleep(2000);
+              } catch (error) {
+                redditLog('Error processing message: ' + error);
+              }
+            }
+          }
+        } catch (error) {
+          redditLog('Error checking messages: ' + error);
+        }
+      }
+      
+    } catch (error) {
+      redditLog('Error in poll loop: ' + error);
+    } finally {
+      isProcessing = false;
+    }
+  }
+
+  function sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+  }
+
+  function startRedditBot() {
+    if (isRunning) {
+      redditLog('Bot already running');
+      return;
+    }
+    
+    try {
+      isRunning = true;
+      
+      redditLog('🚀 Reddit Bot started!');
+      redditLog('Watching: ' + (redditSettings.watchNotifications ? 'notifications ' : '') + 
+                (redditSettings.watchPrivateMessages ? 'messages ' : '') + 
+                redditSettings.watchSubreddits.length + ' subreddits');
+      
+      // Initial scan with error handling
+      setTimeout(() => {
+        try {
+          pollForActivity();
+        } catch (error) {
+          redditLog('Error in initial poll: ' + error);
+        }
+      }, 2000);
+      
+      // Set up polling interval with error handling
+      pollInterval = setInterval(() => {
+        try {
+          pollForActivity();
+        } catch (error) {
+          redditLog('Error in poll interval: ' + error);
+        }
+      }, redditSettings.pollIntervalMs);
+      
+      redditLog('Bot started successfully with ' + redditSettings.pollIntervalMs + 'ms interval');
+    } catch (error) {
+      redditLog('Error in startRedditBot: ' + error);
+      isRunning = false;
+    }
+  }
+
+  function stopRedditBot() {
+    if (!isRunning) {
+      redditLog('Bot not running');
+      return;
+    }
+    
+    isRunning = false;
+    
+    if (pollInterval) {
+      clearInterval(pollInterval);
+      pollInterval = null;
+    }
+    
+    redditLog('🛑 Reddit Bot stopped');
+  }
+
+  // Error handling wrapper
+  function safeStartRedditBot() {
+    try {
+      redditLog('Attempting to start Reddit bot...');
+      startRedditBot();
+      redditLog('Bot initialization completed successfully');
+    } catch (error) {
+      redditLog('Error starting bot: ' + error);
+      redditLog('Stack trace: ' + (error.stack || 'No stack trace'));
+      // Keep the bot marked as running even if there's an error
+      // so we can debug what went wrong
+      window.__SNAPPY_RUNNING__ = true;
+      window.__SNAPPY_REDDIT_RUNNING__ = true;
+      isRunning = true; // Also set the internal flag
+    }
+  }
+
+  // Start the bot with error handling
+  safeStartRedditBot();
+  
+  // Expose stop function
+  window.__SNAPPY_STOP__ = stopRedditBot;
+  
+  // Verification ping with detailed status
+  setTimeout(() => {
+    redditLog('Verification ping - Bot running: ' + isRunning + ', Window flag: ' + window.__SNAPPY_RUNNING__);
+    redditLog('Reddit settings: ' + JSON.stringify(redditSettings, null, 2));
+  }, 1000);
+})();
+`;
 }
 
 function buildInstagramBotScript(config: any): string {
