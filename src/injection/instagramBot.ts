@@ -2,9 +2,9 @@ import { Configuration } from '../types';
 
 /**
  * Build an injection script for Instagram that:
- * - Monitors DM notifications
- * - Replies to new messages automatically
- * - Accepts message requests that fall into the "requests" folder
+ * - Navigates to DMs and finds unread conversations (keep existing navigation)
+ * - Uses improved div[role="row"] detection once inside conversations
+ * - Replies to new messages automatically with human-like typing
  */
 export function buildInstagramBotScript(config: Configuration): string {
   const serializedConfig = JSON.stringify(config || {});
@@ -21,7 +21,6 @@ export function buildInstagramBotScript(config: Configuration): string {
 
   const CONFIG = ${serializedConfig};
   const seenMessages = new Set();
-  const seenRequests = new Set();
   let isRunning = true;
   let pollInterval = null;
   let isProcessing = false;
@@ -33,7 +32,6 @@ export function buildInstagramBotScript(config: Configuration): string {
   const preReplyDelayRange = CONFIG?.preReplyDelayRangeMs || [2000, 6000];
 
   function getRandomPollInterval() {
-    // Random interval between BASE_POLL_MS and BASE_POLL_MS + POLL_VARIANCE_MS
     return BASE_POLL_MS + Math.floor(Math.random() * POLL_VARIANCE_MS);
   }
 
@@ -48,10 +46,57 @@ export function buildInstagramBotScript(config: Configuration): string {
   }
 
   /**
+   * Extract message text from a row element
+   * Instagram wraps each message in many divs, but the real message is always 
+   * the innermost div with dir="auto" that contains readable text.
+   */
+  function getMessageText(row) {
+    // Look for div with dir="auto" which contains the actual message text
+    const messageDiv = row.querySelector('div[dir="auto"]');
+    if (messageDiv) {
+      const text = messageDiv.innerText.trim();
+      if (text) {
+        log('Extracted text from dir="auto": "' + text.substring(0, 50) + '..."');
+        return text;
+      }
+    }
+    
+    // If this element IS a dir="auto" div, get its text directly
+    if (row.getAttribute('dir') === 'auto') {
+      const text = row.innerText.trim();
+      if (text) {
+        log('Extracted text from dir="auto" element: "' + text.substring(0, 50) + '..."');
+        return text;
+      }
+    }
+    
+    // Fallback to span if dir="auto" not found
+    const span = row.querySelector('span');
+    if (span) {
+      const text = span.innerText.trim();
+      if (text) {
+        log('Extracted text from span: "' + text.substring(0, 50) + '..."');
+        return text;
+      }
+    }
+    
+    log('No text found in element');
+    return null;
+  }
+
+  /**
+   * Detect if a message is incoming (not sent by us)
+   * Instagram doesn't label this cleanly, but here's the reliable heuristic:
+   * Incoming messages are left aligned and do NOT have "Seen" or "Delivered" nearby
+   */
+  function isIncoming(row) {
+    return !row.innerText.includes('Seen') && !row.innerText.includes('Delivered');
+  }
+
+  /**
    * Navigate to the DMs section
    */
   function navigateToDMs() {
-    // Look for the Messages/DM icon in the sidebar (usually an SVG with specific path)
     const links = Array.from(document.querySelectorAll('a[href*="/direct/"]'));
     if (links.length > 0) {
       const dmLink = links[0];
@@ -72,144 +117,27 @@ export function buildInstagramBotScript(config: Configuration): string {
   }
 
   /**
-   * Find the message requests tab/button
-   */
-  function findRequestsTab() {
-    // Instagram typically shows "Requests" or a number badge for pending requests
-    const buttons = Array.from(document.querySelectorAll('button, a, div[role="button"]'));
-    for (const btn of buttons) {
-      const text = btn.textContent?.toLowerCase().trim();
-      if (text && (text.includes('request') || text.includes('pending'))) {
-        return btn;
-      }
-    }
-    return null;
-  }
-
-  /**
-   * Find all message request items in the requests list
-   */
-  function findMessageRequests() {
-    // Message requests are typically in a list, similar to regular DMs
-    // Look for unread indicators or "Accept" buttons
-    const requests = [];
-
-    // Strategy 1: Find elements with "Accept" button nearby
-    const acceptButtons = Array.from(document.querySelectorAll('button, div[role="button"]')).filter(btn => {
-      const text = btn.textContent?.toLowerCase();
-      return text && text.includes('accept');
-    });
-
-    for (const acceptBtn of acceptButtons) {
-      // Find the parent container that represents the request
-      let container = acceptBtn.parentElement;
-      for (let i = 0; i < 5 && container; i++) {
-        const text = container.textContent || '';
-        if (text.length > 10 && text.length < 500) {
-          const requestId = 'req-' + text.substring(0, 50).replace(/\\s+/g, '-');
-          if (!seenRequests.has(requestId)) {
-            requests.push({
-              id: requestId,
-              element: container,
-              acceptButton: acceptBtn
-            });
-            break;
-          }
-        }
-        container = container.parentElement;
-      }
-    }
-
-    // Strategy 2: Look for conversation items in requests section
-    if (window.location.href.includes('/requests')) {
-      const conversationItems = Array.from(document.querySelectorAll('[role="listitem"], [role="button"]'));
-      for (const item of conversationItems) {
-        const text = item.textContent || '';
-        if (text.length > MIN_MESSAGE_LENGTH && text.length < 500) {
-          const requestId = 'req-' + text.substring(0, 50).replace(/\\s+/g, '-');
-          if (!seenRequests.has(requestId)) {
-            // Check if it has an accept action
-            const hasAccept = item.textContent?.toLowerCase().includes('accept');
-            if (hasAccept) {
-              requests.push({
-                id: requestId,
-                element: item,
-                acceptButton: null // Will need to find it when processing
-              });
-            }
-          }
-        }
-      }
-    }
-
-    return requests;
-  }
-
-  /**
-   * Accept a message request
-   */
-  async function acceptMessageRequest(request) {
-    try {
-      log('Accepting message request: ' + request.id);
-
-      // Click on the request to open it
-      request.element.click();
-      await sleep(1500);
-
-      // Find and click Accept button
-      let acceptBtn = request.acceptButton;
-      if (!acceptBtn) {
-        const buttons = Array.from(document.querySelectorAll('button, div[role="button"]'));
-        acceptBtn = buttons.find(btn => {
-          const text = btn.textContent?.toLowerCase();
-          return text && text.includes('accept');
-        });
-      }
-
-      if (acceptBtn) {
-        acceptBtn.click();
-        await sleep(800);
-        seenRequests.add(request.id);
-        log('✓ Accepted message request: ' + request.id);
-        return true;
-      } else {
-        log('Accept button not found for request: ' + request.id);
-        return false;
-      }
-    } catch (err) {
-      log('Error accepting request: ' + err);
-      return false;
-    }
-  }
-
-  /**
    * Find all conversation items in the DM list
    */
   function findConversations() {
     const conversations = [];
 
-    // Try multiple selectors to find conversation items
     let items = Array.from(document.querySelectorAll('[role="listitem"]'));
 
-    // Fallback: Look for any clickable elements that might be conversations
     if (items.length === 0) {
       log('No [role="listitem"] found, trying alternative selectors...');
 
-      // Look for links in the DM sidebar (conversations are usually links)
       items = Array.from(document.querySelectorAll('a[href*="/direct/t/"]'));
       log('Found ' + items.length + ' direct message links');
 
-      // If still nothing, look for divs with the "Unread" text directly
       if (items.length === 0) {
         const unreadDivs = Array.from(document.querySelectorAll('div')).filter(div =>
           div.textContent?.includes('Unread') && div.textContent.length < 200
         );
         log('Found ' + unreadDivs.length + ' elements with "Unread" text');
 
-        // Get parent containers of unread indicators
         items = unreadDivs.map(div => {
           let parent = div.parentElement;
-          // Walk up to find the conversation container (usually 3-5 levels up)
           for (let i = 0; i < 5 && parent; i++) {
             if (parent.tagName === 'A' || parent.getAttribute('role') === 'button') {
               return parent;
@@ -224,10 +152,8 @@ export function buildInstagramBotScript(config: Configuration): string {
     log('Found ' + items.length + ' total conversation items to check');
 
     for (const item of items) {
-      // Check for unread indicator
       const hasUnread = hasUnreadIndicator(item);
 
-      // Debug: Log what we're finding
       const text = item.textContent?.substring(0, 80) || '';
       if (text.length > 0) {
         const hasUnreadText = text.includes('Unread');
@@ -236,16 +162,12 @@ export function buildInstagramBotScript(config: Configuration): string {
 
       if (!hasUnread) continue;
 
-      // Extract conversation identifier
       const fullText = item.textContent || '';
       const convId = 'conv-' + fullText.substring(0, 50).replace(/\\s+/g, '-');
 
       if (!seenMessages.has(convId)) {
         log('✓ Found unread conversation: ' + convId.substring(0, 60));
-        conversations.push({
-          id: convId,
-          element: item
-        });
+        conversations.push({ id: convId, element: item });
       } else {
         log('Skipping already seen conversation: ' + convId.substring(0, 60));
       }
@@ -258,13 +180,11 @@ export function buildInstagramBotScript(config: Configuration): string {
    * Check if a conversation has unread messages
    */
   function hasUnreadIndicator(element) {
-    // Primary method: Look for the specific Instagram unread div
     const unreadDiv = element.querySelector('div.x9f619.x1ja2u2z.xzpqnlu.x1hyvwdk.x14bfe9o.xjm9jq1.x6ikm8r.x10wlt62.x10l6tqk.x1i1rx1s');
     if (unreadDiv && unreadDiv.textContent?.includes('Unread')) {
       return true;
     }
 
-    // Fallback: Check for any element with "Unread" text
     const allDivs = element.querySelectorAll('div');
     for (const div of allDivs) {
       if (div.textContent?.trim() === 'Unread') {
@@ -272,11 +192,9 @@ export function buildInstagramBotScript(config: Configuration): string {
       }
     }
 
-    // Additional fallback: notification badges
     const badge = element.querySelector('[role="status"], [aria-label*="unread"], [aria-label*="notification"]');
     if (badge) return true;
 
-    // Check for bold text (Instagram often bolds unread message previews)
     const spans = element.querySelectorAll('span, div');
     for (const el of spans) {
       const weight = window.getComputedStyle(el).fontWeight;
@@ -295,7 +213,6 @@ export function buildInstagramBotScript(config: Configuration): string {
     try {
       log('Opening conversation: ' + conversation.id);
 
-      // Find the actual clickable element within the conversation item
       let clickTarget = conversation.element;
 
       if (conversation.element.tagName === 'A') {
@@ -316,7 +233,23 @@ export function buildInstagramBotScript(config: Configuration): string {
 
       log('Clicking element: ' + clickTarget.tagName);
       clickTarget.click();
-      await sleep(2000); // Wait longer for conversation to fully load
+      
+      // Wait longer for conversation to fully load
+      await sleep(3000);
+      
+      // Additional wait if we're still loading
+      let retries = 0;
+      while (retries < 3) {
+        const messageRows = document.querySelectorAll('div[role="row"], div[dir="auto"]');
+        if (messageRows.length > 0) {
+          log('Conversation loaded with ' + messageRows.length + ' potential message elements');
+          break;
+        }
+        log('Waiting for conversation to load... (retry ' + (retries + 1) + ')');
+        await sleep(1000);
+        retries++;
+      }
+      
       return true;
     } catch (err) {
       log('Error opening conversation: ' + err);
@@ -325,89 +258,72 @@ export function buildInstagramBotScript(config: Configuration): string {
   }
 
   /**
-   * Get messages from the current open conversation
+   * Get messages from the current open conversation using improved detection
    */
   function getConversationMessages() {
     const messages = [];
+    
+    // Try multiple selectors to find message elements
+    let messageElements = Array.from(document.querySelectorAll('div[role="row"]'));
+    log('Found ' + messageElements.length + ' message rows with role="row"');
+    
+    // If no role="row" found, try alternative selectors
+    if (messageElements.length === 0) {
+      // Try looking for divs with dir="auto" directly (message content)
+      messageElements = Array.from(document.querySelectorAll('div[dir="auto"]'));
+      log('Found ' + messageElements.length + ' elements with dir="auto"');
+      
+      // If still nothing, try common message selectors
+      if (messageElements.length === 0) {
+        messageElements = Array.from(document.querySelectorAll('[data-testid*="message"], [class*="message"], [class*="Message"]'));
+        log('Found ' + messageElements.length + ' elements with message-related attributes');
+      }
+      
+      // Last resort: look for any div containing text that might be messages
+      if (messageElements.length === 0) {
+        const allDivs = Array.from(document.querySelectorAll('div'));
+        messageElements = allDivs.filter(div => {
+          const text = div.innerText?.trim();
+          return text && text.length > 2 && text.length < 1000 && 
+                 !text.includes('Unread') && !text.includes('Active') &&
+                 div.querySelector('div[dir="auto"]'); // Must contain a dir="auto" child
+        });
+        log('Found ' + messageElements.length + ' potential message containers');
+      }
+    }
 
-    // Instagram message containers - typically divs with specific structure
-    // Messages usually have different classes for sent vs received
-    const messageElements = Array.from(document.querySelectorAll('[role="row"], [class*="message"], [class*="Message"]'));
+    for (const element of messageElements) {
+      const text = getMessageText(element);
+      
+      if (!text) {
+        log('Skipping element: no text found');
+        continue;
+      }
+      
+      if (text.length < MIN_MESSAGE_LENGTH) {
+        log('Skipping element: text too short (' + text.length + ' chars): "' + text + '"');
+        continue;
+      }
 
-    for (const el of messageElements) {
-      const text = extractMessageText(el);
-      if (!text || text.length < MIN_MESSAGE_LENGTH) continue;
+      // Use the reliable heuristic for incoming messages
+      const isIncomingMsg = isIncoming(element);
+      
+      log('Message found: "' + text.substring(0, 30) + '..." - Incoming: ' + isIncomingMsg + ' - Length: ' + text.length);
 
-      // Determine if incoming or outgoing
-      const isIncoming = isIncomingMessage(el);
-
-      messages.push({
-        text: text,
-        isIncoming: isIncoming,
-        element: el
-      });
+      messages.push({ text: text, isIncoming: isIncomingMsg, element: element });
     }
 
     return messages;
   }
 
   /**
-   * Extract text from a message element
-   */
-  function extractMessageText(element) {
-    // Try to find the text content, avoiding timestamps and metadata
-    const textElements = element.querySelectorAll('span, p, div');
-    let longestText = '';
-
-    for (const el of textElements) {
-      const text = el.textContent?.trim() || '';
-      if (text.length > longestText.length && text.length < 5000) {
-        // Avoid timestamps (short, contains numbers/colons)
-        if (!/^\\d{1,2}:\\d{2}/.test(text) && !/^\\d+[smhd]/.test(text)) {
-          longestText = text;
-        }
-      }
-    }
-
-    return longestText;
-  }
-
-  /**
-   * Determine if a message is incoming (from other person)
-   */
-  function isIncomingMessage(element) {
-    // Check positioning - incoming messages are typically on the left
-    const rect = element.getBoundingClientRect();
-    const windowWidth = window.innerWidth;
-    const messageCenter = (rect.left + rect.right) / 2;
-    const isOnLeft = messageCenter < windowWidth / 2;
-
-    // Also check classes for incoming/outgoing indicators
-    const classes = element.className.toLowerCase();
-    const html = element.innerHTML.toLowerCase();
-
-    const incomingKeywords = ['incoming', 'received', 'other', 'left'];
-    const outgoingKeywords = ['outgoing', 'sent', 'self', 'right', 'you'];
-
-    const hasIncoming = incomingKeywords.some(kw => classes.includes(kw) || html.includes(kw));
-    const hasOutgoing = outgoingKeywords.some(kw => classes.includes(kw) || html.includes(kw));
-
-    if (hasIncoming) return true;
-    if (hasOutgoing) return false;
-
-    // Default to position-based detection
-    return isOnLeft;
-  }
-
-  /**
    * Get the latest unread incoming message
    */
   function getLatestIncomingMessage(messages) {
-    // Find the last incoming message
     for (let i = messages.length - 1; i >= 0; i--) {
       const msg = messages[i];
       if (msg.isIncoming) {
-        const msgId = 'msg-' + msg.text.substring(0, 100);
+        const msgId = 'msg-' + msg.text.substring(0, 100).replace(/\\s+/g, '-');
         if (!seenMessages.has(msgId)) {
           return { text: msg.text, id: msgId };
         }
@@ -573,11 +489,9 @@ export function buildInstagramBotScript(config: Configuration): string {
    */
   async function processConversation(conversation) {
     try {
-      // Open the conversation
       const opened = await openConversation(conversation);
       if (!opened) return;
 
-      // Get messages
       const messages = getConversationMessages();
       log('Found ' + messages.length + ' messages in conversation');
 
@@ -586,7 +500,6 @@ export function buildInstagramBotScript(config: Configuration): string {
         return;
       }
 
-      // Get latest incoming message
       const latestMsg = getLatestIncomingMessage(messages);
       if (!latestMsg) {
         log('No new incoming messages');
@@ -595,30 +508,25 @@ export function buildInstagramBotScript(config: Configuration): string {
 
       log('Latest incoming message: "' + latestMsg.text.substring(0, 50) + '..."');
 
-      // Mark as seen
       seenMessages.add(latestMsg.id);
       seenMessages.add(conversation.id);
 
-      // Generate reply
       const reply = await generateReply(latestMsg.text);
       if (!reply) {
         log('No reply generated');
         return;
       }
 
-      // Random skip
       const skipProb = CONFIG?.randomSkipProbability || 0.15;
       if (Math.random() < skipProb) {
         log('Randomly skipping reply (prob ' + Math.round(skipProb * 100) + '%)');
         return;
       }
 
-      // Pre-reply delay
       const delay = Math.floor(Math.random() * (preReplyDelayRange[1] - preReplyDelayRange[0])) + preReplyDelayRange[0];
       log('Waiting ' + delay + 'ms before replying');
       await sleep(delay);
 
-      // Type and send
       const typed = await typeMessage(reply);
       if (!typed) return;
 
@@ -634,54 +542,24 @@ export function buildInstagramBotScript(config: Configuration): string {
   }
 
   /**
-   * Main polling loop
+   * Main polling loop - keep navigation, improve message detection
    */
   async function poll() {
     if (!isRunning || isProcessing) return;
     isProcessing = true;
 
     try {
-      // Ensure we're on the DMs page
       if (!isOnDMsPage()) {
         const navigated = navigateToDMs();
         if (navigated) {
-          await sleep(2000); // Wait for page load
+          await sleep(2000);
         }
         isProcessing = false;
         return;
       }
 
-      log('Polling for new messages and requests...');
+      log('Polling for new messages...');
 
-      // Check for message requests
-      const requestsTab = findRequestsTab();
-      if (requestsTab) {
-        // Click on requests tab
-        requestsTab.click();
-        await sleep(1500);
-
-        const requests = findMessageRequests();
-        if (requests.length > 0) {
-          log('Found ' + requests.length + ' message request(s)');
-          for (const request of requests) {
-            if (!isRunning) break;
-            await acceptMessageRequest(request);
-            await sleep(1000);
-          }
-        }
-
-        // Navigate back to main DMs
-        const primaryTab = Array.from(document.querySelectorAll('button, a, div[role="button"]')).find(btn => {
-          const text = btn.textContent?.toLowerCase();
-          return text && (text.includes('primary') || text.includes('general'));
-        });
-        if (primaryTab) {
-          primaryTab.click();
-          await sleep(1000);
-        }
-      }
-
-      // Check for unread conversations
       const conversations = findConversations();
       if (conversations.length === 0) {
         log('No unread conversations');
@@ -691,7 +569,6 @@ export function buildInstagramBotScript(config: Configuration): string {
 
       log('Found ' + conversations.length + ' unread conversation(s)');
 
-      // Process each conversation
       for (const conv of conversations) {
         if (!isRunning) break;
         await processConversation(conv);
@@ -710,7 +587,7 @@ export function buildInstagramBotScript(config: Configuration): string {
     log('Next scan in ' + Math.round(delay / 1000) + 's');
     pollInterval = setTimeout(() => {
       poll();
-      scheduleNextPoll(); // Schedule the next one after this completes
+      scheduleNextPoll();
     }, delay);
   }
 
@@ -726,7 +603,7 @@ export function buildInstagramBotScript(config: Configuration): string {
   }
 
   // Start polling
-  log('🚀 Instagram DM bot started (no page refresh needed - Instagram updates automatically)');
+  log('🚀 Instagram DM bot started - navigating to DMs and monitoring messages');
   poll();
   scheduleNextPoll();
 
