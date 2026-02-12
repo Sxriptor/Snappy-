@@ -21,6 +21,7 @@ export function buildInstagramBotScript(config: Configuration): string {
 
   const CONFIG = ${serializedConfig};
   const seenMessages = new Set();
+  const recentlyProcessedConversations = new Map();
   let isRunning = true;
   let pollInterval = null;
   let isProcessing = false;
@@ -28,6 +29,7 @@ export function buildInstagramBotScript(config: Configuration): string {
   const MIN_MESSAGE_LENGTH = 2;
   const BASE_POLL_MS = (CONFIG?.instagram && CONFIG.instagram.pollIntervalMs) || 8000;
   const POLL_VARIANCE_MS = 4000; // Random variance for more natural scanning
+  const REPROCESS_COOLDOWN_MS = 20000;
   const typingDelayRange = CONFIG?.typingDelayRangeMs || [50, 150];
   const preReplyDelayRange = CONFIG?.preReplyDelayRangeMs || [2000, 6000];
 
@@ -43,6 +45,65 @@ export function buildInstagramBotScript(config: Configuration): string {
 
   function sleep(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
+  }
+
+  function focusMessageInput(input) {
+    try {
+      input.scrollIntoView({ block: 'center', inline: 'nearest' });
+    } catch {}
+
+    const rect = input.getBoundingClientRect();
+    const cx = Math.floor(rect.left + rect.width / 2);
+    const cy = Math.floor(rect.top + rect.height / 2);
+
+    const pointerOpts = {
+      bubbles: true,
+      cancelable: true,
+      clientX: cx,
+      clientY: cy,
+      button: 0
+    };
+
+    input.dispatchEvent(new PointerEvent('pointerdown', pointerOpts));
+    input.dispatchEvent(new MouseEvent('mousedown', pointerOpts));
+    if (typeof input.click === 'function') input.click();
+    input.dispatchEvent(new MouseEvent('mouseup', pointerOpts));
+    input.dispatchEvent(new PointerEvent('pointerup', pointerOpts));
+    input.focus();
+
+    try {
+      const sel = window.getSelection();
+      const range = document.createRange();
+      range.selectNodeContents(input);
+      range.collapse(false);
+      sel?.removeAllRanges();
+      sel?.addRange(range);
+    } catch {}
+
+    const active = document.activeElement === input || input.contains(document.activeElement);
+    return active;
+  }
+
+  function isStopped() {
+    return !isRunning || window.__SNAPPY_RUNNING__ !== true || window.__SNAPPY_INSTAGRAM_RUNNING__ !== true;
+  }
+
+  function getConversationId(element) {
+    if (!element) return null;
+
+    const directLink = element.tagName === 'A'
+      ? element
+      : element.querySelector('a[href*="/direct/t/"]');
+    const href = directLink?.getAttribute?.('href') || '';
+    const match = href.match(/\\/direct\\/t\\/([^\\/?#]+)/);
+    if (match && match[1]) {
+      return 'conv-' + match[1];
+    }
+
+    const rawText = (element.textContent || '').replace(/\\s+/g, ' ').trim();
+    const normalized = rawText.replace(/\\bunread\\b/ig, '').trim();
+    if (!normalized || normalized.length < 4) return null;
+    return 'conv-' + normalized.substring(0, 80);
   }
 
   /**
@@ -157,17 +218,11 @@ export function buildInstagramBotScript(config: Configuration): string {
   }
 
   /**
-   * Check if we're in a specific conversation (not the main DMs list)
-   */
-  function isInConversation() {
-    return window.location.href.includes('/direct/t/');
-  }
-
-  /**
    * Find all conversation items in the DM list
    */
   function findConversations() {
     const conversations = [];
+    const seenConvIds = new Set();
 
     let items = Array.from(document.querySelectorAll('[role="listitem"]'));
 
@@ -185,13 +240,14 @@ export function buildInstagramBotScript(config: Configuration): string {
 
         items = unreadDivs.map(div => {
           let parent = div.parentElement;
-          for (let i = 0; i < 5 && parent; i++) {
-            if (parent.tagName === 'A' || parent.getAttribute('role') === 'button') {
+          for (let i = 0; i < 8 && parent; i++) {
+            const hasDirectLink = !!parent.querySelector?.('a[href*="/direct/t/"]');
+            if (parent.tagName === 'A' || hasDirectLink || parent.getAttribute('role') === 'button') {
               return parent;
             }
             parent = parent.parentElement;
           }
-          return div.parentElement;
+          return null;
         }).filter(el => el !== null);
       }
     }
@@ -200,20 +256,33 @@ export function buildInstagramBotScript(config: Configuration): string {
 
     for (const item of items) {
       const hasUnread = hasUnreadIndicator(item);
-
-      const text = item.textContent?.substring(0, 80) || '';
-      if (text.length > 0) {
-        const hasUnreadText = text.includes('Unread');
-        log('Item: "' + text + '" - hasUnread=' + hasUnread + ', hasUnreadText=' + hasUnreadText);
+      const preview = item.textContent?.substring(0, 80) || '';
+      if (preview.length > 0) {
+        const hasUnreadText = preview.includes('Unread');
+        log('Item: "' + preview + '" - hasUnread=' + hasUnread + ', hasUnreadText=' + hasUnreadText);
       }
-
       if (!hasUnread) continue;
 
-      const fullText = item.textContent || '';
-      const convId = 'conv-' + fullText.substring(0, 50).replace(/\\\\s+/g, '-');
+      const convId = getConversationId(item);
+      if (!convId) {
+        log('Skipping unread candidate without stable conversation id');
+        continue;
+      }
+
+      if (seenConvIds.has(convId)) {
+        log('Skipping duplicate unread conversation in same scan: ' + convId.substring(0, 60));
+        continue;
+      }
+      seenConvIds.add(convId);
+
+      const lastProcessedAt = recentlyProcessedConversations.get(convId) || 0;
+      if (Date.now() - lastProcessedAt < REPROCESS_COOLDOWN_MS) {
+        log('Skipping recently processed conversation: ' + convId.substring(0, 60));
+        continue;
+      }
 
       if (!seenMessages.has(convId)) {
-        log('✓ Found unread conversation: ' + convId.substring(0, 60));
+        log('Found unread conversation: ' + convId.substring(0, 60));
         conversations.push({ id: convId, element: item });
       } else {
         log('Skipping already seen conversation: ' + convId.substring(0, 60));
@@ -223,10 +292,8 @@ export function buildInstagramBotScript(config: Configuration): string {
     return conversations;
   }
 
-  /**
-   * Check if a conversation has unread messages
-   */
   function hasUnreadIndicator(element) {
+    // Prefer explicit unread markers to avoid false positives.
     const unreadDiv = element.querySelector('div.x9f619.x1ja2u2z.xzpqnlu.x1hyvwdk.x14bfe9o.xjm9jq1.x6ikm8r.x10wlt62.x10l6tqk.x1i1rx1s');
     if (unreadDiv && unreadDiv.textContent?.includes('Unread')) {
       return true;
@@ -239,13 +306,13 @@ export function buildInstagramBotScript(config: Configuration): string {
       }
     }
 
-    const badge = element.querySelector('[role="status"], [aria-label*="unread"], [aria-label*="notification"]');
-    if (badge) return true;
+    const ariaUnread = element.querySelector('[aria-label*="unread" i]');
+    if (ariaUnread) return true;
 
-    const spans = element.querySelectorAll('span, div');
-    for (const el of spans) {
-      const weight = window.getComputedStyle(el).fontWeight;
-      if ((weight === 'bold' || weight === '700' || parseInt(weight) >= 600) && el.textContent && el.textContent.length > 3) {
+    const statusBadges = element.querySelectorAll('[role="status"]');
+    for (const badge of statusBadges) {
+      const text = badge.textContent?.trim() || '';
+      if (/^\\d+$/.test(text) || text.toLowerCase().includes('unread')) {
         return true;
       }
     }
@@ -457,8 +524,8 @@ export function buildInstagramBotScript(config: Configuration): string {
    * Type a message into the input field
    */
   async function typeMessage(text) {
-    // Find the message input - Instagram typically uses a contenteditable div or textarea
-    const input = document.querySelector('[contenteditable="true"][role="textbox"], textarea[placeholder*="Message"], textarea, [data-testid="message-input"]');
+    // Prefer Instagram lexical editor first, then generic fallbacks.
+    const input = document.querySelector('[contenteditable="true"][role="textbox"][data-lexical-editor="true"], [contenteditable="true"][role="textbox"], textarea[placeholder*="Message"], textarea, [data-testid="message-input"]');
 
     if (!input) {
       log('Input field not found');
@@ -466,17 +533,24 @@ export function buildInstagramBotScript(config: Configuration): string {
     }
 
     log('Found input field: ' + input.tagName + (input.getAttribute('role') ? '[role="' + input.getAttribute('role') + '"]' : ''));
-    
-    input.focus();
-    await sleep(500); // Longer wait for focus
+    if (isStopped()) return false;
+
+    const focused = focusMessageInput(input);
+    await sleep(500); // Allow editor focus state/data-focus-visible updates
+    if (isStopped()) return false;
+    if (!focused) {
+      log('Input did not receive focus/caret');
+      return false;
+    }
 
     // Clear existing content more thoroughly
     if (input.getAttribute('contenteditable') === 'true') {
-      input.innerHTML = '';
+      try {
+        document.execCommand('selectAll', false);
+        document.execCommand('delete', false);
+      } catch {}
       input.textContent = '';
-      // Trigger events to ensure Instagram knows content changed
-      input.dispatchEvent(new Event('input', { bubbles: true }));
-      input.dispatchEvent(new Event('change', { bubbles: true }));
+      input.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'deleteContentBackward', data: null }));
     } else if (input.value !== undefined) {
       input.value = '';
       input.dispatchEvent(new Event('input', { bubbles: true }));
@@ -487,12 +561,16 @@ export function buildInstagramBotScript(config: Configuration): string {
 
     // Type character by character
     for (let i = 0; i < text.length; i++) {
+      if (isStopped()) return false;
       const char = text[i];
 
       if (input.getAttribute('contenteditable') === 'true') {
-        input.textContent = (input.textContent || '') + char;
-        // Trigger input events after each character
-        input.dispatchEvent(new Event('input', { bubbles: true }));
+        try {
+          document.execCommand('insertText', false, char);
+        } catch {
+          input.textContent = (input.textContent || '') + char;
+        }
+        input.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: char }));
       } else if (input.value !== undefined) {
         input.value += char;
         input.dispatchEvent(new Event('input', { bubbles: true }));
@@ -515,8 +593,10 @@ export function buildInstagramBotScript(config: Configuration): string {
    * Send the message
    */
   async function sendMessage() {
+    if (isStopped()) return false;
     // Wait a moment for typing to settle
     await sleep(300);
+    if (isStopped()) return false;
     
     // Find the send button - try multiple approaches
     let sendBtn = null;
@@ -552,6 +632,7 @@ export function buildInstagramBotScript(config: Configuration): string {
       log('Found send button: ' + sendBtn.tagName + ' - clicking...');
       sendBtn.click();
       await sleep(1000); // Wait longer for message to send
+      if (isStopped()) return false;
       
       // Verify message was sent by checking if input is cleared
       const input = document.querySelector('[contenteditable="true"][role="textbox"], textarea');
@@ -575,6 +656,7 @@ export function buildInstagramBotScript(config: Configuration): string {
       input.dispatchEvent(new KeyboardEvent('keypress', { key: 'Enter', keyCode: 13, bubbles: true }));
       input.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', keyCode: 13, bubbles: true }));
       await sleep(1000);
+      if (isStopped()) return false;
       
       // Check if input cleared
       const inputEmpty = !(input.textContent || input.value || '').trim();
@@ -596,12 +678,15 @@ export function buildInstagramBotScript(config: Configuration): string {
    */
   async function processConversation(conversation) {
     try {
+      if (isStopped()) return;
       const opened = await openConversation(conversation);
       if (!opened) {
         // Mark as seen even if we couldn't open it
         seenMessages.add(conversation.id);
+        recentlyProcessedConversations.set(conversation.id, Date.now());
         return;
       }
+      if (isStopped()) return;
 
       const messages = getConversationMessages();
       log('Found ' + messages.length + ' messages in conversation');
@@ -609,6 +694,7 @@ export function buildInstagramBotScript(config: Configuration): string {
       if (messages.length === 0) {
         log('No messages found - marking conversation as seen and navigating back to DMs');
         seenMessages.add(conversation.id);
+        recentlyProcessedConversations.set(conversation.id, Date.now());
         await sleep(1000);
         navigateBackToDMs();
         return;
@@ -618,6 +704,7 @@ export function buildInstagramBotScript(config: Configuration): string {
       if (!latestMsg) {
         log('No new incoming messages - marking conversation as seen and navigating back to DMs');
         seenMessages.add(conversation.id);
+        recentlyProcessedConversations.set(conversation.id, Date.now());
         await sleep(1000);
         navigateBackToDMs();
         return;
@@ -628,10 +715,13 @@ export function buildInstagramBotScript(config: Configuration): string {
       // Mark both message and conversation as seen
       seenMessages.add(latestMsg.id);
       seenMessages.add(conversation.id);
+      recentlyProcessedConversations.set(conversation.id, Date.now());
 
       const reply = await generateReply(latestMsg.text);
+      if (isStopped()) return;
       if (!reply) {
         log('No reply generated - navigating back to DMs');
+        recentlyProcessedConversations.set(conversation.id, Date.now());
         await sleep(1000);
         navigateBackToDMs();
         return;
@@ -640,6 +730,7 @@ export function buildInstagramBotScript(config: Configuration): string {
       const skipProb = CONFIG?.randomSkipProbability || 0.15;
       if (Math.random() < skipProb) {
         log('Randomly skipping reply (prob ' + Math.round(skipProb * 100) + '%) - navigating back to DMs');
+        recentlyProcessedConversations.set(conversation.id, Date.now());
         await sleep(1000);
         navigateBackToDMs();
         return;
@@ -648,24 +739,30 @@ export function buildInstagramBotScript(config: Configuration): string {
       const delay = Math.floor(Math.random() * (preReplyDelayRange[1] - preReplyDelayRange[0])) + preReplyDelayRange[0];
       log('Waiting ' + delay + 'ms before replying');
       await sleep(delay);
+      if (isStopped()) return;
 
       const typed = await typeMessage(reply);
       if (!typed) {
         log('Failed to type message - navigating back to DMs');
+        recentlyProcessedConversations.set(conversation.id, Date.now());
         await sleep(1000);
         navigateBackToDMs();
         return;
       }
 
       await sleep(500);
+      if (isStopped()) return;
 
       const sent = await sendMessage();
+      if (isStopped()) return;
       if (sent) {
         log('✓ Reply sent: "' + reply.substring(0, 60) + '..." - navigating back to DMs');
       } else {
         log('Failed to send message - navigating back to DMs');
       }
       
+      recentlyProcessedConversations.set(conversation.id, Date.now());
+
       // Always navigate back to DMs after processing
       await sleep(2000); // Wait longer to ensure message is sent/processed
       navigateBackToDMs();
@@ -673,6 +770,7 @@ export function buildInstagramBotScript(config: Configuration): string {
     } catch (err) {
       log('Error processing conversation: ' + err + ' - marking as seen and navigating back to DMs');
       seenMessages.add(conversation.id);
+      recentlyProcessedConversations.set(conversation.id, Date.now());
       await sleep(1000);
       navigateBackToDMs();
     }

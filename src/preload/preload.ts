@@ -96,6 +96,13 @@ const botAPI = {
    */
   getSnapchatBotScript: async (config: unknown): Promise<string> => {
     return await ipcRenderer.invoke('bot:getSnapchatScript', config);
+  },
+
+  /**
+   * Get Instagram bot script generated in main process.
+   */
+  getInstagramBotScript: async (config: unknown): Promise<string> => {
+    return await ipcRenderer.invoke('bot:getInstagramScript', config);
   }
 };
 
