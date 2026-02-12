@@ -16,7 +16,7 @@ export function buildRedditBotScript(config: Configuration): string {
   const CONFIG = ${serializedConfig};
   const processedItems = new Set();
   let isRunning = true;
-  let pollInterval = null;
+  let pollTimer = null;
   let isProcessing = false;
   let nextSubredditCheckAt = 0;
   let lastPmCheckAt = 0;
@@ -27,6 +27,8 @@ export function buildRedditBotScript(config: Configuration): string {
   const MAX_SUBREDDIT_CHECK_MS = 60 * 60 * 1000;
   const PM_CHECK_DEBOUNCE_MS = 15000;
   const PM_REPLY_DEBOUNCE_MS = 12000;
+  const MIN_POLL_MS = 1000;
+  const MAX_POLL_MS = 60000;
 
   const settings = {
     watchNotifications: true,
@@ -61,6 +63,33 @@ export function buildRedditBotScript(config: Configuration): string {
     return new Promise(resolve => setTimeout(resolve, ms));
   }
 
+  function deepQueryAll(selector) {
+    const out = [];
+    const visited = new Set();
+
+    function walk(root) {
+      if (!root || visited.has(root)) return;
+      visited.add(root);
+      try {
+        root.querySelectorAll(selector).forEach(node => out.push(node));
+      } catch (e) {
+        // ignore selector issues
+      }
+      let all = [];
+      try {
+        all = root.querySelectorAll('*');
+      } catch (e) {
+        all = [];
+      }
+      all.forEach(node => {
+        if (node.shadowRoot) walk(node.shadowRoot);
+      });
+    }
+
+    walk(document);
+    return out;
+  }
+
   function randomRange(min, max) {
     return Math.floor(Math.random() * (max - min + 1)) + min;
   }
@@ -86,7 +115,22 @@ export function buildRedditBotScript(config: Configuration): string {
   }
 
   function shouldOpenChatOnStart() {
-    return settings.watchPrivateMessages !== false && settings.autoReplyToPMs !== false;
+    return settings.watchPrivateMessages !== false;
+  }
+
+  function ensureThreadsTab() {
+    const tabs = deepQueryAll('button, a, [role="tab"], [role="button"], faceplate-tab');
+    for (const tab of tabs) {
+      if (!(tab instanceof HTMLElement)) continue;
+      const txt = String(tab.textContent || '').replace(/\\s+/g, ' ').trim().toLowerCase();
+      if (!txt) continue;
+      if (txt === 'threads' || txt.startsWith('threads ')) {
+        tab.click();
+        log('Focused Threads tab');
+        return true;
+      }
+    }
+    return false;
   }
 
   function applyCookie(name, value) {
@@ -300,14 +344,82 @@ export function buildRedditBotScript(config: Configuration): string {
     return String(author || '').replace(/^u\\//i, '').trim();
   }
 
+  function extractConversationAuthor(container) {
+    if (!container || !(container instanceof HTMLElement)) return '';
+    const directHref = String(container.getAttribute('href') || '');
+    const directMatch = directHref.match(/\\/message\\/messages\\/([^/?#]+)/i);
+    if (directMatch && directMatch[1]) return decodeURIComponent(directMatch[1]);
+
+    const profileLink = container.querySelector('a[href*="/user/"]');
+    if (profileLink) {
+      const href = String(profileLink.getAttribute('href') || '');
+      const match = href.match(/\\/user\\/([^/?#]+)/i);
+      if (match && match[1]) return decodeURIComponent(match[1]);
+    }
+
+    const txt = String(container.textContent || '').replace(/\\s+/g, ' ').trim();
+    if (!txt || /^\\d+$/.test(txt)) return '';
+    const first = txt.split(' ')[0] || '';
+    return sanitizeAuthor(first);
+  }
+
+  function getUnreadConversationCandidates() {
+    const candidates = [];
+    const seenKeys = new Set();
+
+    const links = deepQueryAll('a[href*="/message/messages/"]').filter(el => el instanceof HTMLElement);
+    const markers = deepQueryAll('.notifications-badge, [aria-label*="unread" i], [data-unread="true"], [data-is-unread="true"]')
+      .filter(el => el instanceof HTMLElement);
+
+    function isVisible(el) {
+      const rect = el.getBoundingClientRect();
+      return rect.width > 0 && rect.height > 0 && rect.bottom > 0 && rect.top < window.innerHeight;
+    }
+
+    function sameRow(rectA, rectB) {
+      const centerA = rectA.top + (rectA.height / 2);
+      const centerB = rectB.top + (rectB.height / 2);
+      return Math.abs(centerA - centerB) <= 36;
+    }
+
+    links.forEach(link => {
+      if (!isVisible(link)) return;
+      const linkRect = link.getBoundingClientRect();
+      const text = String(link.textContent || '').replace(/\\s+/g, ' ').trim();
+      if (!text || /^\\d+$/.test(text)) return;
+
+      const hasUnreadMarker = markers.some(marker => {
+        if (!isVisible(marker)) return false;
+        const markerRect = marker.getBoundingClientRect();
+        if (!sameRow(linkRect, markerRect)) return false;
+        return Math.abs(markerRect.left - linkRect.left) < 600;
+      });
+
+      const unreadByText = /\\bunread\\b/i.test(String(link.getAttribute('aria-label') || '')) || /\\bunread\\b/i.test(text);
+      if (!hasUnreadMarker && !unreadByText) return;
+
+      const key = (link.getAttribute('href') || '') + '|' + text.substring(0, 160);
+      if (seenKeys.has(key)) return;
+      seenKeys.add(key);
+      candidates.push(link);
+    });
+
+    log('PM scan: links=' + links.length + ', markers=' + markers.length + ', unreadCandidates=' + candidates.length);
+    return candidates;
+  }
+
   function findConversationElementForAuthor(author) {
     const cleanAuthor = sanitizeAuthor(author).toLowerCase();
     if (!cleanAuthor) return null;
 
-    const hrefNode = document.querySelector('a[href*="/message/messages/' + cleanAuthor + '"]');
-    if (hrefNode && hrefNode instanceof HTMLElement) return hrefNode;
+    const hrefCandidates = deepQueryAll('a[href*="/message/messages/"]');
+    for (const hrefNode of hrefCandidates) {
+      if (!(hrefNode instanceof HTMLElement)) continue;
+      const href = String(hrefNode.getAttribute('href') || '').toLowerCase();
+      if (href.includes('/message/messages/' + cleanAuthor)) return hrefNode;
+    }
 
-    const candidates = Array.from(document.querySelectorAll('a, button, [role="button"], li, div')).slice(0, 400);
+    const candidates = deepQueryAll('a, button, [role="button"], li, div').slice(0, 700);
     for (const node of candidates) {
       const text = String(node.textContent || '').replace(/\\s+/g, ' ').toLowerCase();
       if (!text) continue;
@@ -320,6 +432,8 @@ export function buildRedditBotScript(config: Configuration): string {
 
   function extractLatestConversationMessage() {
     const messageSelectors = [
+      '.room-message[aria-label*=" said "] .room-message-text',
+      '.room-message-text',
       '[data-testid*="message"]',
       '[data-id*="message"]',
       '.message',
@@ -329,7 +443,7 @@ export function buildRedditBotScript(config: Configuration): string {
 
     let latest = '';
     messageSelectors.forEach(selector => {
-      document.querySelectorAll(selector).forEach(node => {
+      deepQueryAll(selector).forEach(node => {
         const txt = String(node.textContent || '').replace(/\\s+/g, ' ').trim();
         if (!txt) return;
         if (txt.length < 2) return;
@@ -395,23 +509,49 @@ export function buildRedditBotScript(config: Configuration): string {
 
     let input = null;
     for (const selector of inputSelectors) {
-      const el = document.querySelector(selector);
-      if (el && el instanceof HTMLElement) {
-        input = el;
-        break;
+      const nodes = deepQueryAll(selector);
+      for (const el of nodes) {
+        if (el && el instanceof HTMLElement) {
+          input = el;
+          break;
+        }
       }
+      if (input) break;
     }
     if (!input) return false;
 
     input.focus();
     if (input.getAttribute('contenteditable') === 'true') {
       input.textContent = '';
-      input.textContent = text;
     } else if (Object.prototype.hasOwnProperty.call(input, 'value')) {
-      input.value = text;
+      input.value = '';
     }
     input.dispatchEvent(new Event('input', { bubbles: true }));
-    await sleep(200);
+
+    const delays = CONFIG?.typingDelayRangeMs || [10, 35];
+    const minDelay = Number(delays[0]) || 10;
+    const maxDelay = Number(delays[1]) || 35;
+    for (let i = 0; i < text.length; i++) {
+      const char = text[i];
+      input.dispatchEvent(new KeyboardEvent('keydown', { key: char, bubbles: true, cancelable: true }));
+      input.dispatchEvent(new KeyboardEvent('keypress', { key: char, bubbles: true, cancelable: true }));
+
+      if (input.getAttribute('contenteditable') === 'true') {
+        if (document.execCommand) {
+          try { document.execCommand('insertText', false, char); } catch (e) { input.textContent = (input.textContent || '') + char; }
+        } else {
+          input.textContent = (input.textContent || '') + char;
+        }
+      } else if (Object.prototype.hasOwnProperty.call(input, 'value')) {
+        input.value += char;
+      }
+
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      input.dispatchEvent(new KeyboardEvent('keyup', { key: char, bubbles: true, cancelable: true }));
+      const delay = Math.floor(Math.random() * Math.max(1, (maxDelay - minDelay + 1))) + minDelay;
+      await sleep(delay);
+    }
+    await sleep(180);
 
     const buttonSelectors = [
       'button[type="submit"]',
@@ -419,10 +559,12 @@ export function buildRedditBotScript(config: Configuration): string {
       'button[data-testid*="send"]'
     ];
     for (const selector of buttonSelectors) {
-      const btn = document.querySelector(selector);
-      if (btn && btn instanceof HTMLElement) {
-        btn.click();
-        return true;
+      const btns = deepQueryAll(selector);
+      for (const btn of btns) {
+        if (btn && btn instanceof HTMLElement) {
+          btn.click();
+          return true;
+        }
       }
     }
 
@@ -431,14 +573,83 @@ export function buildRedditBotScript(config: Configuration): string {
     return true;
   }
 
+  function clickConversationElement(el) {
+    if (!el || !(el instanceof HTMLElement)) return false;
+    try {
+      el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    } catch (e) {
+      // ignore
+    }
+    try {
+      el.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
+      el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+      el.click();
+      el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+      return true;
+    } catch (e) {
+      return false;
+    }
+  }
+
   async function processUnreadPmConversations() {
-    if (!shouldReadPrivateMessages()) return;
-    if (settings.autoReplyToPMs === false) return;
+    if (!shouldReadPrivateMessages()) {
+      log('PM scan skipped: PM watch/read disabled');
+      return;
+    }
+    const allowAutoReply = settings.autoReplyToPMs !== false;
+    if (!allowAutoReply) {
+      log('PM scan active: auto-reply to PMs is disabled');
+    }
     if ((Date.now() - lastPmReplyRunAt) < PM_REPLY_DEBOUNCE_MS) return;
     lastPmReplyRunAt = Date.now();
 
-    if (!unreadPmQueue.length) return;
     const limit = Math.max(1, Number(settings.maxItemsPerPoll) || 3);
+    ensureThreadsTab();
+    await sleep(300);
+
+    const unreadCandidates = getUnreadConversationCandidates();
+    if (unreadCandidates.length > 0) {
+      log('Unread conversations detected: ' + unreadCandidates.length);
+      for (const convoEl of unreadCandidates.slice(0, limit)) {
+        try {
+          const author = sanitizeAuthor(extractConversationAuthor(convoEl)) || 'reddit_user';
+          const convoKey = 'pm-thread-ui:' + author + ':' + String(convoEl.textContent || '').substring(0, 120);
+          if (processedItems.has(convoKey)) continue;
+
+          const clicked = clickConversationElement(convoEl);
+          if (!clicked) continue;
+          log('Clicked unread conversation for u/' + author);
+          await sleep(900);
+
+          const latestMessage = extractLatestConversationMessage();
+          if (!latestMessage) continue;
+          const messageKey = 'pm-msg:' + author + ':' + latestMessage.substring(0, 200);
+          if (processedItems.has(messageKey)) continue;
+          if (!allowAutoReply) {
+            log('Captured unread PM from u/' + author + ' (auto-reply disabled)');
+            continue;
+          }
+
+          const reply = await generatePmReply(latestMessage, author);
+          if (!reply) continue;
+          const sent = await sendPmReply(reply);
+          if (sent) {
+            processedItems.add(convoKey);
+            processedItems.add(messageKey);
+            log('Replied to PM from u/' + author + ': ' + reply.substring(0, 80));
+            await sleep(500);
+            ensureThreadsTab();
+          }
+        } catch (error) {
+          log('Error processing unread PM conversation (UI path): ' + error);
+        }
+      }
+      return;
+    }
+
+    log('No unread conversation candidates in Threads UI');
+
+    if (!unreadPmQueue.length) return;
     const toProcess = unreadPmQueue.slice(0, limit);
     log('Unread PM threads queued: ' + toProcess.length);
 
@@ -451,7 +662,7 @@ export function buildRedditBotScript(config: Configuration): string {
 
         const convoEl = findConversationElementForAuthor(author);
         if (convoEl) {
-          convoEl.click();
+          clickConversationElement(convoEl);
           log('Opened PM thread for u/' + author);
           await sleep(1200);
         } else {
@@ -463,6 +674,10 @@ export function buildRedditBotScript(config: Configuration): string {
 
         const messageKey = 'pm-msg:' + author + ':' + latestMessage.substring(0, 200);
         if (processedItems.has(messageKey)) continue;
+        if (!allowAutoReply) {
+          log('Queued unread PM from u/' + author + ' (auto-reply disabled)');
+          continue;
+        }
 
         const reply = await generatePmReply(latestMessage, author);
         if (!reply) continue;
@@ -511,6 +726,8 @@ export function buildRedditBotScript(config: Configuration): string {
       log('Chat/messages button not found, checking PM inbox directly');
     } else {
       await sleep(1000);
+      ensureThreadsTab();
+      await sleep(300);
       const unreadEls = Array.from(document.querySelectorAll('.unread, [data-unread="true"], .message.unread'));
       if (unreadEls.length > 0) {
         log('Unread messages in UI: ' + unreadEls.length);
@@ -549,9 +766,18 @@ export function buildRedditBotScript(config: Configuration): string {
     }
   }
 
+  function scheduleNextPoll() {
+    if (!isRunning) return;
+    const delay = randomRange(MIN_POLL_MS, MAX_POLL_MS);
+    pollTimer = setTimeout(async () => {
+      await poll();
+      scheduleNextPoll();
+    }, delay);
+  }
+
   function stop() {
     isRunning = false;
-    if (pollInterval) clearInterval(pollInterval);
+    if (pollTimer) clearTimeout(pollTimer);
     window.__SNAPPY_RUNNING__ = false;
     window.__SNAPPY_REDDIT_RUNNING__ = false;
     log('Reddit bot stopped');
@@ -559,6 +785,7 @@ export function buildRedditBotScript(config: Configuration): string {
 
   log('Reddit bot started');
   log('Watch list size: ' + ((settings.watchSubreddits && settings.watchSubreddits.length) || 0));
+  log('PM settings: watch=' + (settings.watchPrivateMessages !== false) + ', read=' + (settings.readPrivateMessages !== false) + ', autoReply=' + (settings.autoReplyToPMs !== false));
   if (String(settings.authCookieString || '').trim() || String(settings.sessionCookie || '').trim()) {
     log('Manual Reddit auth cookies configured');
   }
@@ -568,7 +795,7 @@ export function buildRedditBotScript(config: Configuration): string {
     log('Startup Reddit checks error: ' + error);
   });
   poll();
-  pollInterval = setInterval(poll, Math.max(5000, Number(settings.pollIntervalMs) || 30000));
+  scheduleNextPoll();
   window.__SNAPPY_STOP__ = stop;
 })();
 `;

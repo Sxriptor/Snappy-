@@ -28,7 +28,7 @@ function buildThreadsBotScript(config: any): string {
   const seenComments = new Set();
   const seenNotifications = new Set();
   let isRunning = true;
-  let pollInterval = null;
+  let pollTimer = null;
   let isProcessing = false;
   let refreshInterval = null;
   const MIN_COMMENT_LENGTH = 3;
@@ -509,6 +509,8 @@ function buildRedditFallbackBotScript(config: any): string {
   const MIN_SUBREDDIT_CHECK_MS = 5 * 60 * 1000;
   const MAX_SUBREDDIT_CHECK_MS = 60 * 60 * 1000;
   const PM_CHECK_DEBOUNCE_MS = 15000;
+  const MIN_POLL_MS = 1000;
+  const MAX_POLL_MS = 60000;
 
   const settings = {
     watchPrivateMessages: true,
@@ -802,12 +804,35 @@ function buildRedditFallbackBotScript(config: any): string {
     input.focus();
     if (input.getAttribute('contenteditable') === 'true') {
       input.textContent = '';
-      input.textContent = text;
     } else if (Object.prototype.hasOwnProperty.call(input, 'value')) {
-      input.value = text;
+      input.value = '';
     }
     input.dispatchEvent(new Event('input', { bubbles: true }));
-    await sleep(150);
+
+    const delays = CONFIG?.typingDelayRangeMs || [10, 35];
+    const minDelay = Number(delays[0]) || 10;
+    const maxDelay = Number(delays[1]) || 35;
+    for (let i = 0; i < text.length; i++) {
+      const char = text[i];
+      input.dispatchEvent(new KeyboardEvent('keydown', { key: char, bubbles: true, cancelable: true }));
+      input.dispatchEvent(new KeyboardEvent('keypress', { key: char, bubbles: true, cancelable: true }));
+
+      if (input.getAttribute('contenteditable') === 'true') {
+        if (document.execCommand) {
+          try { document.execCommand('insertText', false, char); } catch (e) { input.textContent = (input.textContent || '') + char; }
+        } else {
+          input.textContent = (input.textContent || '') + char;
+        }
+      } else if (Object.prototype.hasOwnProperty.call(input, 'value')) {
+        input.value += char;
+      }
+
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      input.dispatchEvent(new KeyboardEvent('keyup', { key: char, bubbles: true, cancelable: true }));
+      const delay = Math.floor(Math.random() * Math.max(1, (maxDelay - minDelay + 1))) + minDelay;
+      await sleep(delay);
+    }
+    await sleep(180);
 
     const buttonSelectors = [
       'button[aria-label*="send" i]',
@@ -828,9 +853,158 @@ function buildRedditFallbackBotScript(config: any): string {
     return true;
   }
 
-  async function processActiveChatMessage() {
+  function getUnreadConversationCandidates() {
+    const candidates = [];
+    const seenKeys = new Set();
+
+    // Primary path: conversation links with nearby unread badge/marker.
+    const convoLinks = deepQueryAll('a[href*="/message/messages/"]');
+    convoLinks.forEach(link => {
+      if (!(link instanceof HTMLElement)) return;
+      let container = link;
+      for (let i = 0; i < 5; i++) {
+        if (!container.parentElement) break;
+        container = container.parentElement;
+      }
+
+      const hasUnreadBadge =
+        !!link.querySelector('.notifications-badge') ||
+        !!container.querySelector('.notifications-badge') ||
+        /unread/i.test(String(link.getAttribute('aria-label') || '')) ||
+        /unread/i.test(String(container.getAttribute('aria-label') || ''));
+
+      if (!hasUnreadBadge) return;
+      const txt = String(link.textContent || container.textContent || '').replace(/\\s+/g, ' ').trim();
+      if (!txt || /^\\d+$/.test(txt)) return;
+      const key = (link.getAttribute('href') || '') + '|' + txt.substring(0, 160);
+      if (seenKeys.has(key)) return;
+      seenKeys.add(key);
+      candidates.push(link);
+    });
+
+    if (candidates.length > 0) return candidates;
+
+    const markers = [
+      '.notifications-badge',
+      '[aria-label*="unread" i]',
+      '[data-unread="true"]',
+      '[data-is-unread="true"]',
+      '[class*="unread"]'
+    ];
+
+    markers.forEach(selector => {
+      const nodes = deepQueryAll(selector);
+      nodes.forEach(node => {
+        let container =
+          node.closest('a[href*="/message/messages/"]') ||
+          node.closest('[role="button"]') ||
+          node.closest('button') ||
+          node.closest('li') ||
+          node.closest('div');
+        if (!container || !(container instanceof HTMLElement)) return;
+
+        // Prefer a direct conversation link target if present inside the resolved container.
+        const convoLink = container.querySelector('a[href*="/message/messages/"]');
+        if (convoLink && convoLink instanceof HTMLElement) {
+          container = convoLink;
+        }
+
+        const txt = String(container.textContent || '').replace(/\\s+/g, ' ').trim();
+        // Avoid badge-only candidates like "1".
+        if (!txt || /^\\d+$/.test(txt)) return;
+
+        const key = (container.getAttribute('href') || '') + '|' + txt.substring(0, 160);
+        if (seenKeys.has(key)) return;
+        seenKeys.add(key);
+        candidates.push(container);
+      });
+    });
+
+    return candidates;
+  }
+
+  function extractConversationAuthor(container) {
+    const profileAnchor = container.querySelector('a[href*="/user/"]');
+    if (profileAnchor) {
+      const href = String(profileAnchor.getAttribute('href') || '');
+      const match = href.match(/\\/user\\/([^/?#]+)/i);
+      if (match && match[1]) return decodeURIComponent(match[1]).replace(/^u\\//i, '');
+      const label = String(profileAnchor.getAttribute('aria-label') || '');
+      const labelMatch = label.match(/view profile of user\\s+(.+)$/i);
+      if (labelMatch && labelMatch[1]) return labelMatch[1].trim().replace(/^u\\//i, '');
+    }
+
+    const nameSelectors = ['.user-name', '[class*="user-name"]', '[aria-label*="View profile of user"]'];
+    for (const selector of nameSelectors) {
+      const node = container.querySelector(selector);
+      const txt = String(node?.textContent || '').replace(/\\s+/g, ' ').trim();
+      if (txt && !/^\\d+$/.test(txt)) return txt.replace(/^u\\//i, '');
+    }
+    const text = String(container.textContent || '').replace(/\\s+/g, ' ').trim();
+    if (!text) return '';
+    const parts = text.split(' ').filter(p => p && !/^\\d+$/.test(p));
+    return parts[0] ? parts[0].replace(/^u\\//i, '') : '';
+  }
+
+  function clickConversationElement(el) {
+    if (!el || !(el instanceof HTMLElement)) return false;
+    try {
+      el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    } catch (e) {
+      // ignore
+    }
+    try {
+      el.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
+      el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+      el.click();
+      el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+      return true;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  function ensureThreadsTab() {
+    const candidates = deepQueryAll('button, a, [role="tab"], [role="button"], faceplate-tab');
+    for (const node of candidates) {
+      if (!(node instanceof HTMLElement)) continue;
+      const txt = String(node.textContent || '').replace(/\\s+/g, ' ').trim().toLowerCase();
+      if (!txt) continue;
+      if (txt === 'threads' || txt.startsWith('threads ')) {
+        node.click();
+        log('Focused Threads tab');
+        return true;
+      }
+    }
+    return false;
+  }
+
+  async function processUnreadChatMessage() {
     if (!shouldReadPrivateMessages()) return;
     if (settings.autoReplyToPMs === false) return;
+
+    ensureThreadsTab();
+    await sleep(250);
+
+    const unreadConversations = getUnreadConversationCandidates();
+    if (unreadConversations.length > 0) {
+      log('Unread conversations detected: ' + unreadConversations.length);
+    }
+    if (!unreadConversations.length) return;
+
+    const conversation = unreadConversations[0];
+    const convoAuthor = extractConversationAuthor(conversation) || 'reddit_user';
+    const convoKey = 'chat-thread:' + convoAuthor.toLowerCase() + ':' + String(conversation.textContent || '').substring(0, 120);
+    if (seen.has(convoKey)) return;
+
+    const clicked = clickConversationElement(conversation);
+    if (!clicked) {
+      log('Failed to click unread conversation candidate');
+      return;
+    }
+    const preview = String(conversation.textContent || '').replace(/\\s+/g, ' ').trim().substring(0, 80);
+    log('Clicked unread conversation for u/' + convoAuthor + ' [' + preview + ']');
+    await sleep(900);
 
     const latest = getLatestIncomingChatMessage();
     if (!latest) return;
@@ -843,8 +1017,11 @@ function buildRedditFallbackBotScript(config: any): string {
 
     const sent = await sendChatReply(reply);
     if (sent) {
+      seen.add(convoKey);
       seen.add(messageKey);
       log('Replied to chat from u/' + latest.author + ': ' + reply.substring(0, 80));
+      await sleep(300);
+      ensureThreadsTab();
     }
   }
 
@@ -948,25 +1125,32 @@ function buildRedditFallbackBotScript(config: any): string {
       }
     }
 
-    await readUnreadPrivateMessages();
-    await processActiveChatMessage();
+    await processUnreadChatMessage();
   }
 
   async function poll() {
     if (!isRunning || isProcessing) return;
     isProcessing = true;
     try {
-      await readUnreadPrivateMessages();
-      await processActiveChatMessage();
+      await processUnreadChatMessage();
       await checkRandomSubreddit(false);
     } finally {
       isProcessing = false;
     }
   }
 
+  function scheduleNextPoll() {
+    if (!isRunning) return;
+    const delay = randomRange(MIN_POLL_MS, MAX_POLL_MS);
+    pollTimer = setTimeout(async () => {
+      await poll();
+      scheduleNextPoll();
+    }, delay);
+  }
+
   function stop() {
     isRunning = false;
-    if (pollInterval) clearInterval(pollInterval);
+    if (pollTimer) clearTimeout(pollTimer);
     window.__SNAPPY_RUNNING__ = false;
     window.__SNAPPY_REDDIT_RUNNING__ = false;
     log('Reddit bot stopped');
@@ -982,26 +1166,49 @@ function buildRedditFallbackBotScript(config: any): string {
     log('Startup Reddit checks error: ' + e);
   });
   poll();
-  pollInterval = setInterval(poll, Math.max(5000, Number(settings.pollIntervalMs) || 30000));
+  scheduleNextPoll();
   window.__SNAPPY_STOP__ = stop;
 })();
 `;
 }
 
 function buildRedditBotScript(config: any): string {
-  try {
-    const req = (window as any).require;
-    if (typeof req === 'function') {
-      const redditModule = req('../injection/redditBot');
-      if (redditModule && typeof redditModule.buildRedditBotScript === 'function') {
-        return redditModule.buildRedditBotScript(config);
-      }
-    }
-  } catch (error) {
-    console.warn('[Snappy][Reddit] Falling back to inline Reddit bot script:', error);
+  const req = (window as any).require;
+  if (typeof req !== 'function') {
+    return `
+(function() {
+  console.error('[Snappy][Reddit] Module load failed: window.require is unavailable');
+  window.dispatchEvent(new CustomEvent('snappy-log', {
+    detail: { message: '[Snappy][Reddit] Module load failed: window.require is unavailable', timestamp: Date.now() }
+  }));
+})();
+`;
   }
 
-  return buildRedditFallbackBotScript(config);
+  try {
+    const redditModule = req('../injection/redditBot');
+    if (redditModule && typeof redditModule.buildRedditBotScript === 'function') {
+      return redditModule.buildRedditBotScript(config);
+    }
+    return `
+(function() {
+  console.error('[Snappy][Reddit] Module load failed: buildRedditBotScript export missing');
+  window.dispatchEvent(new CustomEvent('snappy-log', {
+    detail: { message: '[Snappy][Reddit] Module load failed: buildRedditBotScript export missing', timestamp: Date.now() }
+  }));
+})();
+`;
+  } catch (error) {
+    const message = String(error && error.message ? error.message : error);
+    return `
+(function() {
+  console.error('[Snappy][Reddit] Module load failed: ${message}');
+  window.dispatchEvent(new CustomEvent('snappy-log', {
+    detail: { message: '[Snappy][Reddit] Module load failed: ${message}', timestamp: Date.now() }
+  }));
+})();
+`;
+  }
 }
 function buildInstagramBotScript(config: any): string {
   const serializedConfig = JSON.stringify(config || {});
