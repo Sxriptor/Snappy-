@@ -7,7 +7,7 @@ import { app, BrowserWindow, ipcMain, session } from 'electron';
 import { autoUpdater } from 'electron-updater';
 import * as path from 'path';
 import * as fs from 'fs';
-import { Configuration, DEFAULT_CONFIG, DEFAULT_AI_CONFIG, SessionConfig, ProxyConfig, IncomingMessage } from '../types';
+import { Configuration, DEFAULT_CONFIG, DEFAULT_AI_CONFIG, SessionConfig, ProxyConfig, IncomingMessage, AIConfig } from '../types';
 import { SessionManager } from './sessionManager';
 import { ProxyManager } from './proxyManager';
 import { FingerprintGenerator } from './fingerprintGenerator';
@@ -339,7 +339,7 @@ export function setupIPCHandlers(): void {
 
   // AI Brain reply generation - called from injection layer via webview
   // Uses a lock to ensure only one message is processed at a time
-  ipcMain.handle('ai:generateReply', async (event, messageData: { sender: string; messageText: string; conversationId?: string }) => {
+  ipcMain.handle('ai:generateReply', async (event, messageData: { sender: string; messageText: string; conversationId?: string; aiConfig?: Partial<AIConfig> }) => {
     try {
       // Check if already processing - skip if busy
       if (isProcessingReply) {
@@ -354,6 +354,11 @@ export function setupIPCHandlers(): void {
 
       // Acquire lock
       isProcessingReply = true;
+
+      // Allow per-session/runtime AI overrides (e.g., llama port parsed from session start command).
+      if (messageData.aiConfig && aiBrain) {
+        aiBrain.updateConfig(messageData.aiConfig);
+      }
 
       const message: IncomingMessage = {
         messageId: `msg-${Date.now()}`,

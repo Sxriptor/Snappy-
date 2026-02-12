@@ -3667,6 +3667,7 @@ botBtn.addEventListener('click', async () => {
     if (currentAIProvider === 'local' && llamaServerConfig.enabled && activeSessionId) {
       addLog('Starting Llama.cpp server...', 'info');
       console.log(`[Bot Start] Starting llama for session ${activeSessionId}`);
+      await (window as any).llama.saveConfig(llamaServerConfig);
       const startResult = await (window as any).llama.start();
       console.log(`[Bot Start] Result:`, startResult);
       if (startResult.running && startResult.pid) {
@@ -5667,10 +5668,16 @@ setInterval(async () => {
       addLog(`Processing AI request for ${request.username}`, 'info');
       
       try {
+        const effectiveAIConfig = getEffectiveSessionAIConfig(activeSessionId, request.config);
+        if (effectiveAIConfig?.provider === 'local') {
+          addLog(`AI request endpoint: ${effectiveAIConfig.llmEndpoint}:${effectiveAIConfig.llmPort}`, 'info');
+        }
+
         const result = await (window as any).bot.generateAIReply(
           request.username,
           request.messages[request.messages.length - 1].content, // last message is the user's
-          request.username
+          request.username,
+          effectiveAIConfig || undefined
         );
         
         // Send response back to webview
@@ -6127,6 +6134,51 @@ let llamaServerConfig: LlamaServerConfig = {
   enabled: false
 };
 
+function extractLlamaPort(startCommand?: string): number | null {
+  if (!startCommand) return null;
+  const matches = Array.from(startCommand.matchAll(/(?:^|\s)(?:--port|-p)\s*=?\s*(\d{2,5})(?=\s|$)/gi));
+  if (matches.length === 0) return null;
+  const port = parseInt(matches[matches.length - 1][1], 10);
+  if (Number.isNaN(port) || port < 1 || port > 65535) return null;
+  return port;
+}
+
+function getEffectiveSessionAIConfig(sessionId: string | null, requestAIConfig?: Partial<AIConfig>): AIConfig | null {
+  if (!sessionId) return null;
+  const sessionConfig = sessionConfigs.get(sessionId);
+  const sessionAI = sessionConfig?.ai || ({} as Partial<AIConfig>);
+  const sessionLlama = sessionConfig?.llama;
+  const fallbackLlama = llamaServerConfig;
+
+  const merged = {
+    ...sessionAI,
+    ...(requestAIConfig || {})
+  } as Partial<AIConfig>;
+
+  const provider = merged.provider || 'local';
+  const effectiveLlamaCommand = sessionLlama?.startCommand || fallbackLlama?.startCommand || '';
+  const parsedPort = extractLlamaPort(effectiveLlamaCommand);
+
+  return {
+    enabled: merged.enabled ?? false,
+    provider,
+    llmEndpoint: merged.llmEndpoint || '127.0.0.1',
+    llmPort: provider === 'local' ? (parsedPort || merged.llmPort || 8080) : (merged.llmPort || 8080),
+    modelName: merged.modelName || 'local-model',
+    systemPrompt: merged.systemPrompt || '',
+    temperature: merged.temperature ?? 0.7,
+    maxTokens: merged.maxTokens ?? 150,
+    contextHistoryEnabled: merged.contextHistoryEnabled ?? true,
+    maxContextMessages: merged.maxContextMessages ?? 10,
+    requestTimeoutMs: merged.requestTimeoutMs ?? 30000,
+    maxRetries: merged.maxRetries ?? 3,
+    retryBackoffMs: merged.retryBackoffMs ?? 1000,
+    chatgptApiKey: merged.chatgptApiKey || '',
+    chatgptModel: merged.chatgptModel || 'gpt-3.5-turbo',
+    chatgptBaseUrl: merged.chatgptBaseUrl || 'https://api.openai.com/v1'
+  };
+}
+
 // Per-session server PID tracking
 const sessionServerPids = new Map<string, { pid: number; startTime: number }>();
 
@@ -6245,6 +6297,7 @@ async function startLlamaServer() {
   (llamaStartBtn as HTMLButtonElement).disabled = true;
 
   try {
+    await (window as any).llama.saveConfig(llamaServerConfig);
     const status = await (window as any).llama.start();
 
     if (status.running && status.pid) {

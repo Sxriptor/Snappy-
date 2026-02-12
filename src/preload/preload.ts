@@ -75,8 +75,13 @@ const botAPI = {
   /**
    * Generate AI reply for a message
    */
-  generateAIReply: async (sender: string, messageText: string, conversationId?: string): Promise<{ reply: string | null; error?: string }> => {
-    return await ipcRenderer.invoke('ai:generateReply', { sender, messageText, conversationId });
+  generateAIReply: async (
+    sender: string,
+    messageText: string,
+    conversationId?: string,
+    aiConfig?: unknown
+  ): Promise<{ reply: string | null; error?: string }> => {
+    return await ipcRenderer.invoke('ai:generateReply', { sender, messageText, conversationId, aiConfig });
   },
 
   /**
