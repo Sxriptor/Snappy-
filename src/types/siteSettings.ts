@@ -24,6 +24,8 @@ export interface RedditSiteSettings {
   maxPostAge: number; // in hours
   skipOwnPosts: boolean;
   skipOwnComments: boolean;
+  authCookieString: string;
+  sessionCookie: string;
 }
 
 export interface InstagramSiteSettings {
@@ -126,7 +128,9 @@ export const DEFAULT_SITE_SETTINGS: SiteSettingsConfig = {
     minPostScore: 1,
     maxPostAge: 24,
     skipOwnPosts: true,
-    skipOwnComments: true
+    skipOwnComments: true,
+    authCookieString: '',
+    sessionCookie: ''
   },
   
   instagram: {
