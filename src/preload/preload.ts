@@ -84,6 +84,13 @@ const botAPI = {
    */
   resetAIConversation: async (conversationId: string): Promise<boolean> => {
     return await ipcRenderer.invoke('ai:resetConversation', conversationId);
+  },
+
+  /**
+   * Get Snapchat bot script generated in main process.
+   */
+  getSnapchatBotScript: async (config: unknown): Promise<string> => {
+    return await ipcRenderer.invoke('bot:getSnapchatScript', config);
   }
 };
 

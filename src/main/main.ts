@@ -12,6 +12,7 @@ import { SessionManager } from './sessionManager';
 import { ProxyManager } from './proxyManager';
 import { FingerprintGenerator } from './fingerprintGenerator';
 import { createFingerprintInjectorScript } from '../injection/fingerprintInjector';
+import { buildSnapchatBotScript } from '../injection/snapchatBot';
 import { AIBrain } from '../brain/aiBrain';
 import { windowManager } from './windowManager';
 import { trayManager } from './trayManager';
@@ -278,6 +279,11 @@ export function setupIPCHandlers(): void {
   ipcMain.handle('bot:saveConfig', (event, newConfig: Configuration) => {
     saveConfiguration(newConfig);
     return { success: true };
+  });
+
+  // Return the Snapchat bot script generated from source-of-truth module
+  ipcMain.handle('bot:getSnapchatScript', (event, scriptConfig: unknown) => {
+    return buildSnapchatBotScript(scriptConfig);
   });
 
   // Handle update actions

@@ -3565,7 +3565,7 @@ async function injectBotIntoWebview() {
     addLog(`Injecting bot for host: ${hostname || 'unknown'}`, 'info', webviewSessionId);
 
     // Inject the bot script into the webview
-    const botScript = getBotScript(config!, hostname);
+    const botScript = await getBotScript(config!, hostname);
     
     // Try injection with error details
     try {
@@ -3929,7 +3929,16 @@ function loadConfigIntoUI(config: Config) {
 }
 
 // Generate the Snapchat bot script to inject into webview
-function getSnapchatBotScript(config: Config): string {
+async function getSnapchatBotScript(config: Config): Promise<string> {
+  try {
+    const bridgedScript = await (window as any).bot?.getSnapchatBotScript?.(config);
+    if (typeof bridgedScript === 'string' && bridgedScript.length > 0) {
+      return bridgedScript;
+    }
+  } catch {
+    // Fall back to inlined script below if IPC/preload path is unavailable.
+  }
+
   return `
 (function() {
   if (window.__SNAPPY_RUNNING__) {
@@ -4761,20 +4770,33 @@ function getSnapchatBotScript(config: Config): string {
       input.value = '';
     }
     
-    // Type character by character
-    const delays = CONFIG.typingDelayRangeMs || [50, 150];
+    // Type character by character (fast defaults, still human-like)
+    const delays = CONFIG.typingDelayRangeMs || [10, 35];
     for (let i = 0; i < text.length; i++) {
       const char = text[i];
-      
+
+      // Simulate key events so this behaves like typing, not paste.
+      input.dispatchEvent(new KeyboardEvent('keydown', { key: char, code: 'Key' + char.toUpperCase(), bubbles: true, cancelable: true }));
+      input.dispatchEvent(new KeyboardEvent('keypress', { key: char, code: 'Key' + char.toUpperCase(), bubbles: true, cancelable: true }));
+
       if (input.getAttribute('contenteditable') === 'true') {
-        input.textContent = (input.textContent || '') + char;
+        const inserted = document.execCommand ? document.execCommand('insertText', false, char) : false;
+        if (!inserted) {
+          input.textContent = (input.textContent || '') + char;
+        }
       } else if ('value' in input) {
-        input.value = (input.value || '') + char;
+        const el = input;
+        const start = typeof el.selectionStart === 'number' ? el.selectionStart : (el.value || '').length;
+        const end = typeof el.selectionEnd === 'number' ? el.selectionEnd : start;
+        if (typeof el.setRangeText === 'function') {
+          el.setRangeText(char, start, end, 'end');
+        } else {
+          el.value = (el.value || '') + char;
+        }
       }
-      
-      // Dispatch events
-      input.dispatchEvent(new Event('input', { bubbles: true }));
-      input.dispatchEvent(new Event('change', { bubbles: true }));
+
+      input.dispatchEvent(new InputEvent('input', { bubbles: true, data: char, inputType: 'insertText' }));
+      input.dispatchEvent(new KeyboardEvent('keyup', { key: char, code: 'Key' + char.toUpperCase(), bubbles: true, cancelable: true }));
       
       const delay = Math.floor(Math.random() * (delays[1] - delays[0])) + delays[0];
       await sleep(delay);
@@ -5309,11 +5331,8 @@ function getSnapchatBotScript(config: Config): string {
       return;
     }
     
-    // Pre-delay
-    const preDelay = CONFIG.preReplyDelayRangeMs || [2000, 6000];
-    const delay = Math.floor(Math.random() * (preDelay[1] - preDelay[0])) + preDelay[0];
-    log('Waiting ' + delay + 'ms...');
-    await sleep(delay);
+    // Start typing immediately after reply generation.
+    log('AI reply ready, typing now');
     
     // Type and send
     const typed = await typeMessage(reply);
@@ -5508,7 +5527,7 @@ function getSnapchatBotScript(config: Config): string {
 `;
 }
 
-function getBotScript(config: Config, hostname: string): string {
+async function getBotScript(config: Config, hostname: string): Promise<string> {
   const site = detectSiteFromHost(hostname);
   switch (site) {
     case 'threads':
@@ -5519,7 +5538,7 @@ function getBotScript(config: Config, hostname: string): string {
       return buildInstagramBotScript(config as any);
     case 'snapchat':
     default:
-      return getSnapchatBotScript(config);
+      return await getSnapchatBotScript(config);
   }
 }
 
@@ -6629,7 +6648,7 @@ async function injectBotIntoSpecificWebview(webview: Electron.WebviewTag, sessio
     
     let botScript = '';
     if (site === 'snapchat') {
-      botScript = getSnapchatBotScript(config as Config);
+      botScript = await getSnapchatBotScript(config as Config);
     } else if (site === 'threads') {
       botScript = buildThreadsBotScript(config);
     } else if (site === 'instagram') {

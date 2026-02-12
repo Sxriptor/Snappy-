@@ -1,1383 +1,1594 @@
 /**
- * Snapchat-Specific Bot Implementation
- * Handles Snapchat Web's unique DOM structure with conversation memory
+ * Snapchat bot script source of truth.
+ * This is consumed by preload and injected by renderer into webviews.
  */
 
-import { log, getConfig, markMessageSeen, isMessageSeen } from './bot';
-import { Configuration } from '../types';
-
-// Conversation memory - stores summaries per user
-interface ConversationMemory {
-  sender: string;
-  messages: { text: string; timestamp: number; isIncoming: boolean }[];
-  summary: string;
-  lastUpdated: number;
-}
-
-const conversationMemories: Map<string, ConversationMemory> = new Map();
-
-const MIN_MESSAGE_LENGTH = 5; // Minimum message length to process
-
-// Snapchat-specific selectors (updated for current Snapchat Web)
-const SNAPCHAT_SELECTORS = {
-  // Chat list items (conversations in sidebar)
-  chatListItem: '.O4POs, [class*="ChatListItem"], [class*="conversationListItem"], [class*="conversation-"]',
-  chatListContainer: '[class*="ChatList"], [class*="conversationList"], [class*="chat-list"], [class*="sidebar"], nav, aside',
-
-  // Unread indicator - more specific based on actual HTML
-  unreadBadge: '.HEkDJ.DEp5Z.UW13F, .HEkDJ.DEp5Z, [class*="unread"], [class*="badge"]',
-
-  // Active conversation - MORE SPECIFIC to actual message groups with headers
-  messageContainer: '[class*="MessageList"], [class*="messageList"], main[class*="chat"], [role="main"]',
-  // NEW: Target elements that have a header sibling or parent (actual messages)
-  messageBubble: 'div:has(> header.R1ne3), article:has(header), [class*="message"]:has(header)',
-  messageText: '[class*="MessageContent"], [class*="messageContent"], [class*="text"], [class*="content"]',
-
-  // Sender info
-  senderName: 'header.R1ne3 span.nonIntl, [class*="FriendName"], [class*="username"]',
-  conversationHeader: '[class*="ConversationHeader"], [class*="chatHeader"], header[class*="conversation"]',
-
-  // Input and send
-  inputField: '[contenteditable="true"], textarea[class*="Input"], [placeholder*="Send"], [role="textbox"]',
-  sendButton: 'button[class*="Send"], button[aria-label*="Send"], [class*="sendButton"]',
-
-  // Incoming vs outgoing - expanded with more variations
-  incomingMessage: '[class*="received"], [class*="incoming"], [class*="other"], [class*="left"]',
-  outgoingMessage: '[class*="sent"], [class*="outgoing"], [class*="self"], [class*="right"]'
-};
-
-let isRunning = false;
-let pollInterval: ReturnType<typeof setInterval> | null = null;
-let config: Configuration;
-let isProcessing = false; // Lock to prevent concurrent processing
-
-/**
- * Log with visual feedback to console and UI
- */
-function snapLog(message: string): void {
-  const timestamp = new Date().toLocaleTimeString();
-  const formatted = `[${timestamp}] [Snapchat] ${message}`;
-  log(formatted);
+export function buildSnapchatBotScript(config: any): string {
+  return `
+(function() {
+  if (window.__SNAPPY_RUNNING__) {
+    console.log('[Snappy] Already running');
+    return;
+  }
+  window.__SNAPPY_RUNNING__ = true;
   
-  // Also log to browser console for debugging
-  console.log('%c' + formatted, 'color: #FFFC00; background: #000; padding: 2px 5px;');
-  
-  // Dispatch event for UI to catch
-  window.dispatchEvent(new CustomEvent('snappy-log', { detail: { message: formatted, timestamp } }));
-}
+  const CONFIG = ${JSON.stringify(config)};
+  const seenMessages = new Set();
+  const lastRepliedMessage = new Map(); // Track last message we replied to per user: username -> messageText
+  let pollInterval = null;
+  let isProcessing = false; // Lock to prevent concurrent processing
 
-/**
- * Find element using multiple selectors
- */
-function findElement(selectors: string): HTMLElement | null {
-  const selectorList = selectors.split(', ');
-  for (const selector of selectorList) {
+  // Log storage for polling
+  window.__SNAPPY_LOGS__ = window.__SNAPPY_LOGS__ || [];
+  
+  function log(msg) {
+    console.log('[Snappy] ' + msg);
+    window.__SNAPPY_LOGS__.push(msg);
+    if (window.__SNAPPY_LOGS__.length > 50) {
+      window.__SNAPPY_LOGS__ = window.__SNAPPY_LOGS__.slice(-50);
+    }
+  }
+  
+  function sleep(ms) {
+    return new Promise(r => setTimeout(r, ms));
+  }
+  
+  // ============ MEMORY SYSTEM (localStorage) ============
+  const MEMORY_KEY = 'snappy_memories';
+  
+  // Load all memories from localStorage
+  function loadAllMemories() {
     try {
-      const el = document.querySelector(selector) as HTMLElement;
-      if (el) return el;
-    } catch (e) { /* invalid selector */ }
+      const data = localStorage.getItem(MEMORY_KEY);
+      return data ? JSON.parse(data) : {};
+    } catch (e) {
+      log('Error loading memories: ' + e);
+      return {};
+    }
   }
-  return null;
-}
-
-/**
- * Find all elements using multiple selectors
- */
-function findAllElements(selectors: string): HTMLElement[] {
-  const selectorList = selectors.split(', ');
-  const results: HTMLElement[] = [];
-  for (const selector of selectorList) {
+  
+  // Save all memories to localStorage
+  function saveAllMemories(memories) {
     try {
-      document.querySelectorAll(selector).forEach(el => results.push(el as HTMLElement));
-    } catch (e) { /* invalid selector */ }
-  }
-  return results;
-}
-
-
-/**
- * Clean username by removing status suffixes, emojis, and corrupted unicode
- */
-function cleanUsername(rawName: string): string {
-  if (!rawName) return 'Unknown';
-
-  let cleaned = rawName.trim();
-
-  // Remove emojis and unicode symbols (including corrupted ones like ≡ƒÿè)
-  // This regex removes most emoji ranges and special unicode characters
-  cleaned = cleaned
-    .replace(/[\u{1F300}-\u{1F9FF}]/gu, '') // Emojis
-    .replace(/[\u{2600}-\u{26FF}]/gu, '')   // Misc symbols
-    .replace(/[\u{2700}-\u{27BF}]/gu, '')   // Dingbats
-    .replace(/[≡ƒÿè]+/g, '')                // Common corrupted emoji patterns
-    .replace(/[\x00-\x1F\x7F]/g, '')        // Control characters
-    .trim();
-
-  // Status suffixes to remove (case-insensitive)
-  const statusSuffixes = [
-    'typing',
-    'typing...',
-    'typing…',
-    'delivered',
-    'read',
-    'received',
-    'opened',
-    'sent',
-    'viewed',
-    'online',
-    'offline',
-    'active now',
-    'just now',
-    'new chat',
-    'new snap',
-  ];
-
-  // Remove status suffixes from the end
-  for (const suffix of statusSuffixes) {
-    const regex = new RegExp(`\\s+${suffix}\\s*$`, 'i');
-    cleaned = cleaned.replace(regex, '');
-  }
-
-  // Handle cases where status might be separated by newline
-  const parts = cleaned.split(/[\n\r]+/);
-  if (parts.length > 0) {
-    cleaned = parts[0].trim();
-  }
-
-  // Remove any trailing timestamps like "2m", "5h", "1d"
-  cleaned = cleaned.replace(/\s+\d+[smhd]\s*$/i, '');
-
-  return cleaned || 'Unknown';
-}
-
-/**
- * Get current conversation's sender name
- */
-function getCurrentSender(): string {
-  // Try to get from conversation header
-  const header = findElement(SNAPCHAT_SELECTORS.conversationHeader);
-  if (header) {
-    const nameEl = header.querySelector(SNAPCHAT_SELECTORS.senderName.split(', ').join(', '));
-    if (nameEl?.textContent) {
-      return cleanUsername(nameEl.textContent);
+      localStorage.setItem(MEMORY_KEY, JSON.stringify(memories));
+    } catch (e) {
+      log('Error saving memories: ' + e);
     }
   }
   
-  // Fallback: look for any visible username
-  const nameEl = findElement(SNAPCHAT_SELECTORS.senderName);
-  if (nameEl?.textContent) {
-    return cleanUsername(nameEl.textContent);
-  }
-  
-  return 'Unknown';
-}
-
-/**
- * Check if text is a Snapchat UI/status element (not a real message)
- */
-function isStatusOrUIText(text: string): boolean {
-  const lowerText = text.toLowerCase().trim();
-  
-  // Exact match status keywords
-  const exactStatusKeywords = [
-    'opened', 'typing', 'typing...', 'received', 'delivered', 'viewed', 'sent',
-    'new chat', 'snap', 'screenshot', 'chat', 'opened snap', 'new snap',
-    'streaks', 'streak', 'tap to chat', 'tap to view', 'double tap to like',
-    'say something...', 'send a message', 'type a message', 'send a chat',
-    'spotlight', 'stories', 'discover', 'map', 'memories', 'camera',
-    'add friends', 'my ai', 'team snapchat', 'just now', 'today', 'yesterday'
-  ];
-  
-  if (exactStatusKeywords.includes(lowerText)) {
-    return true;
-  }
-  
-  // Partial match patterns for status text
-  const statusPatterns = [
-    /^typing\.{0,3}$/i,           // "Typing", "Typing...", "Typing..."
-    /^opened\s/i,                  // "Opened 2m ago"
-    /^delivered\s/i,               // "Delivered 5m ago"
-    /^received\s/i,                // "Received just now"
-    /^sent\s/i,                    // "Sent 1h ago"
-    /^viewed\s/i,                  // "Viewed"
-    /^\d+[smhd]\s*(ago)?$/i,       // "2m ago", "5h", "1d ago"
-    /^\d+:\d+\s*(am|pm)?$/i,       // "2:30 PM", "14:30"
-    /^(mon|tue|wed|thu|fri|sat|sun)/i,  // Day names
-    /^(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)/i,  // Month names
-    /^new\s+(chat|snap|message)/i, // "New chat", "New snap"
-    /^tap\s+to\s+/i,               // "Tap to view", "Tap to chat"
-    /^double\s+tap/i,              // "Double tap to..."
-    /^swipe\s+/i,                  // "Swipe to..."
-    /^reply\s+to\s+/i,             // "Reply to..."
-    /^\d+\s*(new\s+)?(message|chat|snap)/i,  // "3 new messages"
-    /^(chat|snap)\s+opened/i,      // "Chat opened"
-    /screenshot/i,                 // Any screenshot mention
-    /streak/i,                     // Any streak mention
-  ];
-  
-  for (const pattern of statusPatterns) {
-    if (pattern.test(lowerText)) {
-      return true;
+  // Get memory for a specific user
+  function getUserMemory(username) {
+    const memories = loadAllMemories();
+    if (!memories[username]) {
+      memories[username] = {
+        username: username,
+        messages: [],
+        firstSeen: Date.now(),
+        lastSeen: Date.now()
+      };
+      saveAllMemories(memories);
     }
+    return memories[username];
   }
   
-  // Skip if it's just timestamps, emojis, or very short
-  if (/^[\d:.\s]+$/.test(text)) return true;  // Only numbers/time
-  if (/^[^\w\s]*$/.test(text)) return true;   // Only symbols/emoji
-  if (text.length < 2) return true;            // Too short
-  
-  // Skip partial/incomplete messages (ends with "..." and is short)
-  if (text.endsWith('...') && text.length < 25) return true;
-  
-  return false;
-}
-
-/**
- * Get all messages in current conversation
- * NEW APPROACH: Messages are in <li> elements, grouped by sender
- */
-function getConversationMessages(): { text: string; isIncoming: boolean }[] {
-  const messages: { text: string; isIncoming: boolean }[] = [];
-
-  // Find ALL ul.ujRzj elements (there's one per conversation)
-  const allMessageLists = Array.from(document.querySelectorAll('ul.ujRzj'));
-  snapLog(`Found ${allMessageLists.length} ul.ujRzj elements`);
-
-  // Find the VISIBLE one (the active conversation)
-  // Look for the one with the most visible content or that's currently scrollable
-  let messageList: Element | null = null;
-
-  for (const ul of allMessageLists) {
-    const rect = ul.getBoundingClientRect();
-    // Check if this ul is visible (has dimensions and is in viewport)
-    if (rect.width > 0 && rect.height > 100) {
-      messageList = ul;
-      snapLog(`Found visible message list: width=${rect.width.toFixed(0)}px, height=${rect.height.toFixed(0)}px`);
-      break;
+  // Add a message to user's memory
+  function addToMemory(username, text, isFromThem) {
+    const memories = loadAllMemories();
+    if (!memories[username]) {
+      memories[username] = {
+        username: username,
+        messages: [],
+        firstSeen: Date.now(),
+        lastSeen: Date.now()
+      };
     }
-  }
-
-  // Fallback: Just use the first one with messages
-  if (!messageList && allMessageLists.length > 0) {
-    for (const ul of allMessageLists) {
-      if (ul.querySelectorAll('li').length > 0) {
-        messageList = ul;
-        snapLog(`Using first ul.ujRzj with messages as fallback`);
-        break;
-      }
+    
+    // Add the message
+    memories[username].messages.push({
+      text: text,
+      from: isFromThem ? 'them' : 'me',
+      timestamp: Date.now()
+    });
+    
+    // Keep only last 100 messages per user
+    if (memories[username].messages.length > 100) {
+      memories[username].messages = memories[username].messages.slice(-100);
     }
-  }
-
-  if (!messageList) {
-    snapLog('ERROR: Could not find any visible message list');
-    return messages;
-  }
-
-  // Get all top-level <li> elements (each represents a message group)
-  const messageGroups = Array.from(messageList.querySelectorAll(':scope > li'));
-  snapLog(`Found ${messageGroups.length} message groups in active conversation`);
-
-  for (const group of messageGroups) {
-    // Check if this group has a header (indicates sender)
-    const header = group.querySelector('header.R1ne3');
-
-    let isOutgoing = false;
-    let isIncoming = false;
-
-    if (header) {
-      // Has header - determine sender
-      // Check if header contains a span with class "nonIntl" that says exactly "Me"
-      const meSpan = header.querySelector('span.nonIntl');
-      const senderName = meSpan?.textContent?.trim() || '';
-
-      // HARDCODED: If sender is exactly "Me", it's our message (outgoing)
-      // Otherwise, it's from someone else (incoming)
-      if (senderName === 'Me') {
-        isOutgoing = true;
-        isIncoming = false;
-        snapLog(`Message group from: "Me" [OUTGOING]`);
-      } else {
-        isOutgoing = false;
-        isIncoming = true;
-        snapLog(`Message group from: "${senderName}" [INCOMING]`);
-      }
-    }
-
-    // Now find all individual messages in this group
-    // Messages are in <div class="KB4Aq"> elements
-    const messageDivs = Array.from(group.querySelectorAll('div.KB4Aq'));
-
-    for (const msgDiv of messageDivs) {
-      // Get the actual text content from span.ogn1z
-      const textSpan = msgDiv.querySelector('span.ogn1z');
-      if (!textSpan) continue;
-
-      const text = textSpan.textContent?.trim() || '';
-      if (!text || text.length < MIN_MESSAGE_LENGTH) continue;
-
-      // Skip status/UI text
-      if (isStatusOrUIText(text)) continue;
-
-      // If we still don't know direction, use visual positioning
-      if (!isIncoming && !isOutgoing) {
-        const rect = msgDiv.getBoundingClientRect();
-        const windowWidth = window.innerWidth;
-        const messageCenter = (rect.left + rect.right) / 2;
-        const screenCenter = windowWidth / 2;
-        const threshold = windowWidth * 0.1;
-
-        if (messageCenter < screenCenter - threshold) {
-          isIncoming = true;
-        } else if (messageCenter > screenCenter + threshold) {
-          isOutgoing = true;
-        } else {
-          snapLog(`  -> Skipping message with unknown direction: "${text.substring(0, 30)}..."`);
-          continue;
-        }
-      }
-
-      const direction = isIncoming ? 'INCOMING' : 'OUTGOING';
-      snapLog(`  -> ${direction}: "${text}"`);
-      messages.push({ text, isIncoming });
-    }
-  }
-
-  snapLog(`Total messages collected: ${messages.length}`);
-  return messages;
-}
-
-/**
- * Get the latest incoming message that we haven't replied to yet
- * Looks for the most recent incoming message, even if we've sent messages after it
- */
-function getLatestIncomingMessage(): string | null {
-  const messages = getConversationMessages();
-  
-  if (messages.length === 0) {
-    return null;
+    
+    memories[username].lastSeen = Date.now();
+    saveAllMemories(memories);
+    
+    log('Memory saved for ' + username + ': ' + (isFromThem ? 'THEM' : 'ME') + ' - "' + text.substring(0, 30) + '..."');
   }
   
-  // Find the last incoming message
-  // We iterate backwards to find the most recent one
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const msg = messages[i];
-    if (msg.isIncoming) {
-      // Found an incoming message - check if we've already processed it
-      const msgId = `${getCurrentSender()}-${msg.text.substring(0, 100)}`;
-      if (isMessageSeen(msgId)) {
-        snapLog('Latest incoming message already processed');
-        return null;
-      }
-      
-      snapLog(`Found latest incoming message: "${msg.text.substring(0, 50)}..."`);
-      return msg.text;
-    }
-  }
-  
-  snapLog('No incoming messages found in conversation');
-  return null;
-}
-
-/**
- * Generate a summary of the conversation
- */
-function generateConversationSummary(memory: ConversationMemory): string {
-  const recentMessages = memory.messages.slice(-10); // Last 10 messages
-  
-  if (recentMessages.length === 0) {
-    return 'No conversation history yet.';
-  }
-  
-  const topics: string[] = [];
-  const incomingTexts = recentMessages.filter(m => m.isIncoming).map(m => m.text.toLowerCase());
-  
-  // Simple topic extraction
-  if (incomingTexts.some(t => t.includes('?'))) topics.push('asking questions');
-  if (incomingTexts.some(t => t.includes('hi') || t.includes('hey') || t.includes('hello'))) topics.push('greeting');
-  if (incomingTexts.some(t => t.includes('how are') || t.includes('what\'s up'))) topics.push('checking in');
-  if (incomingTexts.some(t => t.includes('thanks') || t.includes('thank you'))) topics.push('expressing gratitude');
-  
-  const summary = `${memory.sender}: ${recentMessages.length} messages. Topics: ${topics.length > 0 ? topics.join(', ') : 'general chat'}. Last message: "${recentMessages[recentMessages.length - 1]?.text.substring(0, 50)}..."`;
-  
-  return summary;
-}
-
-/**
- * Update conversation memory for a sender
- */
-function updateConversationMemory(sender: string, messages: { text: string; isIncoming: boolean }[]): void {
-  let memory = conversationMemories.get(sender);
-  
-  if (!memory) {
-    memory = {
-      sender,
-      messages: [],
-      summary: '',
-      lastUpdated: Date.now()
+  // Get conversation summary for a user
+  function getMemorySummary(username) {
+    const memory = getUserMemory(username);
+    const msgCount = memory.messages.length;
+    const theirMsgs = memory.messages.filter(m => m.from === 'them').length;
+    const myMsgs = memory.messages.filter(m => m.from === 'me').length;
+    
+    // Get last few messages for context
+    const recent = memory.messages.slice(-5).map(m => 
+      (m.from === 'them' ? 'Them: ' : 'Me: ') + m.text.substring(0, 50)
+    ).join(' | ');
+    
+    return {
+      total: msgCount,
+      fromThem: theirMsgs,
+      fromMe: myMsgs,
+      recent: recent,
+      firstSeen: memory.firstSeen,
+      lastSeen: memory.lastSeen
     };
   }
   
-  // Filter and deduplicate messages before adding
-  const now = Date.now();
-  const existingTexts = new Set(memory.messages.map(m => m.text.toLowerCase().trim()));
-  
-  for (const msg of messages) {
-    // Skip status/UI text
-    if (isStatusOrUIText(msg.text)) {
-      continue;
-    }
-    
-    // Skip duplicates
-    const normalizedText = msg.text.toLowerCase().trim();
-    if (existingTexts.has(normalizedText)) {
-      continue;
-    }
-    
-    // Skip very short messages
-    if (msg.text.length < MIN_MESSAGE_LENGTH) {
-      continue;
-    }
-    
-    memory.messages.push({ ...msg, timestamp: now });
-    existingTexts.add(normalizedText);
+  // List all users in memory
+  function listAllUsers() {
+    const memories = loadAllMemories();
+    return Object.keys(memories);
   }
   
-  // Keep only last 50 messages
-  if (memory.messages.length > 50) {
-    memory.messages = memory.messages.slice(-50);
+  // Expose memory functions globally for UI access
+  window.__SNAPPY_MEMORY__ = {
+    getUser: getUserMemory,
+    addMessage: addToMemory,
+    getSummary: getMemorySummary,
+    listUsers: listAllUsers,
+    loadAll: loadAllMemories
+  };
+  
+  // ============ END MEMORY SYSTEM ============
+  
+  // Scan the DOM to find clickable chat items
+  // SNAPCHAT USES: .O4POs for each chat row
+  function findClickableChats() {
+    // EXACT SELECTOR: .O4POs = every chat row in sidebar
+    const chatRows = Array.from(document.querySelectorAll('.O4POs'));
+    log('Found ' + chatRows.length + ' chat rows (.O4POs)');
+    return chatRows;
   }
   
-  // Update summary
-  memory.summary = generateConversationSummary(memory);
-  memory.lastUpdated = now;
-  
-  conversationMemories.set(sender, memory);
-  snapLog(`Memory updated for ${sender}: ${memory.messages.length} valid messages`);
-}
+  // Check if a chat has a new INCOMING message (not our outgoing "Delivered" messages)
+  // SNAPCHAT USES:
+  //   .qFDXZ class on .O4POs = unread message
+  //   .GQKvA span = message status ("Received", "Sent", "Delivered", etc.)
+  function isNewIncomingChat(element) {
+    // STEP 0: Block Snapchat official accounts
+    const username = getUsernameFromChatRow(element);
+    if (username) {
+      const usernameLower = username.toLowerCase();
 
-/**
- * Get memory for a sender
- */
-function getConversationMemory(sender: string): ConversationMemory | null {
-  return conversationMemories.get(sender) || null;
-}
+      // Block list: Snapchat official accounts
+      const blockedAccounts = [
+        'my ai',
+        'team snapchat',
+        'snapchat',
+        'snapchat support',
+        'snapchat team'
+      ];
 
+      for (const blocked of blockedAccounts) {
+        if (usernameLower.includes(blocked)) {
+          log('Skipping blocked account: "' + username + '"');
+          return false;
+        }
+      }
+    }
 
-/**
- * Check if a chat preview indicates a NEW incoming message
- * Returns true only if:
- * - Shows "New Chat" text
- * - Has a blue/unread dot indicator
- * - Preview text suggests incoming (not "You:" or "Delivered")
- */
-function isNewIncomingChat(chatElement: HTMLElement): boolean {
-  const chatText = chatElement.textContent?.toLowerCase() || '';
-  const chatHtml = chatElement.innerHTML?.toLowerCase() || '';
-  
-  // Check for explicit "new chat" or "new snap" indicators
-  if (chatText.includes('new chat') || chatText.includes('new snap')) {
-    snapLog('Found "new chat" indicator');
+    // STEP 1: MUST have unread indicator - this is the PRIMARY requirement
+    // .qFDXZ = unread class on chat row
+    const isUnread = element.classList.contains('qFDXZ');
+
+    // STEP 2: Check for "New Chat" or "New Snap" status text (also indicates unread)
+    const chatText = (element.textContent || '').toLowerCase();
+    const hasNewChatText = chatText.includes('new chat') || chatText.includes('new snap');
+
+    // STEP 3: Check for unread badge/indicator element
+    const hasUnreadBadge = element.querySelector('.HEkDJ') !== null ||
+                          element.querySelector('[class*="badge"]') !== null;
+
+    // MUST have at least one unread indicator
+    if (!isUnread && !hasNewChatText && !hasUnreadBadge) {
+      return false;
+    }
+
+    if (isUnread) {
+      log('Chat has unread indicator (.qFDXZ)');
+    }
+    if (hasNewChatText) {
+      log('Chat has "new chat" text');
+    }
+    if (hasUnreadBadge) {
+      log('Chat has unread badge element');
+    }
+
+    // STEP 4: Check the message status - must NOT be an outgoing status or already-handled status
+    const statusSpan = element.querySelector('.GQKvA .tGtEY .nonIntl') || element.querySelector('.GQKvA');
+    if (statusSpan) {
+      const status = statusSpan.textContent.trim().toLowerCase();
+      log('Message status: "' + status + '"');
+
+      // CRITICAL: Skip BOTH outgoing statuses AND already-received statuses
+      // Outgoing = we sent it to them
+      // Received/Delivered = either we got their message OR they got ours (ambiguous!)
+      const skipStatuses = [
+        'delivered',   // Message was delivered (either direction - skip to be safe)
+        'sent',        // We sent a message
+        'opened',      // They opened our message
+        'viewed',      // They viewed our message
+        'screenshot',  // They screenshotted
+        'replayed',    // They replayed
+        'received'     // Message received (either direction - skip to be safe)
+      ];
+
+      if (skipStatuses.includes(status)) {
+        log('Skipping - status "' + status + '" indicates already-handled or outgoing message');
+        return false;
+      }
+
+      // ONLY accept clearly new/incoming statuses
+      const acceptedStatuses = [
+        'typing',
+        'typing...',
+        'typing…',
+        'new chat',
+        'new snap'
+      ];
+
+      if (acceptedStatuses.some(s => status.includes(s))) {
+        log('Status "' + status + '" with unread indicator = NEW incoming message');
+        return true;
+      }
+
+      // If status is not in skip list OR accept list, log and skip to be safe
+      log('Unknown status "' + status + '" - skipping to be safe');
+      return false;
+    }
+
+    // Has unread indicator but no status - accept as incoming (might be a new message loading)
+    log('Has unread indicator but no status - assuming incoming');
     return true;
   }
   
-  // Check for unread badge/dot (blue indicator)
-  const hasUnreadBadge = chatElement.querySelector('[class*="unread"], [class*="Unread"], [class*="badge"], [class*="Badge"], [class*="dot"], [class*="Dot"]') !== null;
-  const hasUnreadClass = chatElement.className.toLowerCase().includes('unread');
-  
-  if (!hasUnreadBadge && !hasUnreadClass) {
-    return false; // No unread indicator at all
-  }
-  
-  snapLog('Found unread indicator on chat');
-  
-  // Check if the preview shows it's from US (outgoing) - skip these
-  // Snapchat shows "You:" or "Delivered" or "Sent" for outgoing messages
-  const outgoingIndicators = ['you:', 'delivered', 'sent', 'opened', 'viewed'];
-  for (const indicator of outgoingIndicators) {
-    if (chatText.includes(indicator)) {
-      snapLog(`Skipping - preview shows outgoing indicator: "${indicator}"`);
-      return false; // This is showing our last message, not theirs
-    }
-  }
-  
-  // Has unread indicator and doesn't look like our outgoing message
-  snapLog('Chat appears to have new incoming message');
-  return true;
-}
+  // Debug function to analyze a chat element
+  function debugChatElement(element, index) {
+    const text = (element.textContent || '').substring(0, 50);
+    const cls = (element.className || '').substring(0, 50);
 
-/**
- * Find chats with unread messages
- */
-function findUnreadChats(): HTMLElement[] {
-  const chatItems = findAllElements(SNAPCHAT_SELECTORS.chatListItem);
-  const unreadChats: HTMLElement[] = [];
-  
-  for (const item of chatItems) {
-    // Skip chats that look like My AI or system accounts
-    const chatText = item.textContent?.toLowerCase() || '';
-    if (chatText.includes('my ai') || chatText.includes('team snapchat') || chatText.includes('snapchat')) {
-      continue;
-    }
-    
-    // Only include if it's actually a NEW incoming message
-    if (isNewIncomingChat(item)) {
-      unreadChats.push(item);
-    }
+    // Check key indicators
+    const hasQFDXZ = element.classList.contains('qFDXZ');
+    const username = getUsernameFromChatRow(element);
+    const statusSpan = element.querySelector('.GQKvA');
+    const status = statusSpan ? statusSpan.textContent.trim() : 'none';
+
+    log('Chat ' + index + ': user="' + (username || 'unknown') + '" status="' + status + '" unread=' + hasQFDXZ);
+    log('  Text: "' + text + '"');
+    log('  Classes: "' + cls + '"');
   }
   
-  return unreadChats;
-}
-
-/**
- * Navigate back to the main Snapchat homepage/chat list
- */
-async function navigateToHomepage(): Promise<boolean> {
-  try {
-    snapLog('Navigating back to homepage...');
+  // Find the input field
+  function findInput() {
+    // Try contenteditable first
+    let input = document.querySelector('[contenteditable="true"]');
+    if (input) return input;
     
-    // Method 1: Look for a back button or close button in the conversation header
-    const conversationHeader = findElement(SNAPCHAT_SELECTORS.conversationHeader);
-    if (conversationHeader) {
-      const backBtn = conversationHeader.querySelector('[aria-label*="Back"], [aria-label*="Close"], button[class*="back"]') as HTMLElement;
-      if (backBtn && backBtn.offsetParent !== null) {
-        backBtn.click();
-        snapLog('Clicked back button in conversation header');
-        await sleep(1500);
-        return true;
-      }
-    }
+    // Try textarea
+    input = document.querySelector('textarea');
+    if (input) return input;
     
-    // Method 2: Press Escape key to close current view
-    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', keyCode: 27, bubbles: true }));
-    document.dispatchEvent(new KeyboardEvent('keyup', { key: 'Escape', keyCode: 27, bubbles: true }));
-    snapLog('Pressed Escape to close conversation');
-    await sleep(1000);
+    // Try input
+    input = document.querySelector('input[type="text"]');
+    if (input) return input;
     
-    // Method 3: Click on the Snapchat logo/brand area (usually top-left)
-    const logoSelectors = [
-      '[aria-label*="Snapchat"]',
-      'svg[class*="logo"]',
-      '[class*="Logo"]',
-      'header [class*="brand"]',
-      'nav [class*="logo"]'
+    return null;
+  }
+  
+  // Find send button
+  function findSendButton() {
+    // Try various selectors
+    const selectors = [
+      'button[type="submit"]',
+      'button[aria-label*="Send"]',
+      'button[aria-label*="send"]',
+      '[class*="send" i]',
+      '[class*="Send"]'
     ];
     
-    for (const selector of logoSelectors) {
-      const logo = document.querySelector(selector) as HTMLElement;
-      if (logo && logo.offsetParent !== null) {
-        logo.click();
-        snapLog('Clicked Snapchat logo to return to homepage');
-        await sleep(1500);
-        return true;
+    for (const sel of selectors) {
+      try {
+        const btn = document.querySelector(sel);
+        if (btn) return btn;
+      } catch(e) {}
+    }
+    
+    // Look for button with send icon or text
+    const buttons = document.querySelectorAll('button');
+    for (const btn of buttons) {
+      const text = (btn.textContent || '').toLowerCase();
+      const ariaLabel = (btn.getAttribute('aria-label') || '').toLowerCase();
+      if (text.includes('send') || ariaLabel.includes('send')) {
+        return btn;
       }
     }
     
-    // Method 4: Click on an empty area of the chat list (but avoid "My AI")
-    const chatListContainer = findElement(SNAPCHAT_SELECTORS.chatListContainer);
-    if (chatListContainer) {
-      // Find a safe area to click that's not on "My AI" or any specific chat
-      const rect = chatListContainer.getBoundingClientRect();
-      
-      // Click near the top of the chat list, but not on the first item (which might be My AI)
-      const clickX = rect.left + rect.width * 0.3; // 30% from left edge
-      const clickY = rect.top + 30; // 30px from top
-      
-      // Make sure we're not clicking on any chat item
-      const elementAtPoint = document.elementFromPoint(clickX, clickY);
-      const chatItem = elementAtPoint?.closest(SNAPCHAT_SELECTORS.chatListItem);
-      
-      if (!chatItem) {
-        const clickEvent = new MouseEvent('click', {
-          bubbles: true,
-          clientX: clickX,
-          clientY: clickY
-        });
-        chatListContainer.dispatchEvent(clickEvent);
-        snapLog('Clicked on empty area of chat list');
-        await sleep(1000);
-      }
-    }
-    
-    // Method 5: Try to find and click a "Chats" or "Messages" tab/button
-    const chatsTabSelectors = [
-      '[aria-label*="Chats"]',
-      '[aria-label*="Messages"]',
-      'button[class*="chat"]',
-      '[data-testid*="chat"]',
-      'nav button:first-child' // Often the first nav button is "Chats"
+    return null;
+  }
+  
+  // Track messages we've sent to avoid replying to ourselves
+  const sentMessages = new Set();
+  
+  // Check if text looks like a status/UI element
+  function isStatusText(text) {
+    const lower = text.toLowerCase().trim();
+    const statusWords = [
+      'typing', 'delivered', 'opened', 'received', 'sent', 'viewed',
+      'new chat', 'new snap', 'streak', 'screenshot', 'tap to',
+      'swipe', 'double tap', 'just now', 'today', 'yesterday',
+      'spotlight', 'stories', 'discover', 'map', 'camera'
     ];
     
-    for (const selector of chatsTabSelectors) {
-      const chatsTab = document.querySelector(selector) as HTMLElement;
-      if (chatsTab && chatsTab.offsetParent !== null) {
-        // Make sure it's not "My AI" by checking text content
-        const text = chatsTab.textContent?.toLowerCase() || '';
-        if (!text.includes('ai') && !text.includes('my ai')) {
-          chatsTab.click();
-          snapLog('Clicked Chats tab to return to homepage');
-          await sleep(1500);
-          return true;
+    // Exact matches
+    if (statusWords.includes(lower)) return true;
+    
+    // Partial matches for short text
+    if (text.length < 20) {
+      for (const word of statusWords) {
+        if (lower.includes(word)) return true;
+      }
+    }
+    
+    // Timestamps
+    if (/^\\d{1,2}:\\d{2}/.test(text)) return true;
+    if (/^\\d+[smhd]\\s*(ago)?$/i.test(text)) return true;
+    
+    return false;
+  }
+  
+  // Get visible text content from chat area
+  // expectedSender: The username we expect to see (to verify we're not reading stale cache)
+  function getVisibleMessages(expectedSender) {
+    const messages = [];
+    let detectedSender = null;
+
+    // SNAPCHAT MESSAGE STRUCTURE:
+    // <ul class="MibAa"> (main container)
+    //   <li class="T1yt2"> (date group - e.g. "December 4")
+    //     <div>
+    //       <ul class="ujRzj"> (messages for that date)
+    //   <li class="T1yt2"> (LAST = most recent date!)
+    //     <div>
+    //       <ul class="ujRzj"> (NEWEST messages - this is what we want!)
+
+    // STEP 1: Find the main container (ul.MibAa)
+    const mainContainer = document.querySelector('ul.MibAa');
+    let messageList = null;
+
+    if (mainContainer) {
+      log('Found main container (ul.MibAa)');
+
+      // STEP 2: Get ALL <li class="T1yt2"> (these can be date headers OR message groups)
+      const allDateGroups = Array.from(mainContainer.querySelectorAll(':scope > li.T1yt2'));
+      log('Found ' + allDateGroups.length + ' li.T1yt2 elements');
+
+      // Filter to only those that have ul.ujRzj (actual message groups, not just date headers)
+      const messageGroups = allDateGroups.filter(li => li.querySelector('ul.ujRzj') !== null);
+      log('Filtered to ' + messageGroups.length + ' groups with messages');
+
+      if (messageGroups.length > 0) {
+        // Get the LAST message group
+        const lastGroup = messageGroups[messageGroups.length - 1];
+        log('Using LAST message group (index ' + (messageGroups.length - 1) + ')');
+
+        // DEBUG: Show what's in this group
+        const header = lastGroup.querySelector('header.R1ne3 span.nonIntl');
+        const sender = header ? header.textContent.trim() : 'unknown';
+        log('  Sender in last group: "' + sender + '"');
+
+        // STEP 3: Find ul.ujRzj inside this last group
+        const nestedUl = lastGroup.querySelector('ul.ujRzj');
+        if (nestedUl) {
+          messageList = nestedUl;
+          const msgCount = nestedUl.querySelectorAll(':scope > li').length;
+          log('  Found ul.ujRzj with ' + msgCount + ' messages');
+        } else {
+          log('WARNING: No ul.ujRzj found in last group!');
+        }
+      }
+    } else {
+      log('Main container (ul.MibAa) not found, trying fallback...');
+
+      // FALLBACK: Find largest visible ul.ujRzj (old method)
+      const allMessageLists = Array.from(document.querySelectorAll('ul.ujRzj'));
+      log('Found ' + allMessageLists.length + ' ul.ujRzj elements (fallback)');
+
+      let maxArea = 0;
+      for (const ul of allMessageLists) {
+        const rect = ul.getBoundingClientRect();
+        const area = rect.width * rect.height;
+
+        if (rect.width > 0 && rect.height > 200 && area > maxArea) {
+          const isInViewport = rect.top < window.innerHeight && rect.bottom > 0 &&
+                              rect.left < window.innerWidth && rect.right > 0;
+          if (isInViewport) {
+            messageList = ul;
+            maxArea = area;
+          }
+        }
+      }
+    }
+
+    if (!messageList) {
+      log('ERROR: Could not find any visible message list');
+      return messages;
+    }
+
+    // DEBUG: Log details about the selected message list
+    const listItemCount = messageList.querySelectorAll(':scope > li').length;
+    log('Selected message list with ' + listItemCount + ' message items');
+
+    // The messageList is now always a ul.ujRzj (nested), so process its direct <li> children
+    let messagesToProcess = [];
+    const messageItems = Array.from(messageList.querySelectorAll(':scope > li'));
+
+    for (const item of messageItems) {
+      messagesToProcess.push({
+        group: messageList.closest('li.T1yt2') || messageList.parentElement,
+        item: item,
+        index: messagesToProcess.length
+      });
+    }
+
+    // OLD FALLBACK CODE (kept for reference, but shouldn't be needed now)
+    if (messagesToProcess.length === 0) {
+      // messageList is the main container, need to find nested ul.ujRzj inside <li class="T1yt2">
+      const allTopLevelLis = Array.from(messageList.querySelectorAll(':scope > li.T1yt2, :scope > li'));
+      log('Found ' + allTopLevelLis.length + ' top-level message groups');
+      
+      if (allTopLevelLis.length === 0) {
+        log('No message groups found');
+        return messages;
+      }
+
+      // ONLY process the LAST 2 top-level groups (most recent messages)
+      // Each group is usually a date section (e.g., "December 5")
+      const groupsToCheck = Math.min(2, allTopLevelLis.length);
+      log('Processing last ' + groupsToCheck + ' message groups (most recent)');
+
+      for (let i = allTopLevelLis.length - 1; i >= allTopLevelLis.length - groupsToCheck; i--) {
+        const group = allTopLevelLis[i];
+        
+        // Within each group, find the nested <ul class="ujRzj"> inside a <div>
+        // Structure: <li class="T1yt2"> -> <div> -> <ul class="ujRzj"> -> <li> (messages)
+        let nestedUl = null;
+        
+        // Look for divs that contain ul.ujRzj
+        const divs = group.querySelectorAll('div');
+        for (const div of divs) {
+          // Check if this div has a direct child ul.ujRzj
+          const directUl = Array.from(div.children).find(child => 
+            child.tagName === 'UL' && child.classList.contains('ujRzj')
+          );
+          if (directUl) {
+            nestedUl = directUl;
+            log('Group ' + i + ': Found nested ul.ujRzj as direct child of div');
+            break;
+          }
+        }
+        
+        // If not found, look for any ul.ujRzj within the group
+        if (!nestedUl) {
+          const allUls = Array.from(group.querySelectorAll('ul.ujRzj'));
+          for (const ul of allUls) {
+            // Verify it's nested (inside a div within the group)
+            const parentDiv = ul.closest('div');
+            if (parentDiv && group.contains(parentDiv)) {
+              nestedUl = ul;
+              log('Group ' + i + ': Found nested ul.ujRzj via querySelector');
+              break;
+            }
+          }
+        }
+        
+        if (nestedUl) {
+          const nestedLis = Array.from(nestedUl.querySelectorAll(':scope > li'));
+          log('Group ' + i + ': Found nested ul.ujRzj with ' + nestedLis.length + ' message items');
+          
+          // Process each nested <li> in this group
+          for (const nestedLi of nestedLis) {
+            messagesToProcess.push({ group: group, item: nestedLi, index: messagesToProcess.length });
+          }
+        } else {
+          // Check if this group has a direct message bubble (no nested ul)
+          const directBubble = group.querySelector('div.KB4Aq');
+          if (directBubble) {
+            log('Group ' + i + ': Found direct message bubble (no nested ul)');
+            messagesToProcess.push({ group: group, item: group, index: messagesToProcess.length, isDirect: true });
+          }
         }
       }
     }
     
-    snapLog('Successfully attempted to navigate to homepage');
-    return true;
-  } catch (e) {
-    snapLog(`Error navigating to homepage: ${e}`);
-    return false;
-  }
-}
+    log('Total messages to process: ' + messagesToProcess.length);
 
-/**
- * Ensure the chat is still open and focused
- * Re-clicks the chat element if needed
- */
-async function ensureChatIsOpen(chatElement: HTMLElement, expectedSender: string): Promise<boolean> {
-  // Check if we're still in the correct conversation
-  const currentSender = getCurrentSender();
-  
-  if (currentSender === expectedSender) {
-    // We're still in the right chat
-    snapLog(`Chat with ${expectedSender} is still open`);
-    return true;
+    // PRIORITY: Process ONLY the LAST group (most recent messages) first
+    // If the user just sent a message, we want to see their LATEST message, not old cached ones
+    if (messagesToProcess.length > 0) {
+      log('Prioritizing LAST message group (index ' + (messagesToProcess.length - 1) + ') as most recent');
+    }
+
+    // Process the last few messages (keep in chronological order: oldest -> newest)
+    messagesToProcess = messagesToProcess.slice(-5); // Get last 5 messages
+
+    for (const msgData of messagesToProcess) {
+      const messageItem = msgData.item;
+      const parentGroup = msgData.group;
+      
+      // Check if this message item or its parent group has a header (indicates sender)
+      const header = messageItem.querySelector('header.R1ne3') || parentGroup.querySelector('header.R1ne3');
+      
+      let isOutgoing = false;
+      let isIncoming = false;
+
+      if (header) {
+        // Has header - determine sender from header color and text
+        const headerStyle = window.getComputedStyle(header);
+        const headerColor = headerStyle.color || header.getAttribute('style') || '';
+        
+        // Check header color: blue typically means incoming, red might mean outgoing
+        // Also check the text content
+        const meSpan = header.querySelector('span.nonIntl');
+        const senderName = meSpan ? meSpan.textContent.trim() : '';
+        
+        // If sender is exactly "Me", it's our message (outgoing)
+        if (senderName === 'Me') {
+          isOutgoing = true;
+          isIncoming = false;
+          log('Message from header: "Me" [OUTGOING] color=' + headerColor);
+        } else if (senderName && senderName.length > 0) {
+          // Has a sender name that's not "Me", so it's incoming
+          isOutgoing = false;
+          isIncoming = true;
+
+          // Track the detected sender name
+          if (!detectedSender) {
+            detectedSender = senderName;
+          }
+
+          log('Message from header: "' + senderName + '" [INCOMING] color=' + headerColor);
+        } else {
+          // No sender name, use color as fallback
+          // Blue (rgb(14, 173, 255) or similar) usually means incoming
+          // Red (rgb(242, 60, 87)) means outgoing
+          const isBlue = headerColor.includes('rgb(14, 173, 255)') || headerColor.includes('rgb(14,173,255)') || 
+                        headerColor.includes('blue') || headerColor.includes('#0eadff');
+          const isRed = headerColor.includes('rgb(242, 60, 87)') || headerColor.includes('rgb(242,60,87)') ||
+                       headerColor.includes('red');
+          if (isBlue) {
+            isIncoming = true;
+            log('Message from header color: BLUE [INCOMING]');
+          } else if (isRed) {
+            isOutgoing = true;
+            log('Message from header color: RED [OUTGOING]');
+          }
+        }
+      }
+
+      // Find the actual message text in span.ogn1z.nonIntl (deep in nested structure)
+      // CRITICAL: Only look inside message bubbles (div.KB4Aq), NOT in headers
+      // The header has span.nonIntl with the username, but we want span.ogn1z inside div.KB4Aq
+      const messageBubbles = messageItem.querySelectorAll('div.KB4Aq');
+      const seenTexts = new Set();
+
+      if (messageBubbles.length === 0) {
+        log('No message bubbles found in this item');
+        continue;
+      }
+
+      for (const bubble of messageBubbles) {
+        // CRITICAL: Only look for message text in the specific path: div.KB4Aq > div.p8r1z > span.ogn1z.nonIntl
+        // This ensures we only get the actual message text, not header text
+        const p8r1zDiv = bubble.querySelector('div.p8r1z');
+        if (!p8r1zDiv) {
+          log('No div.p8r1z found in bubble, skipping');
+          continue;
+        }
+        
+        // Look specifically for span.ogn1z.nonIntl inside div.p8r1z
+        const messageTextSpans = p8r1zDiv.querySelectorAll('span.ogn1z.nonIntl[dir="auto"], span.ogn1z.nonIntl, span.ogn1z[dir="auto"]');
+        
+        if (messageTextSpans.length === 0) {
+          log('No span.ogn1z found in div.p8r1z');
+          continue;
+        }
+        
+        for (const span of messageTextSpans) {
+          // Triple-check: make sure this span is NOT inside a header (shouldn't be possible if we're in div.p8r1z, but be safe)
+          if (span.closest('header.R1ne3')) {
+            log('Skipping span inside header: "' + (span.textContent || '').substring(0, 20) + '"');
+            continue;
+          }
+          
+          // Make sure the span is actually inside the bubble we're processing
+          if (!bubble.contains(span)) {
+            log('Skipping span not in bubble');
+            continue;
+          }
+          
+          const text = span.textContent ? span.textContent.trim() : '';
+          
+          // Skip if empty
+          if (!text || text.length < 1) {
+            continue;
+          }
+          
+          // Skip very short text (1-2 characters) that might be usernames or single letters
+          if (text.length <= 2 && !text.match(/^[a-z]{2}$/i)) {
+            log('Skipping very short text (likely not a message): "' + text + '"');
+            continue;
+          }
+          
+          // Skip if already seen
+          if (seenTexts.has(text)) {
+            log('Skipping duplicate text: "' + text + '"');
+            continue;
+          }
+          
+          // Skip if status text
+          if (isStatusText(text)) {
+            log('Skipping status text: "' + text + '"');
+            continue;
+          }
+          
+          // Skip if this element has child elements with text (avoid duplicates)
+          const hasTextChildren = Array.from(span.children).some(child =>
+            child.textContent && child.textContent.trim().length > 0
+          );
+          if (hasTextChildren) {
+            log('Skipping span with text children: "' + text.substring(0, 30) + '"');
+            continue;
+          }
+
+          seenTexts.add(text);
+          
+          // If we determined direction from header, use it; otherwise check message bubble
+          let msgIsIncoming = isIncoming;
+          if (!isIncoming && !isOutgoing) {
+            // No header info, check the message bubble div.KB4Aq
+            const bubbleStyle = bubble.getAttribute('style') || '';
+            const bubbleColor = window.getComputedStyle(bubble).borderColor || '';
+            // Blue border (rgb(14, 173, 255)) usually means incoming
+            // Red border (rgb(242, 60, 87)) means outgoing
+            const isBlueBubble = bubbleStyle.includes('rgb(14, 173, 255)') || bubbleStyle.includes('rgb(14,173,255)') ||
+                                bubbleColor.includes('rgb(14, 173, 255)') || bubbleColor.includes('rgb(14,173,255)');
+            const isRedBubble = bubbleStyle.includes('rgb(242, 60, 87)') || bubbleStyle.includes('rgb(242,60,87)') ||
+                               bubbleColor.includes('rgb(242, 60, 87)') || bubbleColor.includes('rgb(242,60,87)');
+            if (isBlueBubble) {
+              msgIsIncoming = true;
+            } else if (isRedBubble) {
+              msgIsIncoming = false;
+            }
+          }
+          
+          const direction = msgIsIncoming ? 'INCOMING' : 'OUTGOING';
+          log('  -> ' + direction + ': "' + text + '"');
+          messages.push({ text, isIncoming: msgIsIncoming });
+        }
+      }
+    }
+
+    // If we didn't find messages, fall back to processing all groups more thoroughly
+    if (messages.length === 0) {
+      log('No messages found with new approach, processing all groups with fallback...');
+      for (const group of allTopLevelLis) {
+        // Find nested ul.ujRzj inside this group
+        const nestedUl = group.querySelector('div > ul.ujRzj, ul.ujRzj');
+        if (nestedUl) {
+          const nestedLis = Array.from(nestedUl.querySelectorAll(':scope > li'));
+          for (const nestedLi of nestedLis) {
+            const header = nestedLi.querySelector('header.R1ne3') || group.querySelector('header.R1ne3');
+            let isOutgoing = false;
+            let isIncoming = false;
+
+            if (header) {
+              const meSpan = header.querySelector('span.nonIntl');
+              const senderName = meSpan ? meSpan.textContent.trim() : '';
+              if (senderName === 'Me') {
+                isOutgoing = true;
+              } else if (senderName && senderName.length > 0) {
+                isIncoming = true;
+              } else {
+                // Check color
+                const headerColor = header.getAttribute('style') || '';
+                if (headerColor.includes('rgb(14, 173, 255)') || headerColor.includes('rgb(14,173,255)')) {
+                  isIncoming = true;
+                } else if (headerColor.includes('rgb(242, 60, 87)') || headerColor.includes('rgb(242,60,87)')) {
+                  isOutgoing = true;
+                }
+              }
+            }
+
+            // Only look inside message bubbles, not headers
+            const messageBubbles = nestedLi.querySelectorAll('div.KB4Aq');
+            const seenTexts = new Set();
+            for (const bubble of messageBubbles) {
+              const textSpans = bubble.querySelectorAll('span.ogn1z.nonIntl, span.ogn1z');
+              for (const span of textSpans) {
+                // Skip if inside header
+                if (span.closest('header.R1ne3')) continue;
+                
+                const text = span.textContent ? span.textContent.trim() : '';
+                if (!text || text.length < 1 || seenTexts.has(text) || isStatusText(text)) continue;
+                const hasTextChildren = Array.from(span.children).some(child =>
+                  child.textContent && child.textContent.trim().length > 0
+                );
+                if (hasTextChildren) continue;
+                seenTexts.add(text);
+                
+                // Determine direction if not already set
+                let msgIsIncoming = isIncoming;
+                if (!isIncoming && !isOutgoing) {
+                  const bubbleStyle = bubble.getAttribute('style') || '';
+                  if (bubbleStyle.includes('rgb(14, 173, 255)') || bubbleStyle.includes('rgb(14,173,255)')) {
+                    msgIsIncoming = true;
+                  } else if (bubbleStyle.includes('rgb(242, 60, 87)') || bubbleStyle.includes('rgb(242,60,87)')) {
+                    msgIsIncoming = false;
+                  }
+                }
+                
+                const direction = msgIsIncoming ? 'INCOMING' : 'OUTGOING';
+                log('  -> ' + direction + ': "' + text + '"');
+                messages.push({ text, isIncoming: msgIsIncoming });
+              }
+            }
+          }
+        }
+      }
+    }
+
+    log('Total messages collected: ' + messages.length);
+
+    // CRITICAL VERIFICATION: Check if the detected sender matches the expected one
+    if (expectedSender && detectedSender) {
+      // Clean both for comparison (remove emojis, extra spaces, etc.)
+      const cleanExpected = expectedSender.replace(/[^\w\s]/g, '').trim().toLowerCase();
+      const cleanDetected = detectedSender.replace(/[^\w\s]/g, '').trim().toLowerCase();
+
+      if (cleanDetected !== cleanExpected && !cleanExpected.includes(cleanDetected) && !cleanDetected.includes(cleanExpected)) {
+        log('WARNING: Sender mismatch! Expected "' + expectedSender + '" but found "' + detectedSender + '"');
+        log('This is likely stale/cached DOM! Returning empty to force retry.');
+        return []; // Return empty to indicate stale data
+      } else {
+        log('Sender verification passed: "' + detectedSender + '" matches expected "' + expectedSender + '"');
+      }
+    }
+
+    return messages;
   }
   
-  // We're not in the right chat anymore, re-open it
-  snapLog(`Chat closed or switched, re-opening chat with ${expectedSender}`);
-  
-  try {
-    chatElement.click();
-    await sleep(1000); // Wait for chat to open
+  // Scan page and report what we find
+  function scanPage() {
+    log('=== PAGE SCAN ===');
     
-    const newSender = getCurrentSender();
-    if (newSender === expectedSender) {
-      snapLog(`Successfully re-opened chat with ${expectedSender}`);
-      return true;
-    } else {
-      snapLog(`Failed to re-open correct chat. Expected: ${expectedSender}, Got: ${newSender}`);
+    // Count all interactive elements
+    const buttons = document.querySelectorAll('button').length;
+    const inputs = document.querySelectorAll('input, textarea, [contenteditable]').length;
+    const links = document.querySelectorAll('a').length;
+    log('Buttons: ' + buttons + ', Inputs: ' + inputs + ', Links: ' + links);
+    
+    // Find chat-like elements
+    const chats = findClickableChats();
+    log('Potential chat items: ' + chats.length);
+
+    // Check for unread
+    let unreadCount = 0;
+    chats.forEach(c => {
+      if (isNewIncomingChat(c)) unreadCount++;
+    });
+    log('Items with unread indicators: ' + unreadCount);
+    
+    // Check input
+    const input = findInput();
+    log('Input field: ' + (input ? 'FOUND (' + input.tagName + ')' : 'NOT FOUND'));
+    
+    // Check send button
+    const sendBtn = findSendButton();
+    log('Send button: ' + (sendBtn ? 'FOUND' : 'NOT FOUND'));
+    
+    // Sample some class names from the page
+    const classes = new Set();
+    document.querySelectorAll('[class]').forEach(el => {
+      const cls = el.className;
+      if (typeof cls === 'string') {
+        cls.split(' ').forEach(c => {
+          if (c.length > 3 && c.length < 30) classes.add(c);
+        });
+      }
+    });
+    const classArr = Array.from(classes).slice(0, 20);
+    log('Sample classes: ' + classArr.join(', '));
+    
+    log('=== END SCAN ===');
+  }
+  
+  // Type a message
+  async function typeMessage(text) {
+    const input = findInput();
+    if (!input) {
+      log('ERROR: Input not found');
       return false;
     }
-  } catch (e) {
-    snapLog(`Error re-opening chat: ${e}`);
-    return false;
-  }
-}
 
-/**
- * Click on a chat to open it
- */
-async function openChat(chatElement: HTMLElement): Promise<boolean> {
-  try {
-    chatElement.click();
-    snapLog('Clicked on chat to open');
-    
-    // Wait for conversation to load with multiple checks
-    let attempts = 0;
-    const maxAttempts = 5;
-    
-    while (attempts < maxAttempts) {
-      await sleep(500);
-      attempts++;
-      
-      // Check if we have a conversation loaded by looking for message container
-      const messageContainer = findElement(SNAPCHAT_SELECTORS.messageContainer);
-      const inputField = findElement(SNAPCHAT_SELECTORS.inputField);
-      
-      if (messageContainer && inputField) {
-        snapLog(`Chat opened successfully after ${attempts * 500}ms`);
-        return true;
-      }
-      
-      if (attempts < maxAttempts) {
-        snapLog(`Chat not fully loaded yet, waiting... (attempt ${attempts}/${maxAttempts})`);
-      }
-    }
-    
-    snapLog('Chat may not be fully loaded, but proceeding');
-    return true;
-  } catch (e) {
-    snapLog(`Error opening chat: ${e}`);
-    return false;
-  }
-}
+    log('Typing into: ' + input.tagName);
 
-/**
- * Type text into input field with human-like delays
- */
-async function typeMessage(text: string): Promise<boolean> {
-  let input = findElement(SNAPCHAT_SELECTORS.inputField);
-  
-  if (!input) {
-    snapLog('Error: Input field not found');
-    return false;
-  }
-  
-  // Focus the input and ensure it stays focused
-  input.focus();
-  snapLog('Input field focused');
-  
-  // Clear existing content
-  if (input.getAttribute('contenteditable') === 'true') {
-    input.innerHTML = '';
-    input.textContent = '';
-  } else if (input instanceof HTMLTextAreaElement || input instanceof HTMLInputElement) {
-    input.value = '';
-  }
-  
-  // Type character by character
-  const typingDelay = config?.typingDelayRangeMs || [50, 150];
-  
-  for (let i = 0; i < text.length; i++) {
-    const char = text[i];
-    
-    // Re-find input field periodically to handle DOM changes
-    if (i % 10 === 0) {
-      const currentInput = findElement(SNAPCHAT_SELECTORS.inputField);
-      if (currentInput && currentInput !== input) {
-        input = currentInput;
-        input.focus();
-        snapLog('Re-focused input field during typing');
-      }
-    }
-    
-    // Ensure input is still focused
-    if (document.activeElement !== input) {
-      input.focus();
-    }
-    
+    // CRITICAL: Click into the input field first to show natural user behavior
+    // This ensures Snapchat sees an active user clicking before typing
+    window.focus(); // Ensure window has focus
+    input.click(); // Click the input field
+    await sleep(100); // Brief pause after click (natural behavior)
+    input.focus(); // Then focus it
+
+    // Clear first
     if (input.getAttribute('contenteditable') === 'true') {
-      input.textContent = (input.textContent || '') + char;
-    } else if (input instanceof HTMLTextAreaElement || input instanceof HTMLInputElement) {
-      input.value += char;
+      input.innerHTML = '';
+    } else if ('value' in input) {
+      input.value = '';
     }
     
-    // Dispatch input event
-    input.dispatchEvent(new Event('input', { bubbles: true }));
-    input.dispatchEvent(new KeyboardEvent('keydown', { key: char, bubbles: true }));
-    input.dispatchEvent(new KeyboardEvent('keyup', { key: char, bubbles: true }));
-    
-    // Random delay between characters
-    const delay = Math.floor(Math.random() * (typingDelay[1] - typingDelay[0])) + typingDelay[0];
-    await sleep(delay);
-  }
-  
-  snapLog(`Typed message: "${text.substring(0, 30)}..."`);
-  return true;
-}
+    // Type character by character (fast defaults, still human-like)
+    const delays = CONFIG.typingDelayRangeMs || [10, 35];
+    for (let i = 0; i < text.length; i++) {
+      const char = text[i];
 
-/**
- * Click the send button
- */
-async function clickSend(): Promise<boolean> {
-  let sendBtn = findElement(SNAPCHAT_SELECTORS.sendButton);
-  
-  if (!sendBtn) {
-    // Try pressing Enter as fallback
-    const input = findElement(SNAPCHAT_SELECTORS.inputField);
-    if (input) {
-      input.focus();
-      input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', keyCode: 13, bubbles: true }));
-      input.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', keyCode: 13, bubbles: true }));
-      snapLog('Sent via Enter key');
+      // Simulate key events so this behaves like typing, not paste.
+      input.dispatchEvent(new KeyboardEvent('keydown', { key: char, code: 'Key' + char.toUpperCase(), bubbles: true, cancelable: true }));
+      input.dispatchEvent(new KeyboardEvent('keypress', { key: char, code: 'Key' + char.toUpperCase(), bubbles: true, cancelable: true }));
+
+      if (input.getAttribute('contenteditable') === 'true') {
+        // Prefer insertText semantics for contenteditable inputs.
+        const inserted = document.execCommand ? document.execCommand('insertText', false, char) : false;
+        if (!inserted) {
+          input.textContent = (input.textContent || '') + char;
+        }
+      } else if ('value' in input) {
+        const el = input;
+        const start = typeof el.selectionStart === 'number' ? el.selectionStart : (el.value || '').length;
+        const end = typeof el.selectionEnd === 'number' ? el.selectionEnd : start;
+        if (typeof el.setRangeText === 'function') {
+          el.setRangeText(char, start, end, 'end');
+        } else {
+          el.value = (el.value || '') + char;
+        }
+      }
+
+      input.dispatchEvent(new InputEvent('input', { bubbles: true, data: char, inputType: 'insertText' }));
+      input.dispatchEvent(new KeyboardEvent('keyup', { key: char, code: 'Key' + char.toUpperCase(), bubbles: true, cancelable: true }));
       
-      // Wait a moment to see if message was sent
-      await sleep(500);
-      return true;
+      const delay = Math.floor(Math.random() * (delays[1] - delays[0])) + delays[0];
+      await sleep(delay);
     }
-    snapLog('Error: Send button not found and Enter fallback failed');
-    return false;
-  }
-  
-  // Ensure send button is clickable
-  if (sendBtn.style.display === 'none' || sendBtn.style.visibility === 'hidden') {
-    snapLog('Send button is hidden, trying Enter key instead');
-    const input = findElement(SNAPCHAT_SELECTORS.inputField);
-    if (input) {
-      input.focus();
-      input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', keyCode: 13, bubbles: true }));
-      input.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', keyCode: 13, bubbles: true }));
-      snapLog('Sent via Enter key (hidden button)');
-      await sleep(500);
-      return true;
-    }
-  }
-  
-  try {
-    sendBtn.click();
-    snapLog('Send button clicked');
     
-    // Wait a moment to ensure the message is sent
-    await sleep(500);
+    log('Typed: ' + text.substring(0, 30) + '...');
     return true;
-  } catch (e) {
-    snapLog(`Error clicking send button: ${e}`);
+  }
+  
+  // Send the message
+  async function sendMessage() {
+    const input = findInput();
     
-    // Try Enter key as final fallback
-    const input = findElement(SNAPCHAT_SELECTORS.inputField);
+    // Method 1: Try Enter key on input (most reliable for Snapchat)
     if (input) {
       input.focus();
-      input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', keyCode: 13, bubbles: true }));
-      input.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', keyCode: 13, bubbles: true }));
-      snapLog('Sent via Enter key (click failed)');
-      await sleep(500);
+      
+      // Try multiple Enter key event variations
+      const enterEvents = [
+        new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true }),
+        new KeyboardEvent('keypress', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true }),
+        new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true })
+      ];
+      
+      for (const event of enterEvents) {
+        input.dispatchEvent(event);
+      }
+      
+      // Also try dispatching on document
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true }));
+      
+      log('Pressed Enter key');
+      await sleep(200);
+    }
+    
+    // Method 2: Try clicking send button as backup
+    const sendBtn = findSendButton();
+    if (sendBtn) {
+      sendBtn.click();
+      log('Also clicked send button');
       return true;
     }
     
-    return false;
+    return input !== null;
   }
-}
-
-/**
- * Sleep helper
- */
-function sleep(ms: number): Promise<void> {
-  return new Promise(resolve => setTimeout(resolve, ms));
-}
-
-/**
- * Match message against reply rules
- */
-function findMatchingReply(messageText: string): string | null {
-  const rules = config?.replyRules || [];
   
-  for (const rule of rules) {
-    const matchStr = typeof rule.match === 'string' ? rule.match : '';
-    const text = rule.caseSensitive ? messageText : messageText.toLowerCase();
-    const match = rule.caseSensitive ? matchStr : matchStr.toLowerCase();
+  // Find reply based on message - now async with AI support
+  async function findReply(text, username) {
+    const rules = CONFIG.replyRules || [];
+    const lower = text.toLowerCase();
     
-    if (text.includes(match)) {
-      snapLog(`Rule matched: "${matchStr}" -> "${rule.reply}"`);
-      return rule.reply;
+    // Skip UI elements that aren't real messages
+    const uiElements = ['spotlight', 'drag & drop', 'upload', 'type a message', 'send a chat', 'new chat', 'add friends'];
+    if (uiElements.some(ui => lower.includes(ui))) {
+      log('Skipping UI element: ' + text.substring(0, 30));
+      return null;
     }
-  }
-  
-  return null;
-}
-
-/**
- * Generate a contextual reply based on conversation memory
- * Uses AI Brain via direct fetch to LLM server for intelligent responses
- */
-async function generateContextualReply(sender: string, latestMessage: string): Promise<string | null> {
-  // Use the comprehensive status/UI filter
-  if (isStatusOrUIText(latestMessage)) {
-    snapLog(`Skipping status/UI text: "${latestMessage}"`);
-    return null;
-  }
-  
-  // Skip very short messages that are likely UI elements or incomplete
-  if (latestMessage.length < MIN_MESSAGE_LENGTH) {
-    snapLog(`Skipping too short (${latestMessage.length} chars): "${latestMessage}"`);
-    return null;
-  }
-  
-  // Skip messages that look like partial/truncated text (preview snippets)
-  if (latestMessage.endsWith('...') && latestMessage.length < 30) {
-    snapLog(`Skipping truncated preview: "${latestMessage}"`);
-    return null;
-  }
-  
-  // First try rule-based matching (fast path)
-  const ruleReply = findMatchingReply(latestMessage);
-  if (ruleReply) return ruleReply;
-  
-  // Try AI if config has AI enabled
-  const aiConfig = config?.ai;
-  if (aiConfig?.enabled) {
-    try {
-      snapLog(`Requesting AI reply for: "${latestMessage.substring(0, 30)}..."`);
+    
+    // First try rule-based matching (fast path)
+    for (const rule of rules) {
+      const match = (rule.caseSensitive ? rule.match : rule.match.toLowerCase());
+      if (lower.includes(match)) {
+        log('Rule matched: ' + rule.match);
+        return rule.reply;
+      }
+    }
+    
+    // Try AI if enabled - use pending request system for renderer to handle
+    if (CONFIG.ai && CONFIG.ai.enabled) {
+      log('Requesting AI reply for: "' + text.substring(0, 30) + '..."');
       
       // Build conversation context from memory
-      const memory = getConversationMemory(sender);
-      const messages: Array<{role: string; content: string}> = [];
+      const memory = getUserMemory(username);
+      const messages = [];
       
       // Add system prompt
       messages.push({
         role: 'system',
-        content: aiConfig.systemPrompt || 'You are a friendly person chatting casually. Keep responses brief and natural.'
+        content: CONFIG.ai.systemPrompt || 'You are a friendly person chatting casually. Keep responses brief and natural.'
       });
       
-      // Add conversation history from memory
-      if (aiConfig.contextHistoryEnabled && memory?.messages?.length) {
-        const historyLimit = aiConfig.maxContextMessages || 10;
+      // Add conversation history from memory (last N messages)
+      if (CONFIG.ai.contextHistoryEnabled && memory.messages.length > 0) {
+        const historyLimit = CONFIG.ai.maxContextMessages || 10;
         const recentMsgs = memory.messages.slice(-historyLimit);
         recentMsgs.forEach(m => {
           messages.push({
-            role: m.isIncoming ? 'user' : 'assistant',
+            role: m.from === 'them' ? 'user' : 'assistant',
             content: m.text
           });
         });
       }
       
       // Add current message
-      messages.push({ role: 'user', content: latestMessage });
+      messages.push({ role: 'user', content: text });
       
-      // Call LLM server directly
-      const url = `http://${aiConfig.llmEndpoint || 'localhost'}:${aiConfig.llmPort || 8080}/v1/chat/completions`;
-      snapLog(`Calling AI at: ${url}`);
+      // Store pending AI request for renderer to pick up
+      const requestId = 'ai-' + Date.now();
+      window.__SNAPPY_AI_REQUEST__ = {
+        id: requestId,
+        username: username,
+        messages: messages,
+        config: CONFIG.ai
+      };
       
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), aiConfig.requestTimeoutMs || 30000);
+      // Wait for response (renderer will poll and fill this)
+      log('Waiting for AI response...');
+      const maxWait = 30000;
+      const pollInterval = 100;
+      let waited = 0;
       
-      const response = await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          model: aiConfig.modelName || 'local-model',
-          messages: messages,
-          temperature: aiConfig.temperature || 0.7,
-          max_tokens: aiConfig.maxTokens || 150
-        }),
-        signal: controller.signal
-      });
-      
-      clearTimeout(timeoutId);
-      
-      if (response.ok) {
-        const data = await response.json();
-        if (data.choices?.[0]?.message?.content) {
-          const aiReply = data.choices[0].message.content.trim();
-          snapLog(`AI reply received: "${aiReply.substring(0, 30)}..."`);
-          return aiReply;
+      while (waited < maxWait) {
+        await sleep(pollInterval);
+        waited += pollInterval;
+        
+        if (window.__SNAPPY_AI_RESPONSE__ && window.__SNAPPY_AI_RESPONSE__.id === requestId) {
+          const reply = window.__SNAPPY_AI_RESPONSE__.reply;
+          window.__SNAPPY_AI_RESPONSE__ = null;
+          window.__SNAPPY_AI_REQUEST__ = null;
+          
+          if (reply) {
+            log('AI reply received: "' + reply.substring(0, 30) + '..."');
+            return reply;
+          } else {
+            log('AI returned empty reply');
+            break;
+          }
         }
-      } else {
-        snapLog(`AI request failed: HTTP ${response.status}`);
       }
-    } catch (error: any) {
-      if (error.name === 'AbortError') {
-        snapLog('AI request timed out');
-      } else {
-        snapLog(`AI error: ${error.message}`);
-      }
+      
+      window.__SNAPPY_AI_REQUEST__ = null;
+      log('AI request timed out, falling back to defaults');
     }
     
-    snapLog('AI returned no reply, falling back to defaults');
-  }
-  
-  // Fallback to simple pattern matching if AI unavailable
-  const memory = getConversationMemory(sender);
-  const lowerMsg = latestMessage.toLowerCase();
-  
-  if (lowerMsg.includes('?')) {
-    return "Let me think about that and get back to you!";
-  }
-  
-  if (lowerMsg.includes('hi') || lowerMsg.includes('hey') || lowerMsg.includes('hello')) {
-    return memory ? `Hey! Good to hear from you again!` : `Hey! What's up?`;
-  }
-  
-  if (lowerMsg.includes('how are') || lowerMsg.includes("what's up") || lowerMsg.includes('whats up')) {
-    return "I'm doing great, thanks for asking! How about you?";
-  }
-  
-  if (lowerMsg.includes('thanks') || lowerMsg.includes('thank you')) {
-    return "You're welcome! 😊";
-  }
-  
-  if (lowerMsg.includes('bye') || lowerMsg.includes('later') || lowerMsg.includes('gtg')) {
-    return "Talk to you later! 👋";
-  }
-  
-  // No match - return null (don't reply to everything)
-  return null;
-}
-
-
-// Senders to ignore (e.g., Snapchat AI, bots)
-const IGNORED_SENDERS = [
-  'my ai',
-  'myai',
-  'snapchat ai',
-  'ai',
-  'team snapchat'
-];
-
-/**
- * Check if a sender should be ignored
- */
-function shouldIgnoreSender(sender: string): boolean {
-  const normalized = sender.toLowerCase().trim();
-  return IGNORED_SENDERS.some(ignored => normalized === ignored || normalized.includes(ignored));
-}
-
-/**
- * Process a single conversation
- */
-async function processConversation(chatElement: HTMLElement): Promise<void> {
-  // Open the chat
-  const opened = await openChat(chatElement);
-  if (!opened) return;
-  
-  // Get sender name
-  const sender = getCurrentSender();
-  snapLog(`Processing conversation with: ${sender}`);
-  
-  // Skip ignored senders (like Snapchat AI)
-  if (shouldIgnoreSender(sender)) {
-    snapLog(`Skipping ignored sender: ${sender}`);
-    return;
-  }
-  
-  // Get all messages and update memory
-  const messages = getConversationMessages();
-  snapLog(`Found ${messages.length} total messages in conversation`);
-  
-  // Log last few messages for debugging
-  const lastFew = messages.slice(-3);
-  lastFew.forEach((msg, idx) => {
-    const direction = msg.isIncoming ? 'INCOMING' : 'OUTGOING';
-    snapLog(`  [${idx}] ${direction}: "${msg.text.substring(0, 40)}..."`);
-  });
-  
-  updateConversationMemory(sender, messages);
-  
-  // Get the latest incoming message
-  const latestMessage = getLatestIncomingMessage();
-  if (!latestMessage) {
-    snapLog('No new incoming message to process');
-    return;
-  }
-  
-  // Generate message ID to avoid duplicates - use message content only, not timestamp
-  // This ensures the same message always gets the same ID
-  const msgId = `${sender}-${latestMessage.substring(0, 100)}`;
-  snapLog(`Message ID: ${msgId.substring(0, 60)}...`);
-  
-  if (isMessageSeen(msgId)) {
-    snapLog('Message already processed, skipping');
-    return;
-  }
-  
-  // Mark as seen immediately to prevent duplicate processing
-  markMessageSeen(msgId);
-  
-  snapLog(`Latest message from ${sender}: "${latestMessage.substring(0, 50)}..."`);
-  
-  // Generate reply (now async with AI support)
-  const reply = await generateContextualReply(sender, latestMessage);
-  
-  if (!reply) {
-    snapLog('No reply generated (no matching rule or AI returned nothing)');
-    return;
-  }
-  
-  // Random skip check
-  const skipProb = config?.randomSkipProbability || 0.15;
-  if (Math.random() < skipProb) {
-    snapLog(`Randomly skipping (${Math.round(skipProb * 100)}% chance)`);
-    return;
-  }
-  
-  // Pre-reply delay
-  const preDelay = config?.preReplyDelayRangeMs || [2000, 6000];
-  const delay = Math.floor(Math.random() * (preDelay[1] - preDelay[0])) + preDelay[0];
-  snapLog(`Waiting ${delay}ms before replying...`);
-  await sleep(delay);
-  
-  // Ensure we're still in the correct chat before typing
-  await ensureChatIsOpen(chatElement, sender);
-  
-  // Type and send
-  const typed = await typeMessage(reply);
-  if (!typed) {
-    snapLog('Failed to type message, ensuring chat is still open');
-    await ensureChatIsOpen(chatElement, sender);
-    return;
-  }
-  
-  await sleep(500); // Brief pause before sending
-  
-  // Ensure we're still in the correct chat before sending
-  await ensureChatIsOpen(chatElement, sender);
-  
-  const sent = await clickSend();
-  if (sent) {
-    snapLog(`✓ Reply sent to ${sender}: "${reply}"`);
+    // Default responses (fallback)
+    if (lower.includes('?')) return "Let me check and get back to you!";
+    if (lower.includes('hi') || lower.includes('hey') || lower.includes('hello')) return "Hey! Whats up?";
+    if (lower.includes('how are') || lower.includes('whats up')) return "I am good, thanks! How about you?";
+    if (lower.includes('thanks') || lower.includes('thank you')) return "You are welcome!";
+    if (lower.includes('bye') || lower.includes('later')) return "Talk to you later!";
     
-    // Wait a moment to ensure message is fully sent before leaving
-    await sleep(1000);
-    
-    // Navigate back to homepage instead of staying in chat
-    await navigateToHomepage();
-    
-    // Mark our own reply as seen to avoid replying to it
-    const botMsgId = `${sender}-${reply.substring(0, 100)}`;
-    markMessageSeen(botMsgId);
-    
-    // Update memory with our reply
-    const memory = getConversationMemory(sender);
-    if (memory) {
-      memory.messages.push({ text: reply, isIncoming: false, timestamp: Date.now() });
-      memory.summary = generateConversationSummary(memory);
-      conversationMemories.set(sender, memory);
+    return null;
+  }
+  
+  // Try to click an element properly
+  function clickElement(el) {
+    // CRITICAL: Ensure window has focus first (Snapchat detects this)
+    // Focus the window to show user presence
+    window.focus();
+
+    // Focus the document body to ensure clicks register
+    if (document.body) {
+      document.body.focus();
+    }
+
+    // Focus the element itself if possible
+    if (el.focus) {
+      el.focus();
+    }
+
+    // Try multiple click methods
+
+    // Method 1: Direct click
+    el.click();
+
+    // Method 2: Dispatch mouse events (more realistic to Snapchat)
+    const rect = el.getBoundingClientRect();
+    const centerX = rect.left + rect.width / 2;
+    const centerY = rect.top + rect.height / 2;
+
+    // Dispatch full mouse event sequence with proper focus
+    el.dispatchEvent(new MouseEvent('mouseover', { bubbles: true, clientX: centerX, clientY: centerY }));
+    el.dispatchEvent(new MouseEvent('mouseenter', { bubbles: true, clientX: centerX, clientY: centerY }));
+    el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, clientX: centerX, clientY: centerY }));
+    el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, clientX: centerX, clientY: centerY }));
+    el.dispatchEvent(new MouseEvent('click', { bubbles: true, clientX: centerX, clientY: centerY }));
+
+    // Method 3: Try clicking a child button or link if exists
+    const clickable = el.querySelector('button, a, [role="button"]');
+    if (clickable) {
+      clickable.click();
     }
   }
-}
-
-/**
- * Main polling loop - checks for unread messages
- */
-async function pollForMessages(): Promise<void> {
-  if (!isRunning) return;
   
-  // Skip if already processing a message
-  if (isProcessing) {
-    snapLog('Still processing previous message, skipping poll');
-    return;
+  // Check if an element is positioned on the right side (outgoing message)
+  function isOutgoingMessage(el) {
+    // Check class names for outgoing indicators
+    const classChain = (el.className || '') + ' ' + (el.parentElement?.className || '') + ' ' + (el.parentElement?.parentElement?.className || '');
+    const classLower = classChain.toLowerCase();
+    
+    if (classLower.includes('sent') || classLower.includes('outgoing') || 
+        classLower.includes('self') || classLower.includes('right') ||
+        classLower.includes('me') || classLower.includes('own')) {
+      return true;
+    }
+    
+    // Check computed style for right-alignment
+    const style = window.getComputedStyle(el);
+    const parentStyle = el.parentElement ? window.getComputedStyle(el.parentElement) : null;
+    
+    if (style.textAlign === 'right' || style.marginLeft === 'auto' ||
+        (parentStyle && (parentStyle.justifyContent === 'flex-end' || parentStyle.alignItems === 'flex-end'))) {
+      return true;
+    }
+    
+    // Check position - if element is on right half of container, likely outgoing
+    const rect = el.getBoundingClientRect();
+    const containerWidth = el.parentElement?.getBoundingClientRect().width || window.innerWidth;
+    if (rect.left > containerWidth * 0.5) {
+      return true;
+    }
+    
+    return false;
+  }
+
+  // Get all text content from the main chat area
+  function getAllChatText() {
+    // Find the main content area (usually right side of screen)
+    const mainArea = document.querySelector('main, [role="main"], [class*="main"], [class*="content"], [class*="chat"]');
+    
+    // Get all text elements - prefer leaf nodes to avoid concatenated text
+    const textElements = [];
+    const seen = new Set();
+    const selector = 'p, span, div';
+    const elements = mainArea ? mainArea.querySelectorAll(selector) : document.querySelectorAll(selector);
+    
+    elements.forEach(el => {
+      // Skip if this element has child elements with text (to avoid duplicates)
+      const hasTextChildren = Array.from(el.children).some(child => 
+        child.textContent && child.textContent.trim().length > 0
+      );
+      if (hasTextChildren) return;
+      
+      const text = el.textContent?.trim();
+      if (text && text.length > 2 && text.length < 300 && !seen.has(text)) {
+        // Skip if it's a timestamp or UI element
+        if (!/^\\d{1,2}:\\d{2}/.test(text) && !/^(Send|Type|Message|Chat)/.test(text)) {
+          // Skip status text
+          if (!isStatusText(text)) {
+            seen.add(text);
+            const isOutgoing = isOutgoingMessage(el) || sentMessages.has(text.toLowerCase().trim());
+            textElements.push({ text, element: el, isOutgoing });
+          }
+        }
+      }
+    });
+    
+    return textElements;
   }
   
-  try {
-    snapLog('Scanning for unread messages...');
-    
-    const unreadChats = findUnreadChats();
-    
-    if (unreadChats.length === 0) {
-      snapLog('No unread messages found');
+  // Clean username by removing status indicators
+  // Extract username from chat row element
+  // SNAPCHAT USES: .mYSR9 > .FiLwP > .nonIntl (deeply nested!)
+  function getUsernameFromChatRow(chatRow) {
+    // Try nested path first (most accurate)
+    const nestedSpan = chatRow.querySelector('.mYSR9 .FiLwP .nonIntl');
+    if (nestedSpan) {
+      return nestedSpan.textContent.trim();
+    }
+
+    // Fallback to .mYSR9 directly
+    const usernameSpan = chatRow.querySelector('.mYSR9');
+    if (usernameSpan) {
+      return usernameSpan.textContent.trim();
+    }
+
+    return null;
+  }
+
+  // Legacy function - keep for compatibility but use getUsernameFromChatRow instead
+  function cleanUsername(rawText) {
+    // Status words that get appended to usernames in Snapchat
+    const statusPatterns = [
+      /Typing\\.{0,3}$/i,
+      /Delivered$/i,
+      /Opened$/i,
+      /Received$/i,
+      /Sent$/i,
+      /Viewed$/i,
+      /New Chat$/i,
+      /New Snap$/i,
+      /\\d+[smhd]\\s*(ago)?$/i,  // "2m ago", "5h"
+      /\\d+:\\d+\\s*(AM|PM)?$/i,  // timestamps
+      /Just now$/i,
+      /Today$/i,
+      /Yesterday$/i
+    ];
+
+    let cleaned = rawText.split(/[·\\n]/)[0].trim();
+
+    // Remove status suffixes
+    for (const pattern of statusPatterns) {
+      cleaned = cleaned.replace(pattern, '').trim();
+    }
+
+    return cleaned;
+  }
+  
+  // Process a chat
+  async function processChat(chatEl, chatText) {
+    // Extract username directly from .mYSR9 span (exact selector)
+    const username = getUsernameFromChatRow(chatEl);
+
+    if (!username) {
+      // Fallback to old method if .mYSR9 not found
+      log('WARNING: .mYSR9 not found, falling back to text parsing');
+      const fallbackUsername = cleanUsername(chatText);
+      if (!fallbackUsername || fallbackUsername.length < 2) {
+        log('Invalid username, skipping');
+        return;
+      }
+      log('Opening chat with (fallback): ' + fallbackUsername);
+      // Continue with fallback username
+      return processChat_internal(chatEl, fallbackUsername);
+    }
+
+    log('Opening chat with: ' + username);
+
+    // Skip if username is empty or too short
+    if (username.length < 2) {
+      log('Invalid username, skipping');
+      return;
+    }
+
+    return processChat_internal(chatEl, username);
+  }
+
+  // Track which chat we're currently monitoring
+  let currentMonitoredChat = {
+    username: null,
+    lastMessageId: null,
+    checkInterval: null
+  };
+
+  // Internal chat processing (separated to avoid duplication)
+  async function processChat_internal(chatEl, username) {
+
+    // Load and display memory for this user
+    const memory = getUserMemory(username);
+    if (memory.messages.length > 0) {
+      const summary = getMemorySummary(username);
+      log('MEMORY: ' + summary.total + ' previous messages with ' + username);
+      log('Recent: ' + summary.recent);
+    } else {
+      log('No previous memory for ' + username);
+    }
+
+    // Try clicking
+    clickElement(chatEl);
+    log('Clicked chat: ' + username);
+
+    // CRITICAL: Wait for the DOM to fully update with NEW chat content
+    // Snapchat lazy-loads messages, so we need to wait AND scroll aggressively
+    log('Waiting for chat to load and messages to populate...');
+    await sleep(2500);
+
+    // CRITICAL: Click into the input field to ensure Snapchat detects user presence
+    // This prevents the "doesn't seem to be present" detection
+    try {
+      const inputField = document.querySelector('[contenteditable="true"], textarea, input[type="text"]');
+      if (inputField) {
+        window.focus(); // Ensure window has focus
+        inputField.focus(); // Focus the input field
+        inputField.click(); // Click it for good measure
+        log('Focused into input field to show presence');
+      } else {
+        log('Warning: Could not find input field to focus');
+      }
+    } catch (e) {
+      log('Error focusing input field: ' + e.message);
+    }
+
+    await sleep(500); // Brief pause after focusing
+
+    // Force scroll to bottom MULTIPLE times with waits to trigger lazy loading
+    await scrollToLatestMessages();
+
+    log('Finished scrolling, messages should be loaded now');
+
+    // Process the initial messages
+    await processCurrentChatMessages(username);
+
+    // Start monitoring this chat for new messages
+    startChatMonitoring(username);
+  }
+
+  // Helper function to scroll to latest messages
+  async function scrollToLatestMessages() {
+    for (let scrollAttempt = 0; scrollAttempt < 3; scrollAttempt++) {
+      try {
+        // Find ALL ul.ujRzj and scroll the LARGEST one (most likely to be active)
+        const allLists = document.querySelectorAll('ul.ujRzj');
+        log('Scroll attempt ' + (scrollAttempt + 1) + ': found ' + allLists.length + ' ul.ujRzj elements');
+
+        let largestList = null;
+        let maxHeight = 0;
+
+        for (const list of allLists) {
+          const rect = list.getBoundingClientRect();
+          if (rect.height > maxHeight && rect.width > 0) {
+            maxHeight = rect.height;
+            largestList = list;
+          }
+        }
+
+        if (largestList) {
+          log('  Scrolling largest list (height=' + maxHeight.toFixed(0) + 'px)');
+
+          // Scroll to bottom
+          largestList.scrollTop = largestList.scrollHeight;
+
+          // Also try to find and scroll the parent container
+          const messageContainer = largestList.closest('[role="main"]') ||
+                                  largestList.closest('.chat-container') ||
+                                  largestList.parentElement;
+          if (messageContainer && messageContainer.scrollTo) {
+            messageContainer.scrollTop = messageContainer.scrollHeight;
+          }
+
+          // Wait for lazy load
+          await sleep(1200);
+        } else {
+          log('  No visible list found (all have height=0)');
+        }
+      } catch(e) {
+        log('Scroll attempt ' + (scrollAttempt + 1) + ' FAILED: ' + e);
+      }
+    }
+  }
+
+  // Process messages in the currently open chat
+  async function processCurrentChatMessages(username) {
+    // Get messages using multiple methods
+    // Pass expected username to verify we're not reading stale cache
+    let messages = getVisibleMessages(username);
+    log('Method 1 found ' + messages.length + ' messages');
+
+    // If no messages found, try getting all text
+    if (messages.length === 0) {
+      const allText = getAllChatText();
+      log('Method 2 found ' + allText.length + ' text elements');
+
+      // Convert to messages format, using proper outgoing detection
+      messages = allText
+        .filter(t => !isStatusText(t.text))
+        .map(t => ({
+          text: t.text,
+          isIncoming: !t.isOutgoing && !sentMessages.has(t.text.toLowerCase().trim())
+        }));
+    }
+
+    log('Total messages: ' + messages.length);
+
+    if (messages.length === 0) {
+      log('No messages found - DOM may not have loaded yet');
+      return;
+    }
+
+    // CRITICAL CHECK: If ALL messages are from us, the DOM is stale/cached
+    const incomingCount = messages.filter(m => m.isIncoming).length;
+    const outgoingCount = messages.filter(m => !m.isIncoming).length;
+    log('Message breakdown: ' + incomingCount + ' incoming, ' + outgoingCount + ' outgoing');
+
+    if (incomingCount === 0 && outgoingCount > 0) {
+      log('WARNING: All messages are from us - DOM is showing stale/cached data!');
+      log('Chat was marked as "New Chat" or "Received" but we only see our own messages.');
+      log('Possible causes: 1) DOM not fully loaded, 2) Message was deleted, 3) False unread indicator');
+      return;
+    }
+
+    // Check if the LAST message is from us - if so, don't reply
+    if (messages.length > 0) {
+      const lastMsg = messages[messages.length - 1];
+      if (!lastMsg.isIncoming) {
+        log('Last message is from us, skipping (waiting for their reply)');
+        return;
+      }
+    }
+
+    // Get last incoming message
+    let lastIncoming = null;
+    for (let i = messages.length - 1; i >= 0; i--) {
+      if (messages[i].isIncoming) {
+        lastIncoming = messages[i].text;
+        break;
+      }
+    }
+
+    if (!lastIncoming) {
+      log('No incoming message found');
+      return;
+    }
+
+    // Skip if this is actually a message we sent
+    const normalizedIncoming = lastIncoming.toLowerCase().trim();
+    if (sentMessages.has(normalizedIncoming)) {
+      log('Skipping - this is our own message');
+      return;
+    }
+
+    log('Last incoming: ' + lastIncoming.substring(0, 50));
+
+    // Check if this is the same message we last replied to for this user
+    const lastReplied = lastRepliedMessage.get(username);
+    if (lastReplied && lastReplied === normalizedIncoming) {
+      log('Already replied to this exact message from ' + username + ': "' + lastReplied.substring(0, 30) + '"');
+      return;
+    }
+
+    // Log what we last replied to for debugging
+    if (lastReplied) {
+      log('Last replied message from ' + username + ' was: "' + lastReplied.substring(0, 30) + '"');
+      log('Current message: "' + normalizedIncoming.substring(0, 30) + '" - NEW, will process');
+    } else {
+      log('First message from ' + username + ', will process');
+    }
+
+    // Find reply (now async with AI support)
+    const reply = await findReply(lastIncoming, username);
+    if (!reply) {
+      log('No matching reply');
+      // Still mark as replied so we don't keep trying to reply to a message with no match
+      lastRepliedMessage.set(username, normalizedIncoming);
+      return;
+    }
+
+    // Random skip
+    if (Math.random() < (CONFIG.randomSkipProbability || 0.15)) {
+      log('Random skip');
+      // Mark as replied so we don't process again
+      lastRepliedMessage.set(username, normalizedIncoming);
       return;
     }
     
-    snapLog(`Found ${unreadChats.length} unread conversation(s)`);
+    // Start typing immediately after reply generation.
+    log('AI reply ready, typing now');
     
-    // Process each unread chat
-    for (const chat of unreadChats) {
-      if (!isRunning) break;
-      
-      // Set processing lock before starting
-      isProcessing = true;
-      
-      try {
-        await processConversation(chat);
-      } finally {
-        // Always release lock when done
-        isProcessing = false;
+    // Type and send
+    const typed = await typeMessage(reply);
+    if (!typed) return;
+    
+    await sleep(500);
+    const sent = await sendMessage();
+    
+    if (sent) {
+      log('SUCCESS: Sent reply: ' + reply);
+
+      // Track this as the last message we replied to for this user
+      lastRepliedMessage.set(username, normalizedIncoming);
+      log('Saved last replied message for ' + username + ': "' + normalizedIncoming.substring(0, 30) + '"');
+
+      // Track this message as sent by us (to avoid replying to ourselves)
+      sentMessages.add(reply.toLowerCase().trim());
+
+      // Save their message to memory (username already cleaned above)
+      addToMemory(username, lastIncoming, true);
+
+      // Save our reply to memory
+      addToMemory(username, reply, false);
+
+      // Log memory summary
+      const summary = getMemorySummary(username);
+      log('Memory for ' + username + ': ' + summary.total + ' msgs (' + summary.fromThem + ' from them, ' + summary.fromMe + ' from me)');
+    }
+  }
+
+  // Start monitoring the currently open chat for new messages
+  function startChatMonitoring(username) {
+    // Clear any existing monitor
+    if (currentMonitoredChat.checkInterval) {
+      clearInterval(currentMonitoredChat.checkInterval);
+      log('Stopped monitoring previous chat: ' + currentMonitoredChat.username);
+    }
+
+    log('Starting to monitor chat: ' + username);
+    currentMonitoredChat.username = username;
+    currentMonitoredChat.lastMessageId = null;
+
+    // Check for new messages every 3 seconds
+    currentMonitoredChat.checkInterval = setInterval(async () => {
+      if (!window.__SNAPPY_RUNNING__) {
+        clearInterval(currentMonitoredChat.checkInterval);
+        return;
       }
-      
-      // Wait between processing conversations
-      await sleep(2000);
-    }
-  } catch (error) {
-    isProcessing = false; // Release lock on error
-    snapLog(`Error in poll loop: ${error}`);
+
+      try {
+        // Re-scan the DOM for messages
+        let messages = getVisibleMessages(username);
+
+        if (messages.length === 0) {
+          return;
+        }
+
+        // Find the last incoming message
+        let lastIncoming = null;
+        for (let i = messages.length - 1; i >= 0; i--) {
+          if (messages[i].isIncoming) {
+            lastIncoming = messages[i].text;
+            break;
+          }
+        }
+
+        if (!lastIncoming) {
+          return;
+        }
+
+        // Create a unique ID for this message
+        const msgId = username + '::' + lastIncoming.toLowerCase().trim();
+
+        // Check if this is a NEW message we haven't seen before
+        if (currentMonitoredChat.lastMessageId === null) {
+          // First check - just record the message ID
+          currentMonitoredChat.lastMessageId = msgId;
+          log('[Monitor] Initial message recorded: ' + lastIncoming.substring(0, 30));
+        } else if (currentMonitoredChat.lastMessageId !== msgId) {
+          // NEW MESSAGE DETECTED!
+          log('[Monitor] NEW MESSAGE DETECTED!');
+          currentMonitoredChat.lastMessageId = msgId;
+
+          // Scroll to see the latest
+          await scrollToLatestMessages();
+
+          // Wait a moment for DOM to settle
+          await sleep(500);
+
+          // Process the new message
+          await processCurrentChatMessages(username);
+        }
+      } catch (e) {
+        log('[Monitor] Error checking for new messages: ' + e);
+      }
+    }, 3000); // Check every 3 seconds
   }
-}
 
-/**
- * Start the Snapchat bot
- */
-function startSnapchatBot(): void {
-  if (isRunning) {
-    snapLog('Bot already running');
-    return;
-  }
-  
-  config = getConfig();
-  isRunning = true;
-  
-  snapLog('🚀 Snapchat Bot started!');
-  snapLog(`Config: ${config.replyRules.length} rules, skip ${Math.round((config.randomSkipProbability || 0.15) * 100)}%`);
-  
-  // Initial scan
-  pollForMessages();
-  
-  // Set up polling interval (every 5 seconds)
-  pollInterval = setInterval(() => {
-    pollForMessages();
-  }, 5000);
-}
-
-/**
- * Stop the Snapchat bot
- */
-function stopSnapchatBot(): void {
-  if (!isRunning) {
-    snapLog('Bot not running');
-    return;
-  }
-  
-  isRunning = false;
-  
-  if (pollInterval) {
-    clearInterval(pollInterval);
-    pollInterval = null;
-  }
-  
-  snapLog('🛑 Snapchat Bot stopped');
-}
-
-/**
- * Check if bot is running
- */
-function isSnapchatBotRunning(): boolean {
-  return isRunning;
-}
-
-/**
- * Get all conversation memories (for debugging/display)
- */
-function getAllMemories(): Map<string, ConversationMemory> {
-  return conversationMemories;
-}
-
-/**
- * Debug function to inspect message classification
- * Call from console: window.__snapDebug()
- */
-function debugMessageClassification(): void {
-  snapLog('=== DEBUG: Message Classification ===');
-  const bubbles = findAllElements(SNAPCHAT_SELECTORS.messageBubble);
-  snapLog(`Total bubbles found: ${bubbles.length}`);
-
-  bubbles.forEach((bubble, idx) => {
-    const text = bubble.textContent?.trim() || '';
-
-    // Collect all classes from bubble and parents
-    let classList = bubble.className.toLowerCase();
-    let currentElement: HTMLElement | null = bubble;
-    for (let i = 0; i < 3 && currentElement?.parentElement; i++) {
-      currentElement = currentElement.parentElement as HTMLElement;
-      classList += ' ' + currentElement.className.toLowerCase();
-    }
-
-    // Check data attributes
-    const dataAttrs = Array.from(bubble.attributes)
-      .filter(attr => attr.name.startsWith('data-'))
-      .map(attr => `${attr.name}=${attr.value}`.toLowerCase())
-      .join(' ');
-
-    // Get position info
-    const rect = bubble.getBoundingClientRect();
-    const windowWidth = window.innerWidth;
-    const isOnLeft = rect.left < windowWidth / 2;
-    const isOnRight = rect.right > windowWidth / 2;
-
-    snapLog(`\n[${idx}] Text: "${text.substring(0, 50)}..."`);
-    snapLog(`    Classes: ${classList.substring(0, 150)}...`);
-    snapLog(`    Data attrs: ${dataAttrs || 'none'}`);
-    snapLog(`    Position: left=${rect.left.toFixed(0)}px, right=${rect.right.toFixed(0)}px (window=${windowWidth}px)`);
-    snapLog(`    Visual position: ${isOnLeft ? 'LEFT' : ''} ${isOnRight ? 'RIGHT' : ''}`);
-
-    const isIncoming = classList.includes('received') || classList.includes('incoming') ||
-                       classList.includes('other') || classList.includes('left');
-    const isOutgoing = classList.includes('sent') || classList.includes('outgoing') ||
-                       classList.includes('self') || classList.includes('right');
-
-    snapLog(`    isIncoming: ${isIncoming}, isOutgoing: ${isOutgoing}`);
-    snapLog(`    isStatusText: ${isStatusOrUIText(text)}`);
-  });
-
-  snapLog('\n=== END DEBUG ===');
-  snapLog('Tip: Check the console for visual highlighting of messages');
-
-  // Visually highlight messages for 5 seconds
-  bubbles.forEach((bubble, idx) => {
-    const originalBorder = bubble.style.border;
-    const text = bubble.textContent?.trim() || '';
-    let classList = bubble.className.toLowerCase();
-    let currentElement: HTMLElement | null = bubble;
-    for (let i = 0; i < 3 && currentElement?.parentElement; i++) {
-      currentElement = currentElement.parentElement as HTMLElement;
-      classList += ' ' + currentElement.className.toLowerCase();
-    }
-
-    const isIncoming = classList.includes('received') || classList.includes('incoming') ||
-                       classList.includes('other') || classList.includes('left');
-    const isOutgoing = classList.includes('sent') || classList.includes('outgoing') ||
-                       classList.includes('self') || classList.includes('right');
-
-    if (isStatusOrUIText(text)) {
-      bubble.style.border = '3px solid orange'; // Status text
-    } else if (isIncoming) {
-      bubble.style.border = '3px solid green'; // Incoming
-    } else if (isOutgoing) {
-      bubble.style.border = '3px solid blue'; // Outgoing
-    } else {
-      bubble.style.border = '3px solid red'; // Unknown
-    }
-
-    setTimeout(() => {
-      bubble.style.border = originalBorder;
-    }, 5000);
-  });
-
-  console.log('%cColor codes: 🟢 Green=Incoming | 🔵 Blue=Outgoing | 🔴 Red=Unknown | 🟠 Orange=Status/UI', 'font-size: 14px; font-weight: bold;');
-}
-
-/**
- * Debug function to inspect chat list and unread detection
- * Call from console: window.__snapDebugChats()
- */
-function debugChatList(): void {
-  snapLog('=== DEBUG: Chat List Detection ===');
-  const chatItems = findAllElements(SNAPCHAT_SELECTORS.chatListItem);
-  snapLog(`Total chat items found: ${chatItems.length}`);
-
-  chatItems.forEach((item, idx) => {
-    const text = item.textContent?.trim().substring(0, 80) || '';
-    const hasUnreadBadge = item.querySelector('[class*="unread"], [class*="Unread"], [class*="badge"], [class*="Badge"], [class*="dot"], [class*="Dot"]') !== null;
-    const hasUnreadClass = item.className.toLowerCase().includes('unread');
-    const isNew = isNewIncomingChat(item);
-
-    snapLog(`\n[${idx}] Chat: "${text}"`);
-    snapLog(`    Has unread badge: ${hasUnreadBadge}`);
-    snapLog(`    Has unread class: ${hasUnreadClass}`);
-    snapLog(`    Detected as new incoming: ${isNew}`);
-    snapLog(`    Classes: ${item.className.substring(0, 100)}...`);
-
-    // Visual highlight
-    const originalBorder = item.style.border;
-    item.style.border = isNew ? '3px solid lime' : '2px solid gray';
-    setTimeout(() => {
-      item.style.border = originalBorder;
-    }, 5000);
-  });
-
-  const unreadChats = findUnreadChats();
-  snapLog(`\n✓ Total unread chats detected: ${unreadChats.length}`);
-  snapLog('=== END DEBUG ===');
-  console.log('%c🟢 Lime border = New incoming chat detected | Gray border = No new messages', 'font-size: 14px; font-weight: bold;');
-}
-
-/**
- * Debug function to show all current selectors
- * Call from console: window.__snapSelectors()
- */
-function debugSelectors(): void {
-  console.log('=== SNAPCHAT SELECTORS ===');
-  console.log(JSON.stringify(SNAPCHAT_SELECTORS, null, 2));
-  console.log('\n=== TESTING SELECTORS ===');
-
-  for (const [key, selector] of Object.entries(SNAPCHAT_SELECTORS)) {
-    const elements = findAllElements(selector);
-    console.log(`${key}: ${elements.length} elements found`);
-    if (elements.length > 0 && elements.length < 5) {
-      elements.forEach((el, i) => {
-        console.log(`  [${i}] ${el.tagName} - "${el.textContent?.substring(0, 40)}..."`);
-      });
+  // Stop monitoring when we leave the chat
+  function stopChatMonitoring() {
+    if (currentMonitoredChat.checkInterval) {
+      clearInterval(currentMonitoredChat.checkInterval);
+      log('Stopped monitoring chat: ' + currentMonitoredChat.username);
+      currentMonitoredChat.username = null;
+      currentMonitoredChat.lastMessageId = null;
+      currentMonitoredChat.checkInterval = null;
     }
   }
-  console.log('=== END SELECTORS ===');
-}
 
-// Expose debug functions to window
-if (typeof window !== 'undefined') {
-  (window as any).__snapDebug = debugMessageClassification;
-  (window as any).__snapDebugChats = debugChatList;
-  (window as any).__snapSelectors = debugSelectors;
-}
+  // Main poll function
+  let pollCount = 0;
+  async function poll() {
+    if (!window.__SNAPPY_RUNNING__) return;
 
-/**
- * Export for use
- */
-export {
-  startSnapchatBot,
-  stopSnapchatBot,
-  isSnapchatBotRunning,
-  getConversationMemory,
-  getAllMemories,
-  getCurrentSender,
-  getConversationMessages,
-  findUnreadChats,
-  debugMessageClassification,
-  SNAPCHAT_SELECTORS
-};
+    // Check if already processing - if so, skip this poll cycle
+    if (isProcessing) {
+      log('Already processing, skipping this poll cycle');
+      return;
+    }
+
+    pollCount++;
+    log('--- Poll #' + pollCount + ' ---');
+    
+    const chats = findClickableChats();
+    log('Found ' + chats.length + ' chat items');
+
+    // Debug first 5 chats on every poll (to see what we're detecting)
+    if (chats.length > 0) {
+      log('Showing first ' + Math.min(5, chats.length) + ' chats:');
+      for (let i = 0; i < Math.min(5, chats.length); i++) {
+        debugChatElement(chats[i], i);
+      }
+    }
+
+    // Find chats with unread
+    const unreadChats = [];
+    for (const chat of chats) {
+      if (isNewIncomingChat(chat)) {
+        unreadChats.push(chat);
+      }
+    }
+
+    log('Unread chats: ' + unreadChats.length);
+
+    // Only process chats with actual unread indicators
+    if (unreadChats.length === 0) {
+      log('No unread messages to process');
+      return;
+    }
+
+    // Check if the unread chat is from someone different than who we're monitoring
+    const chat = unreadChats[0];
+    const username = getUsernameFromChatRow(chat);
+
+    if (currentMonitoredChat.username && username !== currentMonitoredChat.username) {
+      log('New unread chat from different user, switching from ' + currentMonitoredChat.username + ' to ' + username);
+      stopChatMonitoring();
+    }
+
+    // Process first unread chat (set lock to prevent concurrent processing)
+    isProcessing = true;
+    try {
+      const chatText = chat.textContent?.trim().substring(0, 50) || 'Unknown';
+      await processChat(chat, chatText);
+    } finally {
+      isProcessing = false;
+      log('Finished processing, ready for next poll');
+    }
+  }
+  
+  // Start
+  log('Bot started!');
+  log('Rules: ' + (CONFIG.replyRules?.length || 0));
+  
+  // Initial scan after short delay
+  setTimeout(scanPage, 1500);
+  
+  // Start polling after brief delay
+  setTimeout(() => {
+    log('Starting message polling...');
+    poll();
+    pollInterval = setInterval(poll, 5000);
+  }, 2000);
+  
+  // Stop function
+  window.__SNAPPY_STOP__ = function() {
+    window.__SNAPPY_RUNNING__ = false;
+    if (pollInterval) clearInterval(pollInterval);
+    log('Bot stopped');
+  };
+})();
+`;
+}
