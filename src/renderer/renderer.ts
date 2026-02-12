@@ -485,9 +485,9 @@ function buildThreadsBotScript(config: any): string {
 `;
 }
 
-function buildRedditBotScript(config: any): string {
+function buildRedditFallbackBotScript(config: any): string {
   const serializedConfig = JSON.stringify(config || {});
-  
+
   return `
 (function() {
   if (window.__SNAPPY_RUNNING__ && window.__SNAPPY_REDDIT_RUNNING__) {
@@ -498,156 +498,711 @@ function buildRedditBotScript(config: any): string {
   window.__SNAPPY_RUNNING__ = true;
   window.__SNAPPY_REDDIT_RUNNING__ = true;
 
-  // Global error handler for the Reddit bot
-  const originalError = window.onerror;
-  window.onerror = function(message, source, lineno, colno, error) {
-    redditLog('Global error caught: ' + message + ' at ' + source + ':' + lineno);
-    if (originalError) {
-      return originalError.apply(this, arguments);
-    }
-    return false;
-  };
-
   const CONFIG = ${serializedConfig};
-  const processedItems = new Set();
-  let isRunning = false;
+  let isRunning = true;
   let pollInterval = null;
   let isProcessing = false;
+  let nextSubredditCheckAt = 0;
+  let lastPmCheckAt = 0;
+  const seen = new Set();
 
-  // Reddit-specific configuration with defaults
-  const redditSettings = {
-    watchNotifications: true,
+  const MIN_SUBREDDIT_CHECK_MS = 5 * 60 * 1000;
+  const MAX_SUBREDDIT_CHECK_MS = 60 * 60 * 1000;
+  const PM_CHECK_DEBOUNCE_MS = 15000;
+
+  const settings = {
     watchPrivateMessages: true,
+    readPrivateMessages: true,
     watchSubreddits: [],
     subredditKeywords: [],
-    autoReplyToComments: true,
-    autoReplyToPMs: true,
-    autoReplyToPosts: false,
+    authCookieString: '',
+    sessionCookie: '',
     pollIntervalMs: 30000,
-    maxItemsPerPoll: 3,
-    minPostScore: 1,
-    maxPostAge: 24,
-    skipOwnPosts: true,
-    skipOwnComments: true,
-    ...(CONFIG.reddit || {})
+    maxItemsPerPoll: (CONFIG?.reddit && CONFIG.reddit.maxCommentsPerPoll) || 3,
+    ...(CONFIG?.reddit || {})
   };
 
-  const MIN_MESSAGE_LENGTH = 5;
-
-  // Reddit selectors for different page types
-  const REDDIT_SELECTORS = {
-    notificationBell: '[data-testid="notification-bell"], .icon-notification',
-    notificationDropdown: '[data-testid="notification-dropdown"], .Dropdown__content',
-    notificationItems: '[data-testid="notification-item"], .notification-item',
-    unreadNotification: '.unread, [data-is-unread="true"]',
-    messageIcon: '[data-testid="chat-button"], .icon-message',
-    messagesList: '[data-testid="messages-list"], .messages-list',
-    messageItem: '[data-testid="message-item"], .message-item',
-    unreadMessage: '.unread, [data-unread="true"]',
-    commentReply: '[data-testid="comment-reply-button"], .reply-button',
-    commentText: '[data-testid="comment-content"], .comment-content, .md',
-    postTitle: '[data-testid="post-title"], .title',
-    postContent: '[data-testid="post-content"], .post-content',
-    subredditLink: 'a[href*="/r/"]',
-    replyInput: '[data-testid="reply-input"], textarea[name="text"], .reply-form textarea',
-    messageInput: '[data-testid="message-input"], .message-compose textarea',
-    submitButton: '[data-testid="submit-button"], button[type="submit"], .submit-button'
-  };
-
-  function redditLog(message) {
-    const timestamp = new Date().toLocaleTimeString();
-    const formatted = '[' + timestamp + '] [Reddit] ' + message;
-    console.log('%c' + formatted, 'color: #FF4500; background: #000; padding: 2px 5px;');
+  function log(msg) {
+    const formatted = '[Snappy][Reddit] ' + msg;
+    console.log(formatted);
     window.dispatchEvent(new CustomEvent('snappy-log', { detail: { message: formatted, timestamp: Date.now() } }));
   }
 
-  function findElement(selectors) {
-    const selectorList = selectors.split(', ');
-    for (const selector of selectorList) {
+  function sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+  }
+
+  function randomRange(min, max) {
+    return Math.floor(Math.random() * (max - min + 1)) + min;
+  }
+
+  function scheduleNextSubredditCheck() {
+    const waitMs = randomRange(MIN_SUBREDDIT_CHECK_MS, MAX_SUBREDDIT_CHECK_MS);
+    nextSubredditCheckAt = Date.now() + waitMs;
+    log('Next subreddit check in ~' + Math.round(waitMs / 60000) + ' minute(s)');
+  }
+
+  function normalizeSubreddit(name) {
+    if (!name || typeof name !== 'string') return '';
+    return name.trim().replace(/^r\\//i, '').replace(/^\\/+|\\/+$/g, '');
+  }
+
+  function matchesKeywords(title, selftext) {
+    const keywords = settings.subredditKeywords || [];
+    if (!keywords.length) return true;
+    const text = ((title || '') + ' ' + (selftext || '')).toLowerCase();
+    return keywords.some(k => text.includes(String(k || '').toLowerCase()));
+  }
+
+  function applyCookie(name, value) {
+    if (!name) return;
+    const encodedName = encodeURIComponent(String(name).trim());
+    const encodedValue = encodeURIComponent(String(value || '').trim());
+    if (!encodedName) return;
+    const cookie = encodedName + '=' + encodedValue + '; domain=.reddit.com; path=/; secure; samesite=lax';
+    document.cookie = cookie;
+  }
+
+  function applyManualAuthCookies() {
+    const cookieString = String(settings.authCookieString || '').trim();
+    const sessionCookie = String(settings.sessionCookie || '').trim();
+
+    if (cookieString) {
+      cookieString.split(';').forEach(part => {
+        const seg = String(part || '').trim();
+        if (!seg) return;
+        const eqIdx = seg.indexOf('=');
+        if (eqIdx <= 0) return;
+        const name = seg.substring(0, eqIdx).trim();
+        const value = seg.substring(eqIdx + 1).trim();
+        applyCookie(name, value);
+      });
+    }
+
+    if (sessionCookie) {
+      applyCookie('reddit_session', sessionCookie);
+    }
+  }
+
+  function shouldReadPrivateMessages() {
+    return settings.watchPrivateMessages !== false && settings.readPrivateMessages !== false;
+  }
+
+  function shouldOpenChatOnStart() {
+    return settings.watchPrivateMessages !== false && settings.autoReplyToPMs !== false;
+  }
+
+  function buildPmId(item) {
+    return String(item?.data?.name || item?.data?.id || item?.data?.first_message_name || '');
+  }
+
+  function extractPmSummary(item) {
+    const data = item?.data || {};
+    const author = String(data.author || data.dest || 'unknown');
+    const subject = String(data.subject || '').trim();
+    const body = String(data.body || '').replace(/\\s+/g, ' ').trim();
+    const preview = body.substring(0, 120);
+    return { author, subject, preview };
+  }
+
+  async function readUnreadPrivateMessages() {
+    if (!shouldReadPrivateMessages()) return;
+    if ((Date.now() - lastPmCheckAt) < PM_CHECK_DEBOUNCE_MS) return;
+    applyManualAuthCookies();
+    lastPmCheckAt = Date.now();
+
+    const limit = Math.max(1, Number(settings.maxItemsPerPoll) || 3);
+    const url = 'https://www.reddit.com/message/inbox.json?limit=' + limit;
+
+    try {
+      const response = await fetch(url, {
+        credentials: 'include',
+        headers: { 'Accept': 'application/json' }
+      });
+      if (!response.ok) {
+        log('Failed to read PM inbox (HTTP ' + response.status + ')');
+        return;
+      }
+
+      const payload = await response.json();
+      const children = payload?.data?.children || [];
+      const unreadInboxItems = children.filter(item => item?.data?.new === true);
+      const unreadPrivateMessages = unreadInboxItems.filter(item => String(item?.kind || '').toLowerCase() === 't4');
+      if (!unreadPrivateMessages.length) {
+        if (unreadInboxItems.length > 0) {
+          log('Unread inbox items found, but no unread private messages');
+        }
+        return;
+      }
+
+      log('Unread PMs: ' + unreadPrivateMessages.length);
+      unreadPrivateMessages.slice(0, limit).forEach(item => {
+        const pmId = buildPmId(item);
+        const key = 'pm:' + pmId;
+        if (!pmId || seen.has(key)) return;
+        seen.add(key);
+        const summary = extractPmSummary(item);
+        const subjectPart = summary.subject ? ' [' + summary.subject + ']' : '';
+        log('PM from u/' + summary.author + subjectPart + ': ' + summary.preview);
+      });
+    } catch (e) {
+      log('Error reading PM inbox: ' + e);
+    }
+  }
+
+  function deepQueryAll(selector) {
+    const out = [];
+    const seenNodes = new Set();
+
+    function walk(root) {
+      if (!root || seenNodes.has(root)) return;
+      seenNodes.add(root);
+
       try {
-        const el = document.querySelector(selector);
-        if (el) return el;
-      } catch (e) { /* invalid selector */ }
+        root.querySelectorAll(selector).forEach(node => out.push(node));
+      } catch (e) {
+        // ignore invalid selector cases
+      }
+
+      let all = [];
+      try {
+        all = root.querySelectorAll('*');
+      } catch (e) {
+        all = [];
+      }
+      all.forEach(node => {
+        if (node.shadowRoot) {
+          walk(node.shadowRoot);
+        }
+      });
+    }
+
+    walk(document);
+    return out;
+  }
+
+  function detectOwnUsername() {
+    const selectors = [
+      'a[href^="/user/"]',
+      '[data-testid="user-drawer-button"]',
+      'a[href*="/user/"]'
+    ];
+    for (const selector of selectors) {
+      const nodes = deepQueryAll(selector);
+      for (const node of nodes) {
+        const href = node.getAttribute ? (node.getAttribute('href') || '') : '';
+        const match = href.match(/\\/user\\/([^/?#]+)/i);
+        if (match && match[1]) return decodeURIComponent(match[1]).toLowerCase();
+        const txt = String(node.textContent || '').trim().replace(/^u\\//i, '');
+        if (txt && txt.length > 1 && !txt.includes('open')) return txt.toLowerCase();
+      }
+    }
+    return '';
+  }
+
+  function getLatestIncomingChatMessage() {
+    const own = detectOwnUsername();
+    const messageNodes = deepQueryAll('.room-message[aria-label*=" said "]');
+    if (!messageNodes.length) return null;
+
+    for (let i = messageNodes.length - 1; i >= 0; i--) {
+      const node = messageNodes[i];
+      const aria = String(node.getAttribute('aria-label') || '');
+      const match = aria.match(/^(.+?)\\s+said\\s+/i);
+      const authorRaw = match ? match[1] : '';
+      const author = String(authorRaw || '').trim().replace(/^u\\//i, '');
+      if (!author) continue;
+      if (own && author.toLowerCase() === own) continue;
+
+      let text = '';
+      const textEls = node.querySelectorAll('.room-message-text');
+      textEls.forEach(el => {
+        const t = String(el.textContent || '').replace(/\\s+/g, ' ').trim();
+        if (t) text = t;
+      });
+      if (!text) {
+        const t = String(node.textContent || '').replace(/\\s+/g, ' ').trim();
+        text = t;
+      }
+      if (!text || text.length < 2) continue;
+      return { author, text: text.substring(0, 500) };
+    }
+
+    return null;
+  }
+
+  async function waitForAiReply(requestId, timeoutMs) {
+    const started = Date.now();
+    while ((Date.now() - started) < timeoutMs) {
+      const response = window.__SNAPPY_AI_RESPONSE__;
+      if (response && response.id === requestId) {
+        window.__SNAPPY_AI_RESPONSE__ = null;
+        return response.reply || null;
+      }
+      await sleep(150);
     }
     return null;
   }
 
-  function findAllElements(selectors) {
-    const selectorList = selectors.split(', ');
-    const results = [];
-    for (const selector of selectorList) {
-      try {
-        document.querySelectorAll(selector).forEach(el => results.push(el));
-      } catch (e) { /* invalid selector */ }
-    }
-    return results;
-  }
-
-  function getPageType() {
-    const url = window.location.href;
-    if (url.includes('/message/')) return 'messages';
-    if (url.includes('/notifications/')) return 'notifications';
-    if (url.includes('/r/') && url.includes('/comments/')) return 'post';
-    if (url.includes('/r/')) return 'subreddit';
-    return 'unknown';
-  }
-
-  function generateItemId(element, type) {
-    const text = element.textContent?.substring(0, 100) || '';
-    const timestamp = Date.now();
-    return type + '-' + btoa(text).substring(0, 20) + '-' + timestamp;
-  }
-
-  function extractTextContent(element) {
-    const commentEl = element.querySelector(REDDIT_SELECTORS.commentText);
-    if (commentEl) {
-      return commentEl.textContent?.trim() || '';
-    }
-    
-    const titleEl = element.querySelector(REDDIT_SELECTORS.postTitle);
-    const contentEl = element.querySelector(REDDIT_SELECTORS.postContent);
-    
-    const title = titleEl?.textContent?.trim() || '';
-    const content = contentEl?.textContent?.trim() || '';
-    
-    return title || content || element.textContent?.trim() || '';
-  }
-
-  async function generateReply(text, context) {
-    // First try rule-based matching
-    const rules = CONFIG?.replyRules || [];
-    const lowerText = text.toLowerCase();
-    
+  async function generatePmReply(messageText, username) {
+    const rules = Array.isArray(CONFIG?.replyRules) ? CONFIG.replyRules : [];
+    const lower = String(messageText || '').toLowerCase();
     for (const rule of rules) {
       const matchStr = typeof rule.match === 'string' ? rule.match : '';
       const match = rule.caseSensitive ? matchStr : matchStr.toLowerCase();
-      const target = rule.caseSensitive ? text : lowerText;
-      
+      const target = rule.caseSensitive ? messageText : lower;
       if (match && target.includes(match)) {
-        redditLog('Rule matched: "' + matchStr + '" -> "' + rule.reply + '"');
+        return String(rule.reply || '').trim() || null;
+      }
+    }
+
+    if (CONFIG?.ai?.enabled) {
+      try {
+        const reqId = 'rd-chat-' + Date.now() + '-' + Math.floor(Math.random() * 100000);
+        window.__SNAPPY_AI_REQUEST__ = {
+          id: reqId,
+          username: username || 'reddit_user',
+          messages: [{ role: 'user', content: String(messageText || '').trim() }]
+        };
+        const timeoutMs = Number(CONFIG?.ai?.requestTimeoutMs) || 30000;
+        const reply = await waitForAiReply(reqId, timeoutMs);
+        if (reply && String(reply).trim()) return String(reply).trim();
+      } catch (e) {
+        log('AI chat reply generation failed: ' + e);
+      }
+    }
+
+    return 'Thanks for the message.';
+  }
+
+  async function sendChatReply(text) {
+    const inputSelectors = [
+      'textarea[name="text"]',
+      'textarea',
+      '[contenteditable="true"][role="textbox"]',
+      '[contenteditable="true"]'
+    ];
+
+    let input = null;
+    for (const selector of inputSelectors) {
+      const nodes = deepQueryAll(selector);
+      for (const node of nodes) {
+        if (!(node instanceof HTMLElement)) continue;
+        if (!node.offsetParent && node.getAttribute('contenteditable') !== 'true') continue;
+        input = node;
+        break;
+      }
+      if (input) break;
+    }
+    if (!input) {
+      log('Chat input not found for reply');
+      return false;
+    }
+
+    input.focus();
+    if (input.getAttribute('contenteditable') === 'true') {
+      input.textContent = '';
+      input.textContent = text;
+    } else if (Object.prototype.hasOwnProperty.call(input, 'value')) {
+      input.value = text;
+    }
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    await sleep(150);
+
+    const buttonSelectors = [
+      'button[aria-label*="send" i]',
+      'button[data-testid*="send"]',
+      'button[type="submit"]'
+    ];
+    for (const selector of buttonSelectors) {
+      const btns = deepQueryAll(selector);
+      for (const btn of btns) {
+        if (!(btn instanceof HTMLElement)) continue;
+        btn.click();
+        return true;
+      }
+    }
+
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', keyCode: 13, bubbles: true }));
+    input.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', keyCode: 13, bubbles: true }));
+    return true;
+  }
+
+  async function processActiveChatMessage() {
+    if (!shouldReadPrivateMessages()) return;
+    if (settings.autoReplyToPMs === false) return;
+
+    const latest = getLatestIncomingChatMessage();
+    if (!latest) return;
+
+    const messageKey = 'chat-msg:' + latest.author.toLowerCase() + ':' + latest.text.substring(0, 200);
+    if (seen.has(messageKey)) return;
+
+    const reply = await generatePmReply(latest.text, latest.author);
+    if (!reply) return;
+
+    const sent = await sendChatReply(reply);
+    if (sent) {
+      seen.add(messageKey);
+      log('Replied to chat from u/' + latest.author + ': ' + reply.substring(0, 80));
+    }
+  }
+
+  function tryClickNewSortForSubreddit(subreddit) {
+    const currentPath = (window.location.pathname || '').toLowerCase();
+    const expected = '/r/' + String(subreddit || '').toLowerCase() + '/';
+    if (!currentPath.includes(expected)) return false;
+
+    const candidates = Array.from(document.querySelectorAll('button, a, faceplate-tab, span'));
+    for (const el of candidates) {
+      const txt = String(el.textContent || '').trim().toLowerCase();
+      if (txt !== 'new') continue;
+      if (el instanceof HTMLElement) {
+        el.click();
+        log('Selected \"New\" filter in r/' + subreddit);
+        return true;
+      }
+    }
+    return false;
+  }
+
+  async function checkRandomSubreddit(forceAll) {
+    applyManualAuthCookies();
+    const list = Array.isArray(settings.watchSubreddits) ? settings.watchSubreddits : [];
+    const subreddits = list.map(normalizeSubreddit).filter(Boolean);
+    if (!subreddits.length || (!forceAll && Date.now() < nextSubredditCheckAt)) return;
+
+    const targets = forceAll ? subreddits : [subreddits[randomRange(0, subreddits.length - 1)]];
+    const limit = Math.max(1, Number(settings.maxItemsPerPoll) || 3);
+
+    try {
+      for (const subreddit of targets) {
+        const clickedNew = tryClickNewSortForSubreddit(subreddit);
+        if (!clickedNew) {
+          log('New filter click not available in current view for r/' + subreddit + '; using /new feed');
+        }
+        const url = 'https://www.reddit.com/r/' + encodeURIComponent(subreddit) + '/new.json?limit=' + limit;
+        log('Checking r/' + subreddit + ' sorted by new');
+        const response = await fetch(url, { credentials: 'include', headers: { 'Accept': 'application/json' } });
+        if (!response.ok) {
+          log('Subreddit check failed (HTTP ' + response.status + ')');
+          continue;
+        }
+        const payload = await response.json();
+        const children = payload?.data?.children || [];
+        const matches = [];
+        for (const child of children) {
+          const post = child?.data;
+          if (!post || !matchesKeywords(post.title, post.selftext)) continue;
+          const id = (post.name || post.permalink || post.title || '').toString();
+          if (seen.has(id)) continue;
+          seen.add(id);
+          matches.push(post);
+        }
+
+        if (matches.length > 0) {
+          log('Found ' + matches.length + ' new post(s) in r/' + subreddit);
+        } else {
+          log('No new matching posts in r/' + subreddit);
+        }
+      }
+    } catch (e) {
+      log('Subreddit check error: ' + e);
+    } finally {
+      scheduleNextSubredditCheck();
+    }
+  }
+
+  async function openChatAndCheckUnread() {
+    if (!shouldOpenChatOnStart()) return;
+
+    const chatButtonSelectors = [
+      '#header-action-item-chat-button',
+      '[data-testid=\"chat-button\"]',
+      'button[id*=\"chat-button\"]',
+      'a[href*=\"/message/inbox\"]',
+      'a[href*=\"/message/messages\"]',
+      'a[href*=\"/chat\"]',
+      'button[aria-label*=\"open chat\" i]',
+      'button[aria-label*=\"chat\" i]'
+    ];
+
+    let clicked = false;
+    for (const selector of chatButtonSelectors) {
+      const el = document.querySelector(selector);
+      if (el && el instanceof HTMLElement) {
+        el.click();
+        clicked = true;
+        log('Opened Reddit chat/messages area');
+        break;
+      }
+    }
+
+    if (!clicked) {
+      log('Chat/messages button not found, checking PM inbox directly');
+    } else {
+      await sleep(1000);
+      const unreadEls = Array.from(document.querySelectorAll('.unread, [data-unread=\"true\"], .message.unread'));
+      if (unreadEls.length > 0) {
+        log('Unread messages in UI: ' + unreadEls.length);
+      }
+    }
+
+    await readUnreadPrivateMessages();
+    await processActiveChatMessage();
+  }
+
+  async function poll() {
+    if (!isRunning || isProcessing) return;
+    isProcessing = true;
+    try {
+      await readUnreadPrivateMessages();
+      await processActiveChatMessage();
+      await checkRandomSubreddit(false);
+    } finally {
+      isProcessing = false;
+    }
+  }
+
+  function stop() {
+    isRunning = false;
+    if (pollInterval) clearInterval(pollInterval);
+    window.__SNAPPY_RUNNING__ = false;
+    window.__SNAPPY_REDDIT_RUNNING__ = false;
+    log('Reddit bot stopped');
+  }
+
+  log('Reddit bot started (fallback)');
+  if (String(settings.authCookieString || '').trim() || String(settings.sessionCookie || '').trim()) {
+    log('Manual Reddit auth cookies configured');
+  }
+  applyManualAuthCookies();
+  scheduleNextSubredditCheck();
+  openChatAndCheckUnread().then(() => checkRandomSubreddit(true)).catch(e => {
+    log('Startup Reddit checks error: ' + e);
+  });
+  poll();
+  pollInterval = setInterval(poll, Math.max(5000, Number(settings.pollIntervalMs) || 30000));
+  window.__SNAPPY_STOP__ = stop;
+})();
+`;
+}
+
+<<<<<<< HEAD
+=======
+function buildRedditBotScript(config: any): string {
+  try {
+    const req = (window as any).require;
+    if (typeof req === 'function') {
+      const redditModule = req('../injection/redditBot');
+      if (redditModule && typeof redditModule.buildRedditBotScript === 'function') {
+        return redditModule.buildRedditBotScript(config);
+      }
+    }
+  } catch (error) {
+    console.warn('[Snappy][Reddit] Falling back to inline Reddit bot script:', error);
+  }
+
+  return buildRedditFallbackBotScript(config);
+}
+function buildInstagramBotScript(config: any): string {
+  const serializedConfig = JSON.stringify(config || {});
+  return `
+(function() {
+  if (window.__SNAPPY_RUNNING__ && window.__SNAPPY_INSTAGRAM_RUNNING__) {
+    console.log('[Snappy][Instagram] Already running');
+    return;
+  }
+
+  window.__SNAPPY_RUNNING__ = true;
+  window.__SNAPPY_INSTAGRAM_RUNNING__ = true;
+
+  const CONFIG = ${serializedConfig};
+  const seenMessages = new Set();
+  let isRunning = true;
+  let pollInterval = null;
+  let isProcessing = false;
+
+  const MIN_MESSAGE_LENGTH = 2;
+  const BASE_POLL_MS = (CONFIG?.instagram && CONFIG.instagram.pollIntervalMs) || 3000;
+  const POLL_VARIANCE_MS = 2000; // Random variance for more natural scanning
+  const typingDelayRange = CONFIG?.typingDelayRangeMs || [50, 150];
+  const preReplyDelayRange = CONFIG?.preReplyDelayRangeMs || [2000, 6000];
+
+  function getRandomPollInterval() {
+    return BASE_POLL_MS + Math.floor(Math.random() * POLL_VARIANCE_MS);
+  }
+
+  function log(msg) {
+    const formatted = '[Snappy][Instagram] ' + msg;
+    console.log(formatted);
+    window.dispatchEvent(new CustomEvent('snappy-log', { detail: { message: formatted, timestamp: Date.now() } }));
+  }
+
+  function sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+  }
+
+  /**
+   * Extract message text from a row element
+   * Instagram wraps each message in many divs, but the real message is always 
+   * the innermost div with dir="auto" that contains readable text.
+   */
+  function getMessageText(row) {
+    // Look for div with dir="auto" which contains the actual message text
+    const messageDiv = row.querySelector('div[dir="auto"]');
+    if (messageDiv) {
+      const text = messageDiv.innerText.trim();
+      if (text) {
+        log('Extracted text from dir="auto": "' + text.substring(0, 50) + '..."');
+        return text;
+      }
+    }
+    
+    // If this element IS a dir="auto" div, get its text directly
+    if (row.getAttribute('dir') === 'auto') {
+      const text = row.innerText.trim();
+      if (text) {
+        log('Extracted text from dir="auto" element: "' + text.substring(0, 50) + '..."');
+        return text;
+      }
+    }
+    
+    // Fallback to span if dir="auto" not found
+    const span = row.querySelector('span');
+    if (span) {
+      const text = span.innerText.trim();
+      if (text) {
+        log('Extracted text from span: "' + text.substring(0, 50) + '..."');
+        return text;
+      }
+    }
+    
+    log('No text found in element');
+    return null;
+  }
+
+  /**
+   * Detect if a message is incoming (not sent by us)
+   * Instagram doesn't label this cleanly, but here's the reliable heuristic:
+   * Incoming messages are left aligned and do NOT have "Seen" or "Delivered" nearby
+   */
+  function isIncoming(row) {
+    return !row.innerText.includes('Seen') && !row.innerText.includes('Delivered');
+  }
+
+  /**
+   * Check for new incoming messages and process them
+   */
+  function checkForNewMessages() {
+    const messages = document.querySelectorAll('div[role="row"]');
+    
+    for (const row of messages) {
+      const messageText = getMessageText(row);
+      
+      // Skip if no text, empty text, or too short
+      if (!messageText || messageText.length < MIN_MESSAGE_LENGTH) {
+        continue;
+      }
+      
+      // Skip if not incoming message
+      if (!isIncoming(row)) {
+        continue;
+      }
+      
+      // Create unique message ID
+      const messageId = 'msg-' + messageText.substring(0, 100).replace(/\s+/g, '-');
+      
+      // Skip if we've already seen this message
+      if (seenMessages.has(messageId)) {
+        continue;
+      }
+      
+      // Mark as seen immediately to prevent duplicate processing
+      seenMessages.add(messageId);
+      
+      log('New incoming message detected: "' + messageText.substring(0, 50) + '..."');
+      
+      // Process this message
+      processNewMessage(messageText);
+      
+      // Only process one message per scan to avoid overwhelming
+      break;
+    }
+  }
+
+  /**
+   * Process a new incoming message
+   */
+  async function processNewMessage(messageText) {
+    try {
+      // Generate reply
+      const reply = await generateReply(messageText);
+      if (!reply) {
+        log('No reply generated for message');
+        return;
+      }
+
+      // Random skip
+      const skipProb = CONFIG?.randomSkipProbability || 0.15;
+      if (Math.random() < skipProb) {
+        log('Randomly skipping reply (prob ' + Math.round(skipProb * 100) + '%)');
+        return;
+      }
+
+      // Pre-reply delay (simulate thinking time)
+      const delay = Math.floor(Math.random() * (preReplyDelayRange[1] - preReplyDelayRange[0])) + preReplyDelayRange[0];
+      log('Waiting ' + delay + 'ms before replying');
+      await sleep(delay);
+
+      // Type and send reply
+      const typed = await typeMessage(reply);
+      if (!typed) {
+        log('Failed to type message');
+        return;
+      }
+
+      await sleep(500);
+
+      const sent = await sendMessage();
+      if (sent) {
+        log('✓ Reply sent: "' + reply.substring(0, 60) + '..."');
+      } else {
+        log('Failed to send message');
+      }
+    } catch (err) {
+      log('Error processing message: ' + err);
+    }
+  }
+
+  async function generateReply(messageText) {
+    const rules = CONFIG?.replyRules || [];
+    const lower = messageText.toLowerCase();
+
+    for (const rule of rules) {
+      const matchStr = typeof rule.match === 'string' ? rule.match : '';
+      const match = rule.caseSensitive ? matchStr : matchStr.toLowerCase();
+      const text = rule.caseSensitive ? messageText : lower;
+
+      if (match && text.includes(match)) {
+        log('Rule matched: ' + matchStr);
         return rule.reply;
       }
     }
 
-    // Try AI if enabled
     const aiConfig = CONFIG?.ai;
     if (aiConfig?.enabled) {
       try {
-        const contextPrompts = {
-          notification: 'You are responding to a Reddit notification. Keep it brief and relevant.',
-          message: 'You are responding to a Reddit private message. Be helpful and conversational.',
-          post: 'You are commenting on a Reddit post. Add value to the discussion.'
-        };
-        
+        log('Requesting AI reply...');
         const messages = [
-          { role: 'system', content: aiConfig.systemPrompt || contextPrompts[context] },
-          { role: 'user', content: text }
+          { role: 'system', content: aiConfig.systemPrompt || 'You are a friendly person responding to Instagram DMs. Keep responses brief and casual.' },
+          { role: 'user', content: messageText }
         ];
-        
+
         const url = 'http://' + (aiConfig.llmEndpoint || 'localhost') + ':' + (aiConfig.llmPort || 8080) + '/v1/chat/completions';
         const controller = new AbortController();
         const timeoutId = setTimeout(() => controller.abort(), aiConfig.requestTimeoutMs || 30000);
-        
+
         const response = await fetch(url, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -659,324 +1214,584 @@ function buildRedditBotScript(config: any): string {
           }),
           signal: controller.signal
         });
-        
+
         clearTimeout(timeoutId);
-        
+
         if (response.ok) {
           const data = await response.json();
-          const aiReply = data.choices?.[0]?.message?.content?.trim();
+          const aiReply = data?.choices?.[0]?.message?.content?.trim();
           if (aiReply) {
-            redditLog('AI reply generated for ' + context);
+            log('AI reply generated');
             return aiReply;
           }
+        } else {
+          log('AI request failed: HTTP ' + response.status);
         }
-      } catch (error) {
-        redditLog('AI error: ' + error.message);
+      } catch (err) {
+        if (err?.name === 'AbortError') {
+          log('AI request timed out');
+        } else {
+          log('AI error: ' + err?.message);
+        }
       }
     }
-    
-    // Fallback responses
-    const fallbacks = {
-      notification: "Thanks for the notification!",
-      message: "Thanks for reaching out! I'll get back to you soon.",
-      post: "Interesting post, thanks for sharing!"
-    };
-    
-    return fallbacks[context];
+
+    if (lower.includes('?')) return "That's a good question! Let me get back to you on that.";
+    if (lower.includes('thank')) return "You're welcome! 😊";
+    if (lower.includes('hi') || lower.includes('hey') || lower.includes('hello')) return "Hey! What's up?";
+
+    return null;
   }
 
-  async function typeAndSubmitReply(text, inputSelector) {
-    try {
-      const input = findElement(inputSelector);
-      if (!input) {
-        redditLog('Reply input not found');
-        return false;
-      }
-      
-      input.focus();
+  async function typeMessage(text) {
+    // Find the message input - Instagram typically uses a contenteditable div or textarea
+    const input = document.querySelector('[contenteditable="true"][role="textbox"], textarea[placeholder*="Message"], textarea, [data-testid="message-input"]');
+
+    if (!input) {
+      log('Input field not found');
+      return false;
+    }
+
+    log('Found input field: ' + input.tagName + (input.getAttribute('role') ? '[role="' + input.getAttribute('role') + '"]' : ''));
+    
+    input.focus();
+    await sleep(500); // Longer wait for focus
+
+    // Clear existing content more thoroughly
+    if (input.getAttribute('contenteditable') === 'true') {
+      input.innerHTML = '';
+      input.textContent = '';
+      // Trigger events to ensure Instagram knows content changed
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      input.dispatchEvent(new Event('change', { bubbles: true }));
+    } else if (input.value !== undefined) {
+      input.value = '';
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      input.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+
+    await sleep(200);
+
+    // Type character by character
+    for (let i = 0; i < text.length; i++) {
+      const char = text[i];
+
       if (input.getAttribute('contenteditable') === 'true') {
-        input.innerHTML = '';
-        input.textContent = '';
-      } else if (input.value !== undefined) {
-        input.value = '';
-      }
-      
-      await sleep(200);
-      
-      const typingDelay = CONFIG?.typingDelayRangeMs || [50, 150];
-      
-      for (let i = 0; i < text.length; i++) {
-        const char = text[i];
-        
-        if (input.getAttribute('contenteditable') === 'true') {
-          input.textContent = (input.textContent || '') + char;
-        } else if (input.value !== undefined) {
-          input.value += char;
-        }
-        
+        input.textContent = (input.textContent || '') + char;
+        // Trigger input events after each character
         input.dispatchEvent(new Event('input', { bubbles: true }));
-        input.dispatchEvent(new KeyboardEvent('keydown', { key: char, bubbles: true }));
-        input.dispatchEvent(new KeyboardEvent('keyup', { key: char, bubbles: true }));
-        
-        const delay = Math.floor(Math.random() * (typingDelay[1] - typingDelay[0])) + typingDelay[0];
-        await sleep(delay);
+      } else if (input.value !== undefined) {
+        input.value += char;
+        input.dispatchEvent(new Event('input', { bubbles: true }));
       }
+
+      const delay = Math.floor(Math.random() * (typingDelayRange[1] - typingDelayRange[0])) + typingDelayRange[0];
+      await sleep(delay);
+    }
+
+    // Final events to ensure Instagram recognizes the complete message
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+    input.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', bubbles: true }));
+
+    log('Typed message: "' + text.substring(0, 30) + '..." - Final content: "' + (input.textContent || input.value || '').substring(0, 30) + '..."');
+    return true;
+  }
+
+  async function sendMessage() {
+    // Wait a moment for typing to settle
+    await sleep(300);
+    
+    // Find the send button - try multiple approaches
+    let sendBtn = null;
+    
+    // Method 1: Look for button with "Send" text or aria-label
+    const buttons = Array.from(document.querySelectorAll('button, div[role="button"]'));
+    sendBtn = buttons.find(btn => {
+      const text = btn.textContent?.toLowerCase();
+      const ariaLabel = btn.getAttribute('aria-label')?.toLowerCase();
+      return (text && text.includes('send')) || (ariaLabel && ariaLabel.includes('send'));
+    });
+
+    // Method 2: Look for SVG send icons (paper plane, arrow, etc.)
+    if (!sendBtn) {
+      sendBtn = buttons.find(btn => {
+        const svg = btn.querySelector('svg');
+        return svg && (svg.innerHTML.includes('M2.01') || svg.innerHTML.includes('plane') || svg.innerHTML.includes('arrow'));
+      });
+    }
+
+    // Method 3: Look for buttons near the input field
+    if (!sendBtn) {
+      const input = document.querySelector('[contenteditable="true"][role="textbox"], textarea');
+      if (input) {
+        const parent = input.closest('form, div');
+        if (parent) {
+          sendBtn = parent.querySelector('button, div[role="button"]');
+        }
+      }
+    }
+
+    if (sendBtn) {
+      log('Found send button: ' + sendBtn.tagName + ' - clicking...');
+      sendBtn.click();
+      await sleep(1000); // Wait longer for message to send
       
-      await sleep(500);
+      // Verify message was sent by checking if input is cleared
+      const input = document.querySelector('[contenteditable="true"][role="textbox"], textarea');
+      const inputEmpty = !input || !(input.textContent || input.value || '').trim();
       
-      const submitBtn = findElement(REDDIT_SELECTORS.submitButton);
-      if (submitBtn) {
-        submitBtn.click();
-        redditLog('Reply submitted: "' + text.substring(0, 50) + '..."');
+      if (inputEmpty) {
+        log('✓ Message sent successfully (input cleared)');
         return true;
       } else {
-        input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', keyCode: 13, bubbles: true }));
-        input.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', keyCode: 13, bubbles: true }));
-        redditLog('Reply submitted via Enter: "' + text.substring(0, 50) + '..."');
+        log('⚠ Send button clicked but input not cleared - message may not have sent');
+        return false;
+      }
+    }
+
+    // Fallback: Try Enter key
+    const input = document.querySelector('[contenteditable="true"][role="textbox"], textarea');
+    if (input) {
+      log('No send button found, trying Enter key...');
+      input.focus();
+      input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', keyCode: 13, bubbles: true }));
+      input.dispatchEvent(new KeyboardEvent('keypress', { key: 'Enter', keyCode: 13, bubbles: true }));
+      input.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', keyCode: 13, bubbles: true }));
+      await sleep(1000);
+      
+      // Check if input cleared
+      const inputEmpty = !(input.textContent || input.value || '').trim();
+      if (inputEmpty) {
+        log('✓ Message sent via Enter key');
+        return true;
+      } else {
+        log('⚠ Enter key pressed but input not cleared');
+        return false;
+      }
+    }
+
+    log('❌ Could not send message - no send button or input found');
+    return false;
+  }
+
+  function navigateToDMs() {
+    const links = Array.from(document.querySelectorAll('a[href*="/direct/"]'));
+    if (links.length > 0) {
+      const dmLink = links[0];
+      if (!window.location.href.includes('/direct/')) {
+        log('Navigating to DMs...');
+        dmLink.click();
         return true;
       }
-    } catch (e) {
-      redditLog('Error submitting reply: ' + e);
+    }
+    return false;
+  }
+
+  function isOnDMsPage() {
+    return window.location.href.includes('/direct/');
+  }
+
+  /**
+   * Check if we're in a specific conversation (not the main DMs list)
+   */
+  function isInConversation() {
+    return window.location.href.includes('/direct/t/');
+  }
+
+  /**
+   * Navigate back to the main DMs page (leave current conversation)
+   */
+  function navigateBackToDMs() {
+    // Look for the DM/Messages tab/link to go back to main DMs page
+    const dmLinks = Array.from(document.querySelectorAll('a[href*="/direct/"], a[href="/direct/inbox/"]'));
+    for (const link of dmLinks) {
+      // Skip if this is a specific conversation link
+      if (link.href.includes('/direct/t/')) continue;
+      
+      log('Navigating back to main DMs page');
+      link.click();
+      return true;
+    }
+    
+    // Alternative: look for back button or inbox button
+    const backButtons = Array.from(document.querySelectorAll('button, div[role="button"]')).filter(btn => {
+      const text = btn.textContent?.toLowerCase();
+      const ariaLabel = btn.getAttribute('aria-label')?.toLowerCase();
+      return (text && (text.includes('back') || text.includes('inbox'))) || 
+             (ariaLabel && (ariaLabel.includes('back') || ariaLabel.includes('inbox')));
+    });
+    
+    if (backButtons.length > 0) {
+      log('Clicking back button to return to DMs');
+      backButtons[0].click();
+      return true;
+    }
+    
+    log('Could not find way to navigate back to DMs');
+    return false;
+  }
+
+  function findConversations() {
+    const conversations = [];
+
+    let items = Array.from(document.querySelectorAll('[role="listitem"]'));
+
+    if (items.length === 0) {
+      log('No [role="listitem"] found, trying alternative selectors...');
+
+      items = Array.from(document.querySelectorAll('a[href*="/direct/t/"]'));
+      log('Found ' + items.length + ' direct message links');
+
+      if (items.length === 0) {
+        const unreadDivs = Array.from(document.querySelectorAll('div')).filter(div =>
+          div.textContent?.includes('Unread') && div.textContent.length < 200
+        );
+        log('Found ' + unreadDivs.length + ' elements with "Unread" text');
+
+        items = unreadDivs.map(div => {
+          let parent = div.parentElement;
+          for (let i = 0; i < 5 && parent; i++) {
+            if (parent.tagName === 'A' || parent.getAttribute('role') === 'button') {
+              return parent;
+            }
+            parent = parent.parentElement;
+          }
+          return div.parentElement;
+        }).filter(el => el !== null);
+      }
+    }
+
+    log('Found ' + items.length + ' total conversation items to check');
+
+    for (const item of items) {
+      const hasUnread = hasUnreadIndicator(item);
+
+      const text = item.textContent?.substring(0, 80) || '';
+      if (text.length > 0) {
+        const hasUnreadText = text.includes('Unread');
+        log('Item: "' + text + '" - hasUnread=' + hasUnread + ', hasUnreadText=' + hasUnreadText);
+      }
+
+      if (!hasUnread) continue;
+
+      const fullText = item.textContent || '';
+      const convId = 'conv-' + fullText.substring(0, 50).replace(/\\\\s+/g, '-');
+
+      if (!seenMessages.has(convId)) {
+        log('✓ Found unread conversation: ' + convId.substring(0, 60));
+        conversations.push({ id: convId, element: item });
+      } else {
+        log('Skipping already seen conversation: ' + convId.substring(0, 60));
+      }
+    }
+
+    return conversations;
+  }
+
+  function hasUnreadIndicator(element) {
+    const unreadDiv = element.querySelector('div.x9f619.x1ja2u2z.xzpqnlu.x1hyvwdk.x14bfe9o.xjm9jq1.x6ikm8r.x10wlt62.x10l6tqk.x1i1rx1s');
+    if (unreadDiv && unreadDiv.textContent?.includes('Unread')) {
+      return true;
+    }
+
+    const allDivs = element.querySelectorAll('div');
+    for (const div of allDivs) {
+      if (div.textContent?.trim() === 'Unread') {
+        return true;
+      }
+    }
+
+    const badge = element.querySelector('[role="status"], [aria-label*="unread"], [aria-label*="notification"]');
+    if (badge) return true;
+
+    const spans = element.querySelectorAll('span, div');
+    for (const el of spans) {
+      const weight = window.getComputedStyle(el).fontWeight;
+      if ((weight === 'bold' || weight === '700' || parseInt(weight) >= 600) && el.textContent && el.textContent.length > 3) {
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  async function openConversation(conversation) {
+    try {
+      log('Opening conversation: ' + conversation.id);
+
+      let clickTarget = conversation.element;
+
+      if (conversation.element.tagName === 'A') {
+        clickTarget = conversation.element;
+      } else {
+        const link = conversation.element.querySelector('a[href*="/direct/t/"]');
+        if (link) {
+          clickTarget = link;
+          log('Found direct message link within element');
+        } else {
+          const clickable = conversation.element.querySelector('[role="button"], a, button');
+          if (clickable) {
+            clickTarget = clickable;
+            log('Found clickable element within container');
+          }
+        }
+      }
+
+      log('Clicking element: ' + clickTarget.tagName);
+      clickTarget.click();
+      
+      // Wait longer for conversation to fully load
+      await sleep(3000);
+      
+      // Additional wait if we're still loading
+      let retries = 0;
+      while (retries < 3) {
+        const messageRows = document.querySelectorAll('div[role="row"], div[dir="auto"]');
+        if (messageRows.length > 0) {
+          log('Conversation loaded with ' + messageRows.length + ' potential message elements');
+          break;
+        }
+        log('Waiting for conversation to load... (retry ' + (retries + 1) + ')');
+        await sleep(1000);
+        retries++;
+      }
+      
+      return true;
+    } catch (err) {
+      log('Error opening conversation: ' + err);
       return false;
     }
   }
 
-  function findUnreadNotifications() {
-    const notifications = findAllElements(REDDIT_SELECTORS.notificationItems);
-    return notifications.filter(item => {
-      const isUnread = item.querySelector(REDDIT_SELECTORS.unreadNotification) !== null;
-      const itemId = generateItemId(item, 'notification');
-      return isUnread && !processedItems.has(itemId);
-    });
-  }
-
-  function findUnreadMessages() {
-    const messages = findAllElements(REDDIT_SELECTORS.messageItem);
-    return messages.filter(item => {
-      const isUnread = item.querySelector(REDDIT_SELECTORS.unreadMessage) !== null;
-      const itemId = generateItemId(item, 'message');
-      return isUnread && !processedItems.has(itemId);
-    });
-  }
-
-  async function processNotification(notification) {
-    try {
-      const itemId = generateItemId(notification, 'notification');
-      const text = extractTextContent(notification);
+  /**
+   * Get messages from the current open conversation using improved detection
+   */
+  function getConversationMessages() {
+    const messages = [];
+    
+    // Try multiple selectors to find message elements
+    let messageElements = Array.from(document.querySelectorAll('div[role="row"]'));
+    log('Found ' + messageElements.length + ' message rows with role="row"');
+    
+    // If no role="row" found, try alternative selectors
+    if (messageElements.length === 0) {
+      // Try looking for divs with dir="auto" directly (message content)
+      messageElements = Array.from(document.querySelectorAll('div[dir="auto"]'));
+      log('Found ' + messageElements.length + ' elements with dir="auto"');
       
-      if (!text || text.length < MIN_MESSAGE_LENGTH) {
-        redditLog('Notification text too short, skipping');
-        processedItems.add(itemId);
-        return;
+      // If still nothing, try common message selectors
+      if (messageElements.length === 0) {
+        messageElements = Array.from(document.querySelectorAll('[data-testid*="message"], [class*="message"], [class*="Message"]'));
+        log('Found ' + messageElements.length + ' elements with message-related attributes');
       }
       
-      redditLog('Processing notification: "' + text.substring(0, 50) + '..."');
+      // Last resort: look for any div containing text that might be messages
+      if (messageElements.length === 0) {
+        const allDivs = Array.from(document.querySelectorAll('div'));
+        messageElements = allDivs.filter(div => {
+          const text = div.innerText?.trim();
+          return text && text.length > 2 && text.length < 1000 && 
+                 !text.includes('Unread') && !text.includes('Active') &&
+                 div.querySelector('div[dir="auto"]'); // Must contain a dir="auto" child
+        });
+        log('Found ' + messageElements.length + ' potential message containers');
+      }
+    }
+
+    for (const element of messageElements) {
+      const text = getMessageText(element);
+      if (!text || text.length < MIN_MESSAGE_LENGTH) continue;
+
+      // Use the reliable heuristic for incoming messages
+      const isIncomingMsg = !element.innerText.includes('Seen') && !element.innerText.includes('Delivered');
       
-      notification.click();
-      await sleep(1500);
-      
-      if (redditSettings.autoReplyToComments) {
-        const reply = await generateReply(text, 'notification');
-        if (reply) {
-          const success = await typeAndSubmitReply(reply, REDDIT_SELECTORS.replyInput);
-          if (success) {
-            redditLog('✓ Replied to notification: "' + reply + '"');
-          }
+      log('Message found: "' + text.substring(0, 30) + '..." - Incoming: ' + isIncomingMsg);
+
+      messages.push({ text: text, isIncoming: isIncomingMsg, element: element });
+    }
+
+    return messages;
+  }
+
+  function getLatestIncomingMessage(messages) {
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const msg = messages[i];
+      if (msg.isIncoming) {
+        const msgId = 'msg-' + msg.text.substring(0, 100).replace(/\\\\s+/g, '-');
+        if (!seenMessages.has(msgId)) {
+          return { text: msg.text, id: msgId };
         }
       }
+    }
+    return null;
+  }
+
+  async function processConversation(conversation) {
+    try {
+      const opened = await openConversation(conversation);
+      if (!opened) {
+        // Mark as seen even if we couldn't open it
+        seenMessages.add(conversation.id);
+        return;
+      }
+
+      const messages = getConversationMessages();
+      log('Found ' + messages.length + ' messages in conversation');
+
+      if (messages.length === 0) {
+        log('No messages found - marking conversation as seen and navigating back to DMs');
+        seenMessages.add(conversation.id);
+        await sleep(1000);
+        navigateBackToDMs();
+        return;
+      }
+
+      const latestMsg = getLatestIncomingMessage(messages);
+      if (!latestMsg) {
+        log('No new incoming messages - marking conversation as seen and navigating back to DMs');
+        seenMessages.add(conversation.id);
+        await sleep(1000);
+        navigateBackToDMs();
+        return;
+      }
+
+      log('Latest incoming message: "' + latestMsg.text.substring(0, 50) + '..."');
+
+      // Mark both message and conversation as seen
+      seenMessages.add(latestMsg.id);
+      seenMessages.add(conversation.id);
+
+      const reply = await generateReply(latestMsg.text);
+      if (!reply) {
+        log('No reply generated - navigating back to DMs');
+        await sleep(1000);
+        navigateBackToDMs();
+        return;
+      }
+
+      const skipProb = CONFIG?.randomSkipProbability || 0.15;
+      if (Math.random() < skipProb) {
+        log('Randomly skipping reply (prob ' + Math.round(skipProb * 100) + '%) - navigating back to DMs');
+        await sleep(1000);
+        navigateBackToDMs();
+        return;
+      }
+
+      const delay = Math.floor(Math.random() * (preReplyDelayRange[1] - preReplyDelayRange[0])) + preReplyDelayRange[0];
+      log('Waiting ' + delay + 'ms before replying');
+      await sleep(delay);
+
+      const typed = await typeMessage(reply);
+      if (!typed) {
+        log('Failed to type message - navigating back to DMs');
+        await sleep(1000);
+        navigateBackToDMs();
+        return;
+      }
+
+      await sleep(500);
+
+      const sent = await sendMessage();
+      if (sent) {
+        log('✓ Reply sent: "' + reply.substring(0, 60) + '..." - navigating back to DMs');
+      } else {
+        log('Failed to send message - navigating back to DMs');
+      }
       
-      processedItems.add(itemId);
-    } catch (e) {
-      redditLog('Error processing notification: ' + e);
+      // Always navigate back to DMs after processing
+      await sleep(2000); // Wait longer to ensure message is sent/processed
+      navigateBackToDMs();
+      
+    } catch (err) {
+      log('Error processing conversation: ' + err + ' - marking as seen and navigating back to DMs');
+      seenMessages.add(conversation.id);
+      await sleep(1000);
+      navigateBackToDMs();
     }
   }
 
-  async function processMessage(message) {
-    try {
-      const itemId = generateItemId(message, 'message');
-      const text = extractTextContent(message);
-      
-      if (!text || text.length < MIN_MESSAGE_LENGTH) {
-        redditLog('Message text too short, skipping');
-        processedItems.add(itemId);
-        return;
-      }
-      
-      redditLog('Processing message: "' + text.substring(0, 50) + '..."');
-      
-      message.click();
-      await sleep(1500);
-      
-      if (redditSettings.autoReplyToPMs) {
-        const reply = await generateReply(text, 'message');
-        if (reply) {
-          const success = await typeAndSubmitReply(reply, REDDIT_SELECTORS.messageInput);
-          if (success) {
-            redditLog('✓ Replied to message: "' + reply + '"');
-          }
-        }
-      }
-      
-      processedItems.add(itemId);
-    } catch (e) {
-      redditLog('Error processing message: ' + e);
-    }
-  }
-
-  async function pollForActivity() {
+  /**
+   * Main polling loop - keep navigation but use new message detection
+   */
+  async function poll() {
     if (!isRunning || isProcessing) return;
-    
     isProcessing = true;
-    
+
     try {
-      redditLog('Scanning for Reddit activity...');
-      
-      // Check notifications
-      if (redditSettings.watchNotifications) {
-        try {
-          const notifications = findUnreadNotifications();
-          
-          if (notifications.length > 0) {
-            redditLog('Found ' + notifications.length + ' unread notification(s)');
-            const toProcess = notifications.slice(0, redditSettings.maxItemsPerPoll);
-            
-            for (const notification of toProcess) {
-              if (!isRunning) break;
-              try {
-                await processNotification(notification);
-                await sleep(2000);
-              } catch (error) {
-                redditLog('Error processing notification: ' + error);
-              }
-            }
-          }
-        } catch (error) {
-          redditLog('Error checking notifications: ' + error);
+      // If we're not on the DMs page at all, navigate there
+      if (!isOnDMsPage()) {
+        const navigated = navigateToDMs();
+        if (navigated) {
+          await sleep(2000);
         }
+        isProcessing = false;
+        return;
       }
       
-      // Check private messages
-      if (redditSettings.watchPrivateMessages) {
-        try {
-          const messages = findUnreadMessages();
-          
-          if (messages.length > 0) {
-            redditLog('Found ' + messages.length + ' unread message(s)');
-            const toProcess = messages.slice(0, redditSettings.maxItemsPerPoll);
-            
-            for (const message of toProcess) {
-              if (!isRunning) break;
-              try {
-                await processMessage(message);
-                await sleep(2000);
-              } catch (error) {
-                redditLog('Error processing message: ' + error);
-              }
-            }
-          }
-        } catch (error) {
-          redditLog('Error checking messages: ' + error);
-        }
+      // If we're in a specific conversation, navigate back to main DMs first
+      if (isInConversation()) {
+        log('Currently in conversation, navigating back to main DMs');
+        navigateBackToDMs();
+        await sleep(2000);
+        isProcessing = false;
+        return;
       }
-      
-    } catch (error) {
-      redditLog('Error in poll loop: ' + error);
+
+      log('Polling for new messages...');
+
+      const conversations = findConversations();
+      if (conversations.length === 0) {
+        log('No unread conversations');
+        isProcessing = false;
+        return;
+      }
+
+      log('Found ' + conversations.length + ' unread conversation(s)');
+
+      for (const conv of conversations) {
+        if (!isRunning) break;
+        await processConversation(conv);
+        await sleep(2000);
+      }
+    } catch (err) {
+      log('Poll error: ' + err);
     } finally {
       isProcessing = false;
     }
   }
 
-  function sleep(ms) {
-    return new Promise(resolve => setTimeout(resolve, ms));
+  function scheduleNextPoll() {
+    if (!isRunning) return;
+    const delay = getRandomPollInterval();
+    log('Next scan in ' + Math.round(delay / 1000) + 's');
+    pollInterval = setTimeout(() => {
+      poll();
+      scheduleNextPoll();
+    }, delay);
   }
 
-  function startRedditBot() {
-    if (isRunning) {
-      redditLog('Bot already running');
-      return;
-    }
-    
-    try {
-      isRunning = true;
-      
-      redditLog('🚀 Reddit Bot started!');
-      redditLog('Watching: ' + (redditSettings.watchNotifications ? 'notifications ' : '') + 
-                (redditSettings.watchPrivateMessages ? 'messages ' : '') + 
-                redditSettings.watchSubreddits.length + ' subreddits');
-      
-      // Initial scan with error handling
-      setTimeout(() => {
-        try {
-          pollForActivity();
-        } catch (error) {
-          redditLog('Error in initial poll: ' + error);
-        }
-      }, 2000);
-      
-      // Set up polling interval with error handling
-      pollInterval = setInterval(() => {
-        try {
-          pollForActivity();
-        } catch (error) {
-          redditLog('Error in poll interval: ' + error);
-        }
-      }, redditSettings.pollIntervalMs);
-      
-      redditLog('Bot started successfully with ' + redditSettings.pollIntervalMs + 'ms interval');
-    } catch (error) {
-      redditLog('Error in startRedditBot: ' + error);
-      isRunning = false;
-    }
-  }
-
-  function stopRedditBot() {
-    if (!isRunning) {
-      redditLog('Bot not running');
-      return;
-    }
-    
+  function stop() {
     isRunning = false;
-    
     if (pollInterval) {
+      clearTimeout(pollInterval);
       clearInterval(pollInterval);
-      pollInterval = null;
     }
-    
-    redditLog('🛑 Reddit Bot stopped');
+    window.__SNAPPY_RUNNING__ = false;
+    window.__SNAPPY_INSTAGRAM_RUNNING__ = false;
+    log('Instagram bot stopped');
   }
 
-  // Error handling wrapper
-  function safeStartRedditBot() {
-    try {
-      redditLog('Attempting to start Reddit bot...');
-      startRedditBot();
-      redditLog('Bot initialization completed successfully');
-    } catch (error) {
-      redditLog('Error starting bot: ' + error);
-      redditLog('Stack trace: ' + (error.stack || 'No stack trace'));
-      // Keep the bot marked as running even if there's an error
-      // so we can debug what went wrong
-      window.__SNAPPY_RUNNING__ = true;
-      window.__SNAPPY_REDDIT_RUNNING__ = true;
-      isRunning = true; // Also set the internal flag
-    }
-  }
+  log('🚀 Instagram DM bot started - monitoring for new messages');
+  poll();
+  scheduleNextPoll();
 
-  // Start the bot with error handling
-  safeStartRedditBot();
-  
-  // Expose stop function
-  window.__SNAPPY_STOP__ = stopRedditBot;
-  
-  // Verification ping with detailed status
-  setTimeout(() => {
-    redditLog('Verification ping - Bot running: ' + isRunning + ', Window flag: ' + window.__SNAPPY_RUNNING__);
-    redditLog('Reddit settings: ' + JSON.stringify(redditSettings, null, 2));
-  }, 1000);
+  window.__SNAPPY_STOP__ = stop;
 })();
 `;
 }
 
+>>>>>>> 8b6447cb6b2db7d88dcafea2b02481c961ded7fd
 interface ReplyRule {
   match: string;
   reply: string;
@@ -1026,6 +1841,20 @@ interface Config {
   reddit?: {
     pollIntervalMs?: number;
     maxCommentsPerPoll?: number;
+    maxItemsPerPoll?: number;
+    watchNotifications?: boolean;
+    watchPrivateMessages?: boolean;
+    watchSubreddits?: string[];
+    subredditKeywords?: string[];
+    autoReplyToComments?: boolean;
+    autoReplyToPMs?: boolean;
+    autoReplyToPosts?: boolean;
+    minPostScore?: number;
+    maxPostAge?: number;
+    skipOwnPosts?: boolean;
+    skipOwnComments?: boolean;
+    authCookieString?: string;
+    sessionCookie?: string;
   };
 }
 
@@ -2513,6 +3342,8 @@ function populateSettingsUI(platform: string, settings: any) {
     setNumberValue('reddit-min-score', settings.minPostScore ?? 1);
     setNumberValue('reddit-max-age', settings.maxPostAge ?? 24);
     setCheckboxValue('reddit-skip-own-posts', settings.skipOwnPosts ?? true);
+    setTextValue('reddit-cookie-string', settings.authCookieString ?? '');
+    setTextValue('reddit-session-cookie', settings.sessionCookie ?? '');
   }
   
   // Instagram settings
@@ -2598,6 +3429,8 @@ function collectCurrentSettings(platform: string): any {
     settings.minPostScore = getNumberValue('reddit-min-score');
     settings.maxPostAge = getNumberValue('reddit-max-age');
     settings.skipOwnPosts = getCheckboxValue('reddit-skip-own-posts');
+    settings.authCookieString = getTextValue('reddit-cookie-string');
+    settings.sessionCookie = getTextValue('reddit-session-cookie');
   }
   
   if (platform === 'instagram') {
@@ -2661,6 +3494,42 @@ function saveSiteSettings() {
     console.error('Error saving site settings:', e);
     addLog('Failed to save site settings', 'error');
   }
+}
+
+function getStoredPlatformSiteSettings(platform: string): any {
+  try {
+    const raw = localStorage.getItem('siteSettings');
+    const allSettings = raw ? JSON.parse(raw) : {};
+    return allSettings[platform] || {};
+  } catch (error) {
+    console.error('Error reading site settings from storage:', error);
+    return {};
+  }
+}
+
+function applySiteSettingsToConfig(baseConfig: Config, hostname: string): Config {
+  const site = detectSiteFromHost(hostname);
+  const mergedConfig: Config = { ...(baseConfig || ({} as Config)) };
+
+  if (site === 'reddit') {
+    const storedRedditSettings = getStoredPlatformSiteSettings('reddit');
+    const mergedReddit = {
+      ...(mergedConfig.reddit || {}),
+      ...storedRedditSettings
+    };
+
+    // Keep both keys in sync for backward compatibility.
+    if (mergedReddit.maxItemsPerPoll !== undefined && mergedReddit.maxCommentsPerPoll === undefined) {
+      mergedReddit.maxCommentsPerPoll = mergedReddit.maxItemsPerPoll;
+    }
+    if (mergedReddit.maxCommentsPerPoll !== undefined && mergedReddit.maxItemsPerPoll === undefined) {
+      mergedReddit.maxItemsPerPoll = mergedReddit.maxCommentsPerPoll;
+    }
+
+    mergedConfig.reddit = mergedReddit;
+  }
+
+  return mergedConfig;
 }
 
 // Initialize site settings when panel opens
@@ -2778,8 +3647,10 @@ async function injectBotIntoWebview() {
     
     addLog(`Injecting bot for host: ${hostname || 'unknown'}`, 'info', webviewSessionId);
 
+    const resolvedConfig = applySiteSettingsToConfig(config as Config, hostname);
+
     // Inject the bot script into the webview
-    const botScript = await getBotScript(config!, hostname);
+    const botScript = await getBotScript(resolvedConfig, hostname);
     
     // Try injection with error details
     try {
@@ -6004,19 +6875,26 @@ async function stopAllSessionBots(): Promise<void> {
 async function injectBotIntoSpecificWebview(webview: Electron.WebviewTag, sessionId: string): Promise<boolean> {
   if (!webview) return false;
   
-  const config = sessionConfigs.get(sessionId) as any || {};
+  const config = (sessionConfigs.get(sessionId) as Config) || ({} as Config);
   
   try {
     const hostname = new URL(webview.getURL()).hostname;
     const site = detectSiteFromHost(hostname);
+    const resolvedConfig = applySiteSettingsToConfig(config, hostname);
     
     let botScript = '';
     if (site === 'snapchat') {
-      botScript = await getSnapchatBotScript(config as Config);
+      botScript = await getSnapchatBotScript(resolvedConfig);
     } else if (site === 'threads') {
-      botScript = buildThreadsBotScript(config);
+      botScript = buildThreadsBotScript(resolvedConfig);
+    } else if (site === 'reddit') {
+      botScript = buildRedditBotScript(resolvedConfig);
     } else if (site === 'instagram') {
+<<<<<<< HEAD
       botScript = await getInstagramBotScript(config as Config);
+=======
+      botScript = buildInstagramBotScript(resolvedConfig);
+>>>>>>> 8b6447cb6b2db7d88dcafea2b02481c961ded7fd
     } else {
       addLog(`Unknown site: ${site}`, 'error', sessionId);
       return false;

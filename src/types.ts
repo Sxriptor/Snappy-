@@ -34,6 +34,9 @@ export interface Configuration {
   reddit?: {
     pollIntervalMs?: number;
     maxCommentsPerPoll?: number;
+    maxItemsPerPoll?: number;
+    authCookieString?: string;
+    sessionCookie?: string;
   };
 }
 
@@ -203,7 +206,8 @@ export const DEFAULT_CONFIG: Configuration = {
   },
   reddit: {
     pollIntervalMs: 10000,
-    maxCommentsPerPoll: 5
+    maxCommentsPerPoll: 5,
+    maxItemsPerPoll: 5
   }
 };
 
