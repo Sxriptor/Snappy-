@@ -75,8 +75,13 @@ const botAPI = {
   /**
    * Generate AI reply for a message
    */
-  generateAIReply: async (sender: string, messageText: string, conversationId?: string): Promise<{ reply: string | null; error?: string }> => {
-    return await ipcRenderer.invoke('ai:generateReply', { sender, messageText, conversationId });
+  generateAIReply: async (
+    sender: string,
+    messageText: string,
+    conversationId?: string,
+    aiConfig?: unknown
+  ): Promise<{ reply: string | null; error?: string }> => {
+    return await ipcRenderer.invoke('ai:generateReply', { sender, messageText, conversationId, aiConfig });
   },
 
   /**
@@ -84,6 +89,13 @@ const botAPI = {
    */
   resetAIConversation: async (conversationId: string): Promise<boolean> => {
     return await ipcRenderer.invoke('ai:resetConversation', conversationId);
+  },
+
+  /**
+   * Get Snapchat bot script generated in main process.
+   */
+  getSnapchatBotScript: async (config: unknown): Promise<string> => {
+    return await ipcRenderer.invoke('bot:getSnapchatScript', config);
   }
 };
 

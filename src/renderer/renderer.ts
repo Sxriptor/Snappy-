@@ -3647,7 +3647,7 @@ async function injectBotIntoWebview() {
     const resolvedConfig = applySiteSettingsToConfig(config as Config, hostname);
 
     // Inject the bot script into the webview
-    const botScript = getBotScript(resolvedConfig, hostname);
+    const botScript = await getBotScript(resolvedConfig, hostname);
     
     // Try injection with error details
     try {
@@ -3749,6 +3749,7 @@ botBtn.addEventListener('click', async () => {
     if (currentAIProvider === 'local' && llamaServerConfig.enabled && activeSessionId) {
       addLog('Starting Llama.cpp server...', 'info');
       console.log(`[Bot Start] Starting llama for session ${activeSessionId}`);
+      await (window as any).llama.saveConfig(llamaServerConfig);
       const startResult = await (window as any).llama.start();
       console.log(`[Bot Start] Result:`, startResult);
       if (startResult.running && startResult.pid) {
@@ -4011,7 +4012,16 @@ function loadConfigIntoUI(config: Config) {
 }
 
 // Generate the Snapchat bot script to inject into webview
-function getSnapchatBotScript(config: Config): string {
+async function getSnapchatBotScript(config: Config): Promise<string> {
+  try {
+    const bridgedScript = await (window as any).bot?.getSnapchatBotScript?.(config);
+    if (typeof bridgedScript === 'string' && bridgedScript.length > 0) {
+      return bridgedScript;
+    }
+  } catch {
+    // Fall back to inlined script below if IPC/preload path is unavailable.
+  }
+
   return `
 (function() {
   if (window.__SNAPPY_RUNNING__) {
@@ -4843,20 +4853,33 @@ function getSnapchatBotScript(config: Config): string {
       input.value = '';
     }
     
-    // Type character by character
-    const delays = CONFIG.typingDelayRangeMs || [50, 150];
+    // Type character by character (fast defaults, still human-like)
+    const delays = CONFIG.typingDelayRangeMs || [10, 35];
     for (let i = 0; i < text.length; i++) {
       const char = text[i];
-      
+
+      // Simulate key events so this behaves like typing, not paste.
+      input.dispatchEvent(new KeyboardEvent('keydown', { key: char, code: 'Key' + char.toUpperCase(), bubbles: true, cancelable: true }));
+      input.dispatchEvent(new KeyboardEvent('keypress', { key: char, code: 'Key' + char.toUpperCase(), bubbles: true, cancelable: true }));
+
       if (input.getAttribute('contenteditable') === 'true') {
-        input.textContent = (input.textContent || '') + char;
+        const inserted = document.execCommand ? document.execCommand('insertText', false, char) : false;
+        if (!inserted) {
+          input.textContent = (input.textContent || '') + char;
+        }
       } else if ('value' in input) {
-        input.value = (input.value || '') + char;
+        const el = input;
+        const start = typeof el.selectionStart === 'number' ? el.selectionStart : (el.value || '').length;
+        const end = typeof el.selectionEnd === 'number' ? el.selectionEnd : start;
+        if (typeof el.setRangeText === 'function') {
+          el.setRangeText(char, start, end, 'end');
+        } else {
+          el.value = (el.value || '') + char;
+        }
       }
-      
-      // Dispatch events
-      input.dispatchEvent(new Event('input', { bubbles: true }));
-      input.dispatchEvent(new Event('change', { bubbles: true }));
+
+      input.dispatchEvent(new InputEvent('input', { bubbles: true, data: char, inputType: 'insertText' }));
+      input.dispatchEvent(new KeyboardEvent('keyup', { key: char, code: 'Key' + char.toUpperCase(), bubbles: true, cancelable: true }));
       
       const delay = Math.floor(Math.random() * (delays[1] - delays[0])) + delays[0];
       await sleep(delay);
@@ -5154,6 +5177,31 @@ function getSnapchatBotScript(config: Config): string {
 
     return cleaned;
   }
+
+  function findChatRowByUsername(username) {
+    if (!username) return null;
+    const target = username.trim().toLowerCase();
+    const chats = findClickableChats();
+    for (const row of chats) {
+      const rowUsername = getUsernameFromChatRow(row);
+      if (rowUsername && rowUsername.trim().toLowerCase() === target) {
+        return row;
+      }
+    }
+    return null;
+  }
+
+  async function refocusCurrentChat(username) {
+    const row = findChatRowByUsername(username);
+    if (!row) {
+      log('Could not re-focus current chat row for: ' + username);
+      return false;
+    }
+    clickElement(row);
+    await sleep(200);
+    log('Re-focused current chat: ' + username);
+    return true;
+  }
   
   // Process a chat
   async function processChat(chatEl, chatText) {
@@ -5191,8 +5239,29 @@ function getSnapchatBotScript(config: Config): string {
     checkInterval: null
   };
 
+  // Hard lock to prevent hopping to other conversations while processing one.
+  let conversationLock = {
+    active: false,
+    username: null
+  };
+
+  function lockConversation(username) {
+    if (!username) return;
+    conversationLock.active = true;
+    conversationLock.username = username;
+    log('Conversation lock ON: ' + username);
+  }
+
+  function unlockConversation(reason) {
+    if (!conversationLock.active) return;
+    log('Conversation lock OFF (' + reason + '): ' + (conversationLock.username || 'unknown'));
+    conversationLock.active = false;
+    conversationLock.username = null;
+  }
+
   // Internal chat processing (separated to avoid duplication)
   async function processChat_internal(chatEl, username) {
+    lockConversation(username);
 
     // Load and display memory for this user
     const memory = getUserMemory(username);
@@ -5208,10 +5277,9 @@ function getSnapchatBotScript(config: Config): string {
     clickElement(chatEl);
     log('Clicked chat: ' + username);
 
-    // CRITICAL: Wait for the DOM to fully update with NEW chat content
-    // Snapchat lazy-loads messages, so we need to wait AND scroll aggressively
+    // Wait briefly for conversation DOM swap, then scroll to hydrate messages.
     log('Waiting for chat to load and messages to populate...');
-    await sleep(2500);
+    await sleep(900);
 
     // CRITICAL: Click into the input field to ensure Snapchat detects user presence
     // This prevents the "doesn't seem to be present" detection
@@ -5229,7 +5297,7 @@ function getSnapchatBotScript(config: Config): string {
       log('Error focusing input field: ' + e.message);
     }
 
-    await sleep(500); // Brief pause after focusing
+    await sleep(150); // Brief pause after focusing
 
     // Force scroll to bottom MULTIPLE times with waits to trigger lazy loading
     await scrollToLatestMessages();
@@ -5237,7 +5305,10 @@ function getSnapchatBotScript(config: Config): string {
     log('Finished scrolling, messages should be loaded now');
 
     // Process the initial messages
-    await processCurrentChatMessages(username);
+    const processingOutcome = await processCurrentChatMessages(username);
+    if (processingOutcome === 'sent' || processingOutcome === 'no_new') {
+      unlockConversation(processingOutcome);
+    }
 
     // Start monitoring this chat for new messages
     startChatMonitoring(username);
@@ -5245,7 +5316,7 @@ function getSnapchatBotScript(config: Config): string {
 
   // Helper function to scroll to latest messages
   async function scrollToLatestMessages() {
-    for (let scrollAttempt = 0; scrollAttempt < 3; scrollAttempt++) {
+    for (let scrollAttempt = 0; scrollAttempt < 2; scrollAttempt++) {
       try {
         // Find ALL ul.ujRzj and scroll the LARGEST one (most likely to be active)
         const allLists = document.querySelectorAll('ul.ujRzj');
@@ -5276,8 +5347,8 @@ function getSnapchatBotScript(config: Config): string {
             messageContainer.scrollTop = messageContainer.scrollHeight;
           }
 
-          // Wait for lazy load
-          await sleep(1200);
+          // Short settle; we want quick reaction while still allowing lazy content to render.
+          await sleep(350);
         } else {
           log('  No visible list found (all have height=0)');
         }
@@ -5312,7 +5383,7 @@ function getSnapchatBotScript(config: Config): string {
 
     if (messages.length === 0) {
       log('No messages found - DOM may not have loaded yet');
-      return;
+      return 'no_new';
     }
 
     // CRITICAL CHECK: If ALL messages are from us, the DOM is stale/cached
@@ -5324,46 +5395,45 @@ function getSnapchatBotScript(config: Config): string {
       log('WARNING: All messages are from us - DOM is showing stale/cached data!');
       log('Chat was marked as "New Chat" or "Received" but we only see our own messages.');
       log('Possible causes: 1) DOM not fully loaded, 2) Message was deleted, 3) False unread indicator');
-      return;
+      return 'no_new';
     }
 
-    // Check if the LAST message is from us - if so, don't reply
-    if (messages.length > 0) {
-      const lastMsg = messages[messages.length - 1];
-      if (!lastMsg.isIncoming) {
-        log('Last message is from us, skipping (waiting for their reply)');
-        return;
-      }
-    }
-
-    // Get last incoming message
-    let lastIncoming = null;
+    // Build the latest contiguous incoming batch from the end of the chat.
+    // This captures rapid multi-message sends (e.g. 3 quick messages).
+    const latestIncomingBatch = [];
     for (let i = messages.length - 1; i >= 0; i--) {
       if (messages[i].isIncoming) {
-        lastIncoming = messages[i].text;
+        latestIncomingBatch.push(messages[i].text);
+      } else if (latestIncomingBatch.length > 0) {
+        break;
+      } else {
+        // Last message is outgoing; nothing new to process.
         break;
       }
     }
+    latestIncomingBatch.reverse();
 
-    if (!lastIncoming) {
-      log('No incoming message found');
-      return;
+    if (latestIncomingBatch.length === 0) {
+      log('No incoming message batch found');
+      return 'no_new';
     }
+
+    const latestIncomingText = latestIncomingBatch.join('\\n');
+    const normalizedIncoming = latestIncomingBatch.map(m => m.toLowerCase().trim()).join(' || ');
 
     // Skip if this is actually a message we sent
-    const normalizedIncoming = lastIncoming.toLowerCase().trim();
     if (sentMessages.has(normalizedIncoming)) {
       log('Skipping - this is our own message');
-      return;
+      return 'no_new';
     }
 
-    log('Last incoming: ' + lastIncoming.substring(0, 50));
+    log('Incoming batch (' + latestIncomingBatch.length + '): ' + latestIncomingText.substring(0, 80));
 
     // Check if this is the same message we last replied to for this user
     const lastReplied = lastRepliedMessage.get(username);
     if (lastReplied && lastReplied === normalizedIncoming) {
       log('Already replied to this exact message from ' + username + ': "' + lastReplied.substring(0, 30) + '"');
-      return;
+      return 'no_new';
     }
 
     // Log what we last replied to for debugging
@@ -5375,12 +5445,12 @@ function getSnapchatBotScript(config: Config): string {
     }
 
     // Find reply (now async with AI support)
-    const reply = await findReply(lastIncoming, username);
+    const reply = await findReply(latestIncomingText, username);
     if (!reply) {
       log('No matching reply');
       // Still mark as replied so we don't keep trying to reply to a message with no match
       lastRepliedMessage.set(username, normalizedIncoming);
-      return;
+      return 'handled';
     }
 
     // Random skip
@@ -5388,18 +5458,15 @@ function getSnapchatBotScript(config: Config): string {
       log('Random skip');
       // Mark as replied so we don't process again
       lastRepliedMessage.set(username, normalizedIncoming);
-      return;
+      return 'handled';
     }
     
-    // Pre-delay
-    const preDelay = CONFIG.preReplyDelayRangeMs || [2000, 6000];
-    const delay = Math.floor(Math.random() * (preDelay[1] - preDelay[0])) + preDelay[0];
-    log('Waiting ' + delay + 'ms...');
-    await sleep(delay);
+    // Start typing immediately after reply generation.
+    log('AI reply ready, typing now');
     
     // Type and send
     const typed = await typeMessage(reply);
-    if (!typed) return;
+    if (!typed) return 'handled';
     
     await sleep(500);
     const sent = await sendMessage();
@@ -5415,7 +5482,7 @@ function getSnapchatBotScript(config: Config): string {
       sentMessages.add(reply.toLowerCase().trim());
 
       // Save their message to memory (username already cleaned above)
-      addToMemory(username, lastIncoming, true);
+      latestIncomingBatch.forEach(msg => addToMemory(username, msg, true));
 
       // Save our reply to memory
       addToMemory(username, reply, false);
@@ -5423,7 +5490,12 @@ function getSnapchatBotScript(config: Config): string {
       // Log memory summary
       const summary = getMemorySummary(username);
       log('Memory for ' + username + ': ' + summary.total + ' msgs (' + summary.fromThem + ' from them, ' + summary.fromMe + ' from me)');
+
+      // Keep the bot anchored in this conversation instead of jumping to another chat.
+      await refocusCurrentChat(username);
+      return 'sent';
     }
+    return 'handled';
   }
 
   // Start monitoring the currently open chat for new messages
@@ -5438,7 +5510,8 @@ function getSnapchatBotScript(config: Config): string {
     currentMonitoredChat.username = username;
     currentMonitoredChat.lastMessageId = null;
 
-    // Check for new messages every 3 seconds
+    // Check for new messages frequently while staying in the current chat.
+    const monitorIntervalMs = CONFIG.chatMonitorIntervalMs || 1000;
     currentMonitoredChat.checkInterval = setInterval(async () => {
       if (!window.__SNAPPY_RUNNING__) {
         clearInterval(currentMonitoredChat.checkInterval);
@@ -5453,27 +5526,31 @@ function getSnapchatBotScript(config: Config): string {
           return;
         }
 
-        // Find the last incoming message
-        let lastIncoming = null;
+        // Build the latest contiguous incoming batch for change detection.
+        const latestIncomingBatch = [];
         for (let i = messages.length - 1; i >= 0; i--) {
           if (messages[i].isIncoming) {
-            lastIncoming = messages[i].text;
+            latestIncomingBatch.push(messages[i].text);
+          } else if (latestIncomingBatch.length > 0) {
+            break;
+          } else {
             break;
           }
         }
+        latestIncomingBatch.reverse();
 
-        if (!lastIncoming) {
+        if (latestIncomingBatch.length === 0) {
           return;
         }
 
-        // Create a unique ID for this message
-        const msgId = username + '::' + lastIncoming.toLowerCase().trim();
+        // Create a unique ID for this incoming batch.
+        const msgId = username + '::' + latestIncomingBatch.map(m => m.toLowerCase().trim()).join(' || ');
 
         // Check if this is a NEW message we haven't seen before
         if (currentMonitoredChat.lastMessageId === null) {
           // First check - just record the message ID
           currentMonitoredChat.lastMessageId = msgId;
-          log('[Monitor] Initial message recorded: ' + lastIncoming.substring(0, 30));
+          log('[Monitor] Initial batch recorded (' + latestIncomingBatch.length + ')');
         } else if (currentMonitoredChat.lastMessageId !== msgId) {
           // NEW MESSAGE DETECTED!
           log('[Monitor] NEW MESSAGE DETECTED!');
@@ -5482,8 +5559,8 @@ function getSnapchatBotScript(config: Config): string {
           // Scroll to see the latest
           await scrollToLatestMessages();
 
-          // Wait a moment for DOM to settle
-          await sleep(500);
+          // Short settle before parsing message nodes
+          await sleep(150);
 
           // Process the new message
           await processCurrentChatMessages(username);
@@ -5491,7 +5568,7 @@ function getSnapchatBotScript(config: Config): string {
       } catch (e) {
         log('[Monitor] Error checking for new messages: ' + e);
       }
-    }, 3000); // Check every 3 seconds
+    }, monitorIntervalMs);
   }
 
   // Stop monitoring when we leave the chat
@@ -5513,6 +5590,24 @@ function getSnapchatBotScript(config: Config): string {
     // Check if already processing - if so, skip this poll cycle
     if (isProcessing) {
       log('Already processing, skipping this poll cycle');
+      return;
+    }
+
+    if (conversationLock.active && conversationLock.username) {
+      const lockedChat = findChatRowByUsername(conversationLock.username);
+      if (!lockedChat) {
+        log('Conversation lock active but row not found for: ' + conversationLock.username);
+        return;
+      }
+
+      isProcessing = true;
+      try {
+        const chatText = lockedChat.textContent?.trim().substring(0, 50) || 'Unknown';
+        await processChat(lockedChat, chatText);
+      } finally {
+        isProcessing = false;
+        log('Finished locked conversation poll cycle');
+      }
       return;
     }
 
@@ -5546,9 +5641,22 @@ function getSnapchatBotScript(config: Config): string {
       return;
     }
 
-    // Check if the unread chat is from someone different than who we're monitoring
-    const chat = unreadChats[0];
-    const username = getUsernameFromChatRow(chat);
+    // Prefer staying in the currently monitored conversation if it still exists.
+    let chat = unreadChats[0];
+    let username = getUsernameFromChatRow(chat);
+    if (currentMonitoredChat.username) {
+      const currentUsername = currentMonitoredChat.username;
+      const matchingUnread = unreadChats.find(c => {
+        const name = getUsernameFromChatRow(c);
+        return name && name.trim().toLowerCase() === currentUsername.trim().toLowerCase();
+      });
+      const matchingAny = matchingUnread || findChatRowByUsername(currentUsername);
+      if (matchingAny) {
+        chat = matchingAny;
+        username = getUsernameFromChatRow(chat);
+        log('Keeping focus on current chat: ' + currentUsername);
+      }
+    }
 
     if (currentMonitoredChat.username && username !== currentMonitoredChat.username) {
       log('New unread chat from different user, switching from ' + currentMonitoredChat.username + ' to ' + username);
@@ -5590,7 +5698,7 @@ function getSnapchatBotScript(config: Config): string {
 `;
 }
 
-function getBotScript(config: Config, hostname: string): string {
+async function getBotScript(config: Config, hostname: string): Promise<string> {
   const site = detectSiteFromHost(hostname);
   switch (site) {
     case 'threads':
@@ -5601,7 +5709,7 @@ function getBotScript(config: Config, hostname: string): string {
       return buildInstagramBotScript(config as any);
     case 'snapchat':
     default:
-      return getSnapchatBotScript(config);
+      return await getSnapchatBotScript(config);
   }
 }
 
@@ -5730,10 +5838,16 @@ setInterval(async () => {
       addLog(`Processing AI request for ${request.username}`, 'info');
       
       try {
+        const effectiveAIConfig = getEffectiveSessionAIConfig(activeSessionId, request.config);
+        if (effectiveAIConfig?.provider === 'local') {
+          addLog(`AI request endpoint: ${effectiveAIConfig.llmEndpoint}:${effectiveAIConfig.llmPort}`, 'info');
+        }
+
         const result = await (window as any).bot.generateAIReply(
           request.username,
           request.messages[request.messages.length - 1].content, // last message is the user's
-          request.username
+          request.username,
+          effectiveAIConfig || undefined
         );
         
         // Send response back to webview
@@ -6190,6 +6304,51 @@ let llamaServerConfig: LlamaServerConfig = {
   enabled: false
 };
 
+function extractLlamaPort(startCommand?: string): number | null {
+  if (!startCommand) return null;
+  const matches = Array.from(startCommand.matchAll(/(?:^|\s)(?:--port|-p)\s*=?\s*(\d{2,5})(?=\s|$)/gi));
+  if (matches.length === 0) return null;
+  const port = parseInt(matches[matches.length - 1][1], 10);
+  if (Number.isNaN(port) || port < 1 || port > 65535) return null;
+  return port;
+}
+
+function getEffectiveSessionAIConfig(sessionId: string | null, requestAIConfig?: Partial<AIConfig>): AIConfig | null {
+  if (!sessionId) return null;
+  const sessionConfig = sessionConfigs.get(sessionId);
+  const sessionAI = sessionConfig?.ai || ({} as Partial<AIConfig>);
+  const sessionLlama = sessionConfig?.llama;
+  const fallbackLlama = llamaServerConfig;
+
+  const merged = {
+    ...sessionAI,
+    ...(requestAIConfig || {})
+  } as Partial<AIConfig>;
+
+  const provider = merged.provider || 'local';
+  const effectiveLlamaCommand = sessionLlama?.startCommand || fallbackLlama?.startCommand || '';
+  const parsedPort = extractLlamaPort(effectiveLlamaCommand);
+
+  return {
+    enabled: merged.enabled ?? false,
+    provider,
+    llmEndpoint: merged.llmEndpoint || '127.0.0.1',
+    llmPort: provider === 'local' ? (parsedPort || merged.llmPort || 8080) : (merged.llmPort || 8080),
+    modelName: merged.modelName || 'local-model',
+    systemPrompt: merged.systemPrompt || '',
+    temperature: merged.temperature ?? 0.7,
+    maxTokens: merged.maxTokens ?? 150,
+    contextHistoryEnabled: merged.contextHistoryEnabled ?? true,
+    maxContextMessages: merged.maxContextMessages ?? 10,
+    requestTimeoutMs: merged.requestTimeoutMs ?? 30000,
+    maxRetries: merged.maxRetries ?? 3,
+    retryBackoffMs: merged.retryBackoffMs ?? 1000,
+    chatgptApiKey: merged.chatgptApiKey || '',
+    chatgptModel: merged.chatgptModel || 'gpt-3.5-turbo',
+    chatgptBaseUrl: merged.chatgptBaseUrl || 'https://api.openai.com/v1'
+  };
+}
+
 // Per-session server PID tracking
 const sessionServerPids = new Map<string, { pid: number; startTime: number }>();
 
@@ -6308,6 +6467,7 @@ async function startLlamaServer() {
   (llamaStartBtn as HTMLButtonElement).disabled = true;
 
   try {
+    await (window as any).llama.saveConfig(llamaServerConfig);
     const status = await (window as any).llama.start();
 
     if (status.running && status.pid) {
@@ -6712,7 +6872,7 @@ async function injectBotIntoSpecificWebview(webview: Electron.WebviewTag, sessio
     
     let botScript = '';
     if (site === 'snapchat') {
-      botScript = getSnapchatBotScript(resolvedConfig);
+      botScript = await getSnapchatBotScript(resolvedConfig);
     } else if (site === 'threads') {
       botScript = buildThreadsBotScript(resolvedConfig);
     } else if (site === 'reddit') {

@@ -1,10 +1,4 @@
-/**
- * Snapchat bot script source of truth.
- * This is consumed by preload and injected by renderer into webviews.
- */
 
-export function buildSnapchatBotScript(config: any): string {
-  return `
 (function() {
   if (window.__SNAPPY_RUNNING__) {
     console.log('[Snappy] Already running');
@@ -12,7 +6,7 @@ export function buildSnapchatBotScript(config: any): string {
   }
   window.__SNAPPY_RUNNING__ = true;
   
-  const CONFIG = ${JSON.stringify(config)};
+  const CONFIG = {};
   const seenMessages = new Set();
   const lastRepliedMessage = new Map(); // Track last message we replied to per user: username -> messageText
   let pollInterval = null;
@@ -339,8 +333,8 @@ export function buildSnapchatBotScript(config: any): string {
     }
     
     // Timestamps
-    if (/^\\d{1,2}:\\d{2}/.test(text)) return true;
-    if (/^\\d+[smhd]\\s*(ago)?$/i.test(text)) return true;
+    if (/^\d{1,2}:\d{2}/.test(text)) return true;
+    if (/^\d+[smhd]\s*(ago)?$/i.test(text)) return true;
     
     return false;
   }
@@ -751,8 +745,8 @@ export function buildSnapchatBotScript(config: any): string {
     // CRITICAL VERIFICATION: Check if the detected sender matches the expected one
     if (expectedSender && detectedSender) {
       // Clean both for comparison (remove emojis, extra spaces, etc.)
-      const cleanExpected = expectedSender.replace(/[^\w\s]/g, '').trim().toLowerCase();
-      const cleanDetected = detectedSender.replace(/[^\w\s]/g, '').trim().toLowerCase();
+      const cleanExpected = expectedSender.replace(/[^ws]/g, '').trim().toLowerCase();
+      const cleanDetected = detectedSender.replace(/[^ws]/g, '').trim().toLowerCase();
 
       if (cleanDetected !== cleanExpected && !cleanExpected.includes(cleanDetected) && !cleanDetected.includes(cleanExpected)) {
         log('WARNING: Sender mismatch! Expected "' + expectedSender + '" but found "' + detectedSender + '"');
@@ -1099,7 +1093,7 @@ export function buildSnapchatBotScript(config: any): string {
       const text = el.textContent?.trim();
       if (text && text.length > 2 && text.length < 300 && !seen.has(text)) {
         // Skip if it's a timestamp or UI element
-        if (!/^\\d{1,2}:\\d{2}/.test(text) && !/^(Send|Type|Message|Chat)/.test(text)) {
+        if (!/^\d{1,2}:\d{2}/.test(text) && !/^(Send|Type|Message|Chat)/.test(text)) {
           // Skip status text
           if (!isStatusText(text)) {
             seen.add(text);
@@ -1136,7 +1130,7 @@ export function buildSnapchatBotScript(config: any): string {
   function cleanUsername(rawText) {
     // Status words that get appended to usernames in Snapchat
     const statusPatterns = [
-      /Typing\\.{0,3}$/i,
+      /Typing\.{0,3}$/i,
       /Delivered$/i,
       /Opened$/i,
       /Received$/i,
@@ -1144,14 +1138,14 @@ export function buildSnapchatBotScript(config: any): string {
       /Viewed$/i,
       /New Chat$/i,
       /New Snap$/i,
-      /\\d+[smhd]\\s*(ago)?$/i,  // "2m ago", "5h"
-      /\\d+:\\d+\\s*(AM|PM)?$/i,  // timestamps
+      /\d+[smhd]\s*(ago)?$/i,  // "2m ago", "5h"
+      /\d+:\d+\s*(AM|PM)?$/i,  // timestamps
       /Just now$/i,
       /Today$/i,
       /Yesterday$/i
     ];
 
-    let cleaned = rawText.split(/[·\\n]/)[0].trim();
+    let cleaned = rawText.split(/[·\n]/)[0].trim();
 
     // Remove status suffixes
     for (const pattern of statusPatterns) {
@@ -1401,7 +1395,7 @@ export function buildSnapchatBotScript(config: any): string {
       return 'no_new';
     }
 
-    const latestIncomingText = latestIncomingBatch.join('\\n');
+    const latestIncomingText = latestIncomingBatch.join('\n');
     const normalizedIncoming = latestIncomingBatch.map(m => m.toLowerCase().trim()).join(' || ');
 
     // Skip if this is actually a message we sent
@@ -1678,5 +1672,3 @@ export function buildSnapchatBotScript(config: any): string {
     log('Bot stopped');
   };
 })();
-`;
-}

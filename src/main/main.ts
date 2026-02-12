@@ -7,11 +7,12 @@ import { app, BrowserWindow, ipcMain, session } from 'electron';
 import { autoUpdater } from 'electron-updater';
 import * as path from 'path';
 import * as fs from 'fs';
-import { Configuration, DEFAULT_CONFIG, DEFAULT_AI_CONFIG, SessionConfig, ProxyConfig, IncomingMessage } from '../types';
+import { Configuration, DEFAULT_CONFIG, DEFAULT_AI_CONFIG, SessionConfig, ProxyConfig, IncomingMessage, AIConfig } from '../types';
 import { SessionManager } from './sessionManager';
 import { ProxyManager } from './proxyManager';
 import { FingerprintGenerator } from './fingerprintGenerator';
 import { createFingerprintInjectorScript } from '../injection/fingerprintInjector';
+import { buildSnapchatBotScript } from '../injection/snapchatBot';
 import { AIBrain } from '../brain/aiBrain';
 import { windowManager } from './windowManager';
 import { trayManager } from './trayManager';
@@ -280,6 +281,11 @@ export function setupIPCHandlers(): void {
     return { success: true };
   });
 
+  // Return the Snapchat bot script generated from source-of-truth module
+  ipcMain.handle('bot:getSnapchatScript', (event, scriptConfig: unknown) => {
+    return buildSnapchatBotScript(scriptConfig);
+  });
+
   // Handle update actions
   ipcMain.on('update:download', () => {
     autoUpdater.downloadUpdate();
@@ -333,7 +339,7 @@ export function setupIPCHandlers(): void {
 
   // AI Brain reply generation - called from injection layer via webview
   // Uses a lock to ensure only one message is processed at a time
-  ipcMain.handle('ai:generateReply', async (event, messageData: { sender: string; messageText: string; conversationId?: string }) => {
+  ipcMain.handle('ai:generateReply', async (event, messageData: { sender: string; messageText: string; conversationId?: string; aiConfig?: Partial<AIConfig> }) => {
     try {
       // Check if already processing - skip if busy
       if (isProcessingReply) {
@@ -348,6 +354,11 @@ export function setupIPCHandlers(): void {
 
       // Acquire lock
       isProcessingReply = true;
+
+      // Allow per-session/runtime AI overrides (e.g., llama port parsed from session start command).
+      if (messageData.aiConfig && aiBrain) {
+        aiBrain.updateConfig(messageData.aiConfig);
+      }
 
       const message: IncomingMessage = {
         messageId: `msg-${Date.now()}`,
