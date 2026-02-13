@@ -2095,6 +2095,13 @@ function getActiveWebview(): Electron.WebviewTag | null {
 // For backwards compatibility, get webview (may be null initially)
 let webview = getActiveWebview();
 
+function normalizeWebUrl(raw: string | undefined | null): string {
+  const value = String(raw || '').trim();
+  if (!value) return 'https://web.snapchat.com';
+  if (/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(value)) return value;
+  return 'https://' + value;
+}
+
 // ============================================================================
 // Multi-Session Tab Management
 // ============================================================================
@@ -2128,7 +2135,11 @@ function createSessionWebview(session: SessionData): Electron.WebviewTag {
   wv.setAttribute('allowpopups', '');
   wv.setAttribute('partition', session.partition);
   wv.setAttribute('useragent', session.fingerprint.userAgent);
-  wv.src = session.config.initialUrl || 'https://web.snapchat.com';
+  const normalizedUrl = normalizeWebUrl(session.config.initialUrl);
+  if (session.config.initialUrl !== normalizedUrl) {
+    session.config.initialUrl = normalizedUrl;
+  }
+  wv.src = normalizedUrl;
   
   wv.style.width = '100%';
   wv.style.height = '100%';
@@ -2888,7 +2899,7 @@ async function createNewSession() {
   const proxySelect = document.getElementById('session-proxy') as HTMLSelectElement;
   
   const name = nameInput?.value || `Session ${sessionWebviews.size + 1}`;
-  const url = urlInput?.value || 'https://web.snapchat.com';
+  const url = normalizeWebUrl(urlInput?.value || 'https://web.snapchat.com');
   const proxyId = proxySelect?.value || undefined;
   
   try {
@@ -3923,9 +3934,8 @@ if (minimizeToTrayBtn) {
 
 // URL
 function loadUrl() {
-  let url = urlInput.value.trim();
+  let url = normalizeWebUrl(urlInput.value.trim());
   if (!url) return;
-  if (!url.startsWith('http')) url = 'https://' + url;
   const currentWebview = getActiveWebview();
   if (currentWebview) {
     const webviewSessionId = getSessionIdForWebview(currentWebview) || activeSessionId;
@@ -4157,7 +4167,7 @@ saveBtn.addEventListener('click', async () => {
   }
 
   const config: Config = {
-    initialUrl: urlInput.value || 'https://web.snapchat.com',
+    initialUrl: normalizeWebUrl(urlInput.value || 'https://web.snapchat.com'),
     autoInject: autoInject.checked,
     replyRules: getRules(),
     typingDelayRangeMs: [parseInt(typingMin.value) || 50, parseInt(typingMax.value) || 150],
