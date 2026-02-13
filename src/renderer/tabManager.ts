@@ -46,6 +46,13 @@ export class TabManager {
     this.setupResizeHandles();
   }
 
+  private normalizeWebUrl(raw: string | undefined | null): string {
+    const value = String(raw || '').trim();
+    if (!value) return 'https://web.snapchat.com';
+    if (/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(value)) return value;
+    return 'https://' + value;
+  }
+
   private setupEventListeners(): void {
     // New session button
     const newSessionBtn = document.getElementById('new-session-btn');
@@ -256,7 +263,7 @@ export class TabManager {
     webview.setAttribute('allowpopups', '');
     webview.setAttribute('partition', session.partition);
     webview.setAttribute('useragent', session.fingerprint.userAgent);
-    webview.setAttribute('src', session.config.initialUrl);
+    webview.setAttribute('src', this.normalizeWebUrl(session.config.initialUrl));
 
     this.webviewContainer.appendChild(webview);
     return webview;
