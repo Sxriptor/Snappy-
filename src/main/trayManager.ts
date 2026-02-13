@@ -27,31 +27,63 @@ class TrayManager {
    * Create the system tray icon and menu
    */
   private createTray(): void {
-    // Use the app icon or a default icon
-    const iconPath = app.isPackaged
-      ? path.join(process.resourcesPath, 'build', 'icon.ico')
-      : path.join(process.cwd(), 'build', 'icon.ico');
-
-    // Create a simple icon if the file doesn't exist
-    let trayIcon: Electron.NativeImage;
-    try {
-      trayIcon = nativeImage.createFromPath(iconPath);
-      if (trayIcon.isEmpty()) {
-        // Create a simple 16x16 icon as fallback
-        trayIcon = nativeImage.createEmpty();
-      }
-    } catch {
-      trayIcon = nativeImage.createEmpty();
-    }
+    const trayIcon = this.loadTrayIcon();
 
     this.tray = new Tray(trayIcon);
     this.tray.setToolTip('Snappy - Running in background');
     this.updateContextMenu();
 
+    // Single-click is the expected interaction on macOS menu bar items.
+    this.tray.on('click', () => {
+      this.showAllWindows();
+    });
+
     // Double-click to show windows
     this.tray.on('double-click', () => {
       this.showAllWindows();
     });
+  }
+
+  /**
+   * Load a platform-appropriate tray icon
+   */
+  private loadTrayIcon(): Electron.NativeImage {
+    const isMac = process.platform === 'darwin';
+    const iconCandidates = app.isPackaged
+      ? (isMac
+          ? [
+              path.join(process.resourcesPath, 'build', 'icon.png'),
+              path.join(process.resourcesPath, 'icon.png')
+            ]
+          : [
+              path.join(process.resourcesPath, 'build', 'icon.ico'),
+              path.join(process.resourcesPath, 'build', 'icon.png')
+            ])
+      : (isMac
+          ? [
+              path.join(process.cwd(), 'build', 'icon.png')
+            ]
+          : [
+              path.join(process.cwd(), 'build', 'icon.ico'),
+              path.join(process.cwd(), 'build', 'icon.png')
+            ]);
+
+    for (const iconPath of iconCandidates) {
+      try {
+        const image = nativeImage.createFromPath(iconPath);
+        if (!image.isEmpty()) {
+          if (isMac) {
+            // macOS menu bar prefers template images.
+            image.setTemplateImage(true);
+          }
+          return image.resize({ width: 18, height: 18 });
+        }
+      } catch {
+        // Try next candidate
+      }
+    }
+
+    return nativeImage.createEmpty();
   }
 
   /**
