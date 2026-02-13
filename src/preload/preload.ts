@@ -103,6 +103,13 @@ const botAPI = {
    */
   getInstagramBotScript: async (config: unknown): Promise<string> => {
     return await ipcRenderer.invoke('bot:getInstagramScript', config);
+  },
+
+  /**
+   * Get Reddit bot script generated in main process.
+   */
+  getRedditBotScript: async (config: unknown): Promise<string> => {
+    return await ipcRenderer.invoke('bot:getRedditScript', config);
   }
 };
 

@@ -6031,13 +6031,22 @@ async function getInstagramBotScript(config: Config): Promise<string> {
   throw new Error('Instagram bot script unavailable from preload bridge');
 }
 
+// Generate the Reddit bot script via main/preload source-of-truth module
+async function getRedditBotScript(config: Config): Promise<string> {
+  const bridgedScript = await (window as any).bot?.getRedditBotScript?.(config);
+  if (typeof bridgedScript === 'string' && bridgedScript.length > 0) {
+    return bridgedScript;
+  }
+  throw new Error('Reddit bot script unavailable from preload bridge');
+}
+
 async function getBotScript(config: Config, hostname: string): Promise<string> {
   const site = detectSiteFromHost(hostname);
   switch (site) {
     case 'threads':
       return buildThreadsBotScript(config as any);
     case 'reddit':
-      return buildRedditBotScript(config as any);
+      return await getRedditBotScript(config);
     case 'instagram':
       return await getInstagramBotScript(config);
     case 'snapchat':
@@ -7231,10 +7240,9 @@ async function injectBotIntoSpecificWebview(webview: Electron.WebviewTag, sessio
     } else if (site === 'threads') {
       botScript = buildThreadsBotScript(resolvedConfig);
     } else if (site === 'reddit') {
-      botScript = buildRedditBotScript(resolvedConfig);
+      botScript = await getRedditBotScript(resolvedConfig as Config);
     } else if (site === 'instagram') {
-      botScript = await getInstagramBotScript(config as Config);
-      botScript = buildInstagramBotScript(resolvedConfig);
+      botScript = await getInstagramBotScript(resolvedConfig as Config);
     } else {
       addLog(`Unknown site: ${site}`, 'error', sessionId);
       return false;

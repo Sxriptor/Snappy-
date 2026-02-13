@@ -12,6 +12,9 @@
     "package": "electron-builder",
     "convert-icon": "node scripts/convert-icon.js",
     "dist:win": "npm run build && npm run convert-icon && electron-builder --win",
+    "dist:mac": "npm run build && electron-builder --mac dmg",
+    "dist:mac:arm64": "npm run build && electron-builder --mac dmg --arm64",
+    "dist:mac:x64": "npm run build && electron-builder --mac dmg --x64",
     "test": "jest",
     "test:unit": "jest --testPathPattern=tests/(?!.*property)",
     "test:property": "jest --testPathPattern=property",
@@ -52,6 +55,12 @@
       "dist/**/*",
       "config.json"
     ],
+    "extraResources": [
+      {
+        "from": "build/icon.png",
+        "to": "build/icon.png"
+      }
+    ],
     "win": {
       "target": [
         {
@@ -63,6 +72,22 @@
       ],
       "icon": "build/icon.ico"
     },
+    "mac": {
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "arm64",
+            "x64"
+          ]
+        }
+      ],
+      "icon": "build/icon.icns",
+      "category": "public.app-category.productivity"
+    },
+    "dmg": {
+      "sign": false
+    },
     "nsis": {
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
@@ -73,8 +98,8 @@
     },
     "publish": {
       "provider": "github",
-      "owner": "OWNER",
-      "repo": "snappy"
+      "owner": "sxriptor",
+      "repo": "Snappy-"
     }
   }
 }
