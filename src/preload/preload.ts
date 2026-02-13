@@ -398,6 +398,13 @@ const electronAPI = {
   },
 
   /**
+   * Update site settings
+   */
+  updateSiteSettings: (siteSettings: unknown): void => {
+    ipcRenderer.send('siteSettings:update', siteSettings);
+  },
+
+  /**
    * Listen for detached window initialization
    */
   onDetachedWindowInit: (callback: (data: { sessionId: string; sessionName: string; isDetachedWindow?: boolean }) => void): void => {

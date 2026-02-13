@@ -2,6 +2,8 @@
  * Shared Types for Snappy Application
  */
 
+import { SiteSettingsConfig } from './types/siteSettings';
+
 export interface ReplyRule {
   match: string | RegExp;
   reply: string;
@@ -25,6 +27,7 @@ export interface Configuration {
   };
   randomSkipProbability: number;
   ai?: AIConfig;  // New AI configuration
+  siteSettings?: Partial<SiteSettingsConfig>;  // Site-specific settings
   threads?: {
     pollIntervalMs?: number;
     maxCommentsPerPoll?: number;

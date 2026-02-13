@@ -2,13 +2,30 @@
   "initialUrl": "https://web.snapchat.com",
   "autoInject": false,
   "replyRules": [],
-  "typingDelayRangeMs": [50, 150],
-  "preReplyDelayRangeMs": [2000, 6000],
+  "typingDelayRangeMs": [
+    50,
+    150
+  ],
+  "preReplyDelayRangeMs": [
+    2000,
+    6000
+  ],
   "maxRepliesPerMinute": 50,
   "maxRepliesPerHour": 30,
   "maxReplyLength": 500,
   "siteMode": "universal",
   "randomSkipProbability": 0.15,
+  "threads": {
+    "pollIntervalMs": 60000,
+    "maxCommentsPerPoll": 5,
+    "activityColumnEnabled": true,
+    "activityPriority": true
+  },
+  "reddit": {
+    "pollIntervalMs": 10000,
+    "maxCommentsPerPoll": 5,
+    "maxItemsPerPoll": 5
+  },
   "ai": {
     "enabled": true,
     "provider": "local",
@@ -26,5 +43,31 @@
     "chatgptApiKey": "",
     "chatgptModel": "gpt-3.5-turbo",
     "chatgptBaseUrl": "https://api.openai.com/v1"
+  },
+  "siteSettings": {
+    "instagram": {
+      "watchDirectMessages": false,
+      "watchMessageRequests": true,
+      "autoAcceptRequests": true,
+      "pollIntervalMs": 15000,
+      "maxMessagesPerPoll": 5
+    },
+    "reddit": {
+      "watchNotifications": true,
+      "watchPrivateMessages": true,
+      "watchSubreddits": [
+        "r/resellingvendor",
+        "r/resell"
+      ],
+      "subredditKeywords": [],
+      "autoReplyToComments": true,
+      "autoReplyToPMs": true,
+      "autoReplyToPosts": false,
+      "pollIntervalMs": 30000,
+      "maxItemsPerPoll": 3,
+      "minPostScore": 1,
+      "maxPostAge": 24,
+      "skipOwnPosts": true
+    }
   }
 }

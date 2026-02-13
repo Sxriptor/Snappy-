@@ -305,6 +305,21 @@ export function setupIPCHandlers(): void {
     return buildRedditBotScript(scriptConfig as Configuration);
   });
 
+  // Handle site settings update
+  ipcMain.on('siteSettings:update', (event, siteSettings: unknown) => {
+    try {
+      // Update the global config with site settings
+      config.siteSettings = siteSettings as any;
+      
+      // Save the updated configuration
+      saveConfiguration(config);
+      
+      console.log('[Shell] Site settings updated:', siteSettings);
+    } catch (error) {
+      console.error('[Shell] Error updating site settings:', error);
+    }
+  });
+
   // Handle update actions
   ipcMain.on('update:download', () => {
     try {

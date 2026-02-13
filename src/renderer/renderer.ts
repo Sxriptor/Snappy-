@@ -2038,6 +2038,7 @@ interface Config {
   randomSkipProbability: number;
   ai?: AIConfig;
   llama?: LlamaConfig;
+  siteSettings?: any; // Site-specific settings
   threads?: {
     pollIntervalMs?: number;
     maxCommentsPerPoll?: number;
@@ -3799,8 +3800,8 @@ function saveSiteSettings() {
     
     addLog(`Site settings saved for ${platform}`, 'success');
     
-    // TODO: Send settings to main process for bot configuration
-    // await (window as any).siteSettings.updateSettings(platform, settings);
+    // Send settings to main process for bot configuration
+    (window as any).electronAPI.updateSiteSettings(allSettings);
     
   } catch (e) {
     console.error('Error saving site settings:', e);
@@ -3839,6 +3840,22 @@ function applySiteSettingsToConfig(baseConfig: Config, hostname: string): Config
     }
 
     mergedConfig.reddit = mergedReddit;
+  }
+
+  // Add site settings to the config for all platforms
+  if (!mergedConfig.siteSettings) {
+    mergedConfig.siteSettings = {};
+  }
+
+  // Get stored site settings for all platforms
+  const storedSiteSettings = localStorage.getItem('siteSettings');
+  if (storedSiteSettings) {
+    try {
+      const allSiteSettings = JSON.parse(storedSiteSettings);
+      mergedConfig.siteSettings = { ...mergedConfig.siteSettings, ...allSiteSettings };
+    } catch (error) {
+      console.error('Error parsing stored site settings:', error);
+    }
   }
 
   return mergedConfig;
