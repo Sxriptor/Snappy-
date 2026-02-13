@@ -1201,11 +1201,6 @@ export function buildRedditBotScript(config: Configuration): string {
       const convoEl = unreadCandidates[0];
       try {
         const author = sanitizeAuthor(extractConversationAuthor(convoEl)) || 'reddit_user';
-        const convoKey = 'pm-thread-ui:' + author + ':' + String(convoEl.textContent || '').substring(0, 120);
-        if (processedItems.has(convoKey)) {
-          await returnToThreads('already processed conversation');
-          return;
-        }
 
         const clicked = clickConversationElement(convoEl);
         if (!clicked) {
@@ -1251,7 +1246,6 @@ export function buildRedditBotScript(config: Configuration): string {
         }
         if (sent) {
           lastIncomingByAuthor.set(author.toLowerCase(), latestIncoming.normalized);
-          processedItems.add(convoKey);
           processedItems.add(messageKey);
           log('Replied to PM from u/' + author + ': ' + reply.substring(0, 80));
           await returnToThreads('reply sent');
