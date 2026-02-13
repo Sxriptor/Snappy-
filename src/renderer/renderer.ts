@@ -2351,6 +2351,14 @@ function showTabContextMenu(sessionId: string, x: number, y: number) {
     }
   }
   
+  // Update hibernate/restore menu item based on session state
+  const hibernateItem = menu.querySelector('[data-action="hibernate"]') as HTMLElement;
+  if (hibernateItem) {
+    const tab = document.getElementById(`tab-${sessionId}`);
+    const isHibernated = tab?.classList.contains('hibernated');
+    hibernateItem.textContent = isHibernated ? 'Restore' : 'Hibernate';
+  }
+  
   menu.style.left = `${x}px`;
   menu.style.top = `${y}px`;
   menu.classList.remove('hidden');
@@ -2402,9 +2410,35 @@ function setupContextMenu() {
           await reattachSession(sessionId);
           break;
         case 'hibernate':
-          await (window as any).session.hibernateSession(sessionId);
           const tab = document.getElementById(`tab-${sessionId}`);
-          if (tab) tab.classList.add('hibernated');
+          const isHibernated = tab?.classList.contains('hibernated');
+          
+          if (isHibernated) {
+            // Restore the session
+            const restored = await (window as any).session.restoreSession(sessionId);
+            if (restored && tab) {
+              tab.classList.remove('hibernated');
+              // Recreate the webview for the restored session
+              const session = await (window as any).session.getSession(sessionId);
+              if (session) {
+                createSessionWebview(session);
+                addLog(`Session "${getSessionName(sessionId)}" restored`, 'success');
+              }
+            }
+          } else {
+            // Hibernate the session
+            await (window as any).session.hibernateSession(sessionId);
+            if (tab) {
+              tab.classList.add('hibernated');
+              // Remove the webview for hibernated session
+              const webview = sessionWebviews.get(sessionId);
+              if (webview) {
+                webview.remove();
+                sessionWebviews.delete(sessionId);
+              }
+              addLog(`Session "${getSessionName(sessionId)}" hibernated`, 'info');
+            }
+          }
           break;
         case 'close':
           if (confirm('Close this session?')) {
@@ -3986,6 +4020,15 @@ async function stopBotInWebview() {
 botBtn.addEventListener('click', async () => {
   if (!activeSessionId) {
     addLog('No active session', 'error');
+    return;
+  }
+  
+  // Check if current session is hibernated
+  const activeTab = document.getElementById(`tab-${activeSessionId}`);
+  const isHibernated = activeTab?.classList.contains('hibernated');
+  
+  if (isHibernated) {
+    addLog('Cannot start/stop bot for hibernated session. Please restore the session first.', 'error');
     return;
   }
 
@@ -7028,10 +7071,21 @@ async function startAllSessionBots(): Promise<void> {
   addLog('Starting bots for all sessions...', 'highlight');
   
   let startedCount = 0;
+  let skippedHibernated = 0;
   const originalActiveSession = activeSessionId;
   
   for (const [sessionId, webview] of sessionWebviews.entries()) {
     const sessionName = getSessionName(sessionId);
+    
+    // Check if session is hibernated
+    const tab = document.getElementById(`tab-${sessionId}`);
+    const isHibernated = tab?.classList.contains('hibernated');
+    
+    if (isHibernated) {
+      addLog(`Skipping hibernated session: ${sessionName}`, 'info', sessionId);
+      skippedHibernated++;
+      continue;
+    }
     
     // Get session config
     const config = sessionConfigs.get(sessionId);
@@ -7091,7 +7145,7 @@ async function startAllSessionBots(): Promise<void> {
     botBtn.textContent = 'Stop';
   }
   
-  addLog(`Started ${startedCount} bot(s)`, 'success');
+  addLog(`Started ${startedCount} bot(s)${skippedHibernated > 0 ? `, skipped ${skippedHibernated} hibernated session(s)` : ''}`, 'success');
   updateLlamaUI();
 }
 
@@ -7102,9 +7156,20 @@ async function stopAllSessionBots(): Promise<void> {
   addLog('Stopping all bots...', 'highlight');
   
   let stoppedCount = 0;
+  let skippedHibernated = 0;
   
   for (const [sessionId, webview] of sessionWebviews.entries()) {
     const sessionName = getSessionName(sessionId);
+    
+    // Check if session is hibernated
+    const tab = document.getElementById(`tab-${sessionId}`);
+    const isHibernated = tab?.classList.contains('hibernated');
+    
+    if (isHibernated) {
+      addLog(`Skipping hibernated session: ${sessionName}`, 'info', sessionId);
+      skippedHibernated++;
+      continue;
+    }
     
     // Stop bot in webview
     try {
@@ -7143,7 +7208,7 @@ async function stopAllSessionBots(): Promise<void> {
   statusText.textContent = 'Inactive';
   botBtn.textContent = 'Start';
   
-  addLog(`Stopped ${stoppedCount} bot(s)`, 'success');
+  addLog(`Stopped ${stoppedCount} bot(s)${skippedHibernated > 0 ? `, skipped ${skippedHibernated} hibernated session(s)` : ''}`, 'success');
   updateLlamaUI();
 }
 
