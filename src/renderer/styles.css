@@ -1571,3 +1571,160 @@ Reattach button for detached windows */
 #site-settings-resize-handle {
   display: none !important;
 }
+
+/* Update Overlay Styles */
+.update-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.8);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 10000;
+  backdrop-filter: blur(4px);
+}
+
+.update-overlay.hidden {
+  display: none;
+}
+
+.update-notification {
+  background: #1a1a1a;
+  border: 1px solid #333;
+  border-radius: 8px;
+  padding: 24px;
+  max-width: 480px;
+  width: 90%;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.6);
+}
+
+.update-header {
+  display: flex;
+  align-items: flex-start;
+  gap: 16px;
+  margin-bottom: 20px;
+}
+
+.update-icon {
+  width: 48px;
+  height: 48px;
+  background: #0eadff;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.update-icon svg {
+  width: 24px;
+  height: 24px;
+  color: white;
+}
+
+.update-content {
+  flex: 1;
+}
+
+.update-content h3 {
+  color: #fff;
+  font-size: 18px;
+  font-weight: 600;
+  margin-bottom: 8px;
+}
+
+.update-content p {
+  color: #ccc;
+  font-size: 14px;
+  line-height: 1.4;
+}
+
+.update-close-btn {
+  background: none;
+  border: none;
+  color: #888;
+  font-size: 24px;
+  cursor: pointer;
+  padding: 0;
+  width: 32px;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 4px;
+}
+
+.update-close-btn:hover {
+  background: #333;
+  color: #ccc;
+}
+
+.update-progress-container {
+  margin-bottom: 20px;
+}
+
+.update-progress-container.hidden {
+  display: none;
+}
+
+.update-progress-bar {
+  width: 100%;
+  height: 8px;
+  background: #333;
+  border-radius: 4px;
+  overflow: hidden;
+  margin-bottom: 8px;
+}
+
+.update-progress-fill {
+  height: 100%;
+  background: #0eadff;
+  width: 0%;
+  transition: width 0.3s ease;
+}
+
+.update-progress-text {
+  color: #ccc;
+  font-size: 12px;
+  text-align: center;
+}
+
+.update-actions {
+  display: flex;
+  gap: 12px;
+  justify-content: flex-end;
+}
+
+.update-actions .btn {
+  padding: 8px 16px;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 12px;
+  font-family: inherit;
+}
+
+.update-actions .btn-secondary {
+  background: #333;
+  color: #ccc;
+}
+
+.update-actions .btn-secondary:hover {
+  background: #444;
+}
+
+.update-actions .btn-primary {
+  background: #0eadff;
+  color: white;
+}
+
+.update-actions .btn-primary:hover {
+  background: #0c96d9;
+}
+
+.update-actions .btn.hidden {
+  display: none;
+}

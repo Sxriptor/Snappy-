@@ -134,6 +134,9 @@ const updaterAPI = {
   },
   onUpdateDownloaded: (callback: (info: unknown) => void): void => {
     ipcRenderer.on('update-downloaded', (_, info) => callback(info));
+  },
+  onUpdateError: (callback: (error: unknown) => void): void => {
+    ipcRenderer.on('update-error', (_, error) => callback(error));
   }
 };
 

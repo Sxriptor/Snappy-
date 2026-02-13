@@ -302,35 +302,62 @@ export function setupIPCHandlers(): void {
 
   // Handle update actions
   ipcMain.on('update:download', () => {
-    if (process.platform === 'darwin') {
-      const releaseUrl = macManualUpdateUrl || getGitHubReleasesUrl();
-      shell.openExternal(releaseUrl).catch(err => {
-        console.error('[Updater] Failed to open macOS manual update URL:', err);
-      });
-      return;
+    try {
+      if (process.platform === 'darwin') {
+        const releaseUrl = macManualUpdateUrl || getGitHubReleasesUrl();
+        shell.openExternal(releaseUrl).catch(err => {
+          console.error('[Updater] Failed to open macOS manual update URL:', err);
+        });
+        return;
+      }
+      console.log('[Updater] Starting download...');
+      autoUpdater.downloadUpdate();
+    } catch (error) {
+      console.error('[Updater] Download error:', error);
+      if (mainWindow) {
+        mainWindow.webContents.send('update-error', { message: 'Failed to start download' });
+      }
     }
-    autoUpdater.downloadUpdate();
   });
 
   ipcMain.on('update:install', () => {
-    if (process.platform === 'darwin') {
-      const releaseUrl = macManualUpdateUrl || getGitHubReleasesUrl();
-      shell.openExternal(releaseUrl).catch(err => {
-        console.error('[Updater] Failed to open macOS manual update URL:', err);
-      });
-      return;
+    try {
+      if (process.platform === 'darwin') {
+        const releaseUrl = macManualUpdateUrl || getGitHubReleasesUrl();
+        shell.openExternal(releaseUrl).catch(err => {
+          console.error('[Updater] Failed to open macOS manual update URL:', err);
+        });
+        return;
+      }
+      console.log('[Updater] Installing and restarting...');
+      autoUpdater.quitAndInstall();
+    } catch (error) {
+      console.error('[Updater] Install error:', error);
+      if (mainWindow) {
+        mainWindow.webContents.send('update-error', { message: 'Failed to install update' });
+      }
     }
-    autoUpdater.quitAndInstall();
   });
 
   ipcMain.on('update:check', () => {
-    if (process.platform === 'darwin') {
-      checkMacManualUpdates();
-      return;
+    try {
+      if (process.platform === 'darwin') {
+        checkMacManualUpdates();
+        return;
+      }
+      console.log('[Updater] Checking for updates...');
+      autoUpdater.checkForUpdates().catch(err => {
+        console.log('[Updater] Manual check failed:', err.message);
+        if (mainWindow) {
+          mainWindow.webContents.send('update-error', { message: 'Update check failed: ' + err.message });
+        }
+      });
+    } catch (error) {
+      console.error('[Updater] Check error:', error);
+      if (mainWindow) {
+        mainWindow.webContents.send('update-error', { message: 'Failed to check for updates' });
+      }
     }
-    autoUpdater.checkForUpdates().catch(err => {
-      console.log('[Updater] Manual check failed:', err.message);
-    });
   });
 
   // AI Settings handlers
@@ -733,6 +760,9 @@ function setupAutoUpdater(): void {
   
   autoUpdater.on('checking-for-update', () => {
     console.log('[Updater] Checking for updates...');
+    if (mainWindow) {
+      mainWindow.webContents.send('update-checking');
+    }
   });
   
   autoUpdater.on('update-available', (info) => {
@@ -745,6 +775,9 @@ function setupAutoUpdater(): void {
   
   autoUpdater.on('update-not-available', () => {
     console.log('[Updater] No updates available');
+    if (mainWindow) {
+      mainWindow.webContents.send('update-not-available');
+    }
   });
   
   autoUpdater.on('download-progress', (progress) => {
@@ -763,12 +796,18 @@ function setupAutoUpdater(): void {
   
   autoUpdater.on('error', (err) => {
     console.error('[Updater] Error:', err);
+    if (mainWindow) {
+      mainWindow.webContents.send('update-error', { 
+        message: err.message || 'Unknown updater error' 
+      });
+    }
   });
   
   // Check for updates after a short delay
   setTimeout(() => {
     autoUpdater.checkForUpdates().catch(err => {
-      console.log('[Updater] Update check failed:', err.message);
+      console.log('[Updater] Initial update check failed:', err.message);
+      // Don't show error for initial check failure - it's common in development
     });
   }, 3000);
 }

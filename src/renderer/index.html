@@ -627,6 +627,19 @@
           </div>
         </section>
 
+        <!-- About & Updates -->
+        <section class="section">
+          <div class="section-header">ABOUT</div>
+          <div class="setting-row">
+            <span>Version</span>
+            <span id="app-version">1.5.2</span>
+          </div>
+          <div class="setting-row">
+            <span>Updates</span>
+            <button id="check-updates-btn" class="btn-text">Check Now</button>
+          </div>
+        </section>
+
         <button id="save-btn" class="btn btn-full">Save</button>
       </div>
     </aside>
@@ -699,6 +712,39 @@
           <button class="btn btn-primary" id="llama-start-btn">Start New Server</button>
           <button class="btn btn-primary" id="llama-save-config-btn">Save Config</button>
         </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Update Notification Overlay -->
+  <div id="update-overlay" class="update-overlay hidden">
+    <div class="update-notification">
+      <div class="update-header">
+        <div class="update-icon">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M21 12c0 1-1 2-2 2H5c-1 0-2-1-2-2s1-2 2-2h14c1 0 2 1 2 2z"/>
+            <path d="M21 6H3"/>
+            <path d="M21 18H3"/>
+          </svg>
+        </div>
+        <div class="update-content">
+          <h3 id="update-title">Update Available</h3>
+          <p id="update-message">A new version of Snappy is available</p>
+        </div>
+        <button id="update-close" class="update-close-btn">×</button>
+      </div>
+      
+      <div id="update-progress-container" class="update-progress-container hidden">
+        <div class="update-progress-bar">
+          <div id="update-progress-fill" class="update-progress-fill"></div>
+        </div>
+        <div id="update-progress-text" class="update-progress-text">Downloading... 0%</div>
+      </div>
+      
+      <div class="update-actions">
+        <button id="update-later" class="btn btn-secondary">Later</button>
+        <button id="update-download" class="btn btn-primary">Download Update</button>
+        <button id="update-install" class="btn btn-primary hidden">Install & Restart</button>
       </div>
     </div>
   </div>

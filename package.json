@@ -99,7 +99,7 @@
     "publish": {
       "provider": "github",
       "owner": "sxriptor",
-      "repo": "Snappy-"
+      "repo": "Snappy"
     }
   }
 }

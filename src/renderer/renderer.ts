@@ -7283,3 +7283,161 @@ if ((window as any).tray) {
     stopAllSessionBots();
   });
 }
+// ============================================================================
+// Windows Auto-Updater UI
+// ============================================================================
+
+interface UpdateInfo {
+  version: string;
+  releaseNotes?: string;
+  manual?: boolean;
+  downloadUrl?: string;
+  platform?: string;
+}
+
+interface UpdateProgress {
+  percent: number;
+  bytesPerSecond: number;
+  total: number;
+  transferred: number;
+}
+
+let currentUpdateInfo: UpdateInfo | null = null;
+
+// Get update overlay elements
+const updateOverlay = document.getElementById('update-overlay')!;
+const updateTitle = document.getElementById('update-title')!;
+const updateMessage = document.getElementById('update-message')!;
+const updateProgressContainer = document.getElementById('update-progress-container')!;
+const updateProgressFill = document.getElementById('update-progress-fill')!;
+const updateProgressText = document.getElementById('update-progress-text')!;
+const updateCloseBtn = document.getElementById('update-close')!;
+const updateLaterBtn = document.getElementById('update-later')!;
+const updateDownloadBtn = document.getElementById('update-download')!;
+const updateInstallBtn = document.getElementById('update-install')!;
+
+function showUpdateOverlay(info: UpdateInfo) {
+  currentUpdateInfo = info;
+  
+  updateTitle.textContent = 'Update Available';
+  updateMessage.textContent = `Version ${info.version} is ready to download`;
+  
+  // Reset UI state
+  updateProgressContainer.classList.add('hidden');
+  updateDownloadBtn.classList.remove('hidden');
+  updateInstallBtn.classList.add('hidden');
+  
+  updateOverlay.classList.remove('hidden');
+  
+  addLog(`Update available: v${info.version}`, 'info');
+}
+
+function showUpdateProgress(progress: UpdateProgress) {
+  updateProgressContainer.classList.remove('hidden');
+  updateDownloadBtn.classList.add('hidden');
+  
+  const percent = Math.round(progress.percent);
+  updateProgressFill.style.width = `${percent}%`;
+  updateProgressText.textContent = `Downloading... ${percent}%`;
+  
+  addLog(`Download progress: ${percent}%`, 'info');
+}
+
+function showUpdateReady(info: UpdateInfo) {
+  updateProgressContainer.classList.add('hidden');
+  updateDownloadBtn.classList.add('hidden');
+  updateInstallBtn.classList.remove('hidden');
+  
+  updateTitle.textContent = 'Update Ready';
+  updateMessage.textContent = `Version ${info.version} has been downloaded and is ready to install`;
+  
+  addLog(`Update ready to install: v${info.version}`, 'success');
+}
+
+function showUpdateError(error: { message: string }) {
+  updateTitle.textContent = 'Update Error';
+  updateMessage.textContent = error.message || 'An error occurred while updating';
+  
+  // Hide progress and download button, show only close options
+  updateProgressContainer.classList.add('hidden');
+  updateDownloadBtn.classList.add('hidden');
+  updateInstallBtn.classList.add('hidden');
+  
+  updateOverlay.classList.remove('hidden');
+  
+  addLog(`Update error: ${error.message}`, 'error');
+}
+
+function hideUpdateOverlay() {
+  updateOverlay.classList.add('hidden');
+  currentUpdateInfo = null;
+}
+
+// Event listeners for update UI
+updateCloseBtn.addEventListener('click', hideUpdateOverlay);
+updateLaterBtn.addEventListener('click', hideUpdateOverlay);
+
+updateDownloadBtn.addEventListener('click', () => {
+  if (currentUpdateInfo) {
+    (window as any).updater?.downloadUpdate();
+    addLog('Starting update download...', 'info');
+  }
+});
+
+updateInstallBtn.addEventListener('click', () => {
+  if (currentUpdateInfo) {
+    (window as any).updater?.installUpdate();
+    addLog('Installing update and restarting...', 'info');
+  }
+});
+
+// Close overlay on Escape key
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && !updateOverlay.classList.contains('hidden')) {
+    hideUpdateOverlay();
+  }
+});
+
+// Listen for update events from main process
+if ((window as any).updater) {
+  // Update available
+  (window as any).updater.onUpdateAvailable((info: UpdateInfo) => {
+    console.log('[Updater] Update available received:', info);
+    showUpdateOverlay(info);
+  });
+  
+  // Download progress
+  (window as any).updater.onUpdateProgress((progress: UpdateProgress) => {
+    console.log('[Updater] Download progress:', progress.percent);
+    showUpdateProgress(progress);
+  });
+  
+  // Update downloaded and ready
+  (window as any).updater.onUpdateDownloaded((info: UpdateInfo) => {
+    console.log('[Updater] Update downloaded:', info);
+    showUpdateReady(info);
+  });
+  
+  // Update error
+  (window as any).updater.onUpdateError((error: { message: string }) => {
+    console.error('[Updater] Update error:', error);
+    showUpdateError(error);
+  });
+} else {
+  console.warn('[Updater] Updater API not available - running in development mode?');
+}
+
+// Manual update check button (can be added to settings panel if needed)
+function checkForUpdates() {
+  (window as any).updater?.checkForUpdates();
+  addLog('Checking for updates...', 'info');
+}
+
+// Export for potential use in settings panel
+(window as any).checkForUpdates = checkForUpdates;
+
+// Wire up check for updates button
+const checkUpdatesBtn = document.getElementById('check-updates-btn');
+if (checkUpdatesBtn) {
+  checkUpdatesBtn.addEventListener('click', checkForUpdates);
+}
