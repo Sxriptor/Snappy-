@@ -72,10 +72,8 @@ class TrayManager {
       try {
         const image = nativeImage.createFromPath(iconPath);
         if (!image.isEmpty()) {
-          if (isMac) {
-            // macOS menu bar prefers template images.
-            image.setTemplateImage(true);
-          }
+          // Do not force template mode unless using a true template asset.
+          // For regular PNG icons, template mode can render as invisible.
           return image.resize({ width: 18, height: 18 });
         }
       } catch {
