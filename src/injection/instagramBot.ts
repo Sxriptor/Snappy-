@@ -720,6 +720,141 @@ export function buildInstagramBotScript(config: Configuration): string {
       }
     }
 
+    function isOnRequestsPage() {
+      return window.location.href.includes('/direct/requests/');
+    }
+
+    function navigateToRequests() {
+      // ONLY look for the "Request (X)" tab with a number - don't click if no pending requests
+      const requestTabs = Array.from(document.querySelectorAll('[role="tab"]')).filter(tab => {
+        const text = tab.textContent?.toLowerCase() || '';
+        return text.includes('request') && /\\(\\d+\\)/.test(text);
+      });
+      
+      if (requestTabs.length > 0) {
+        // Extract the number for logging
+        const tabText = requestTabs[0].textContent || '';
+        const numberMatch = tabText.match(/\\((\\d+)\\)/);
+        const requestCount = numberMatch ? numberMatch[1] : 'unknown';
+        
+        log('Found requests tab with ' + requestCount + ' pending request(s), clicking...');
+        requestTabs[0].click();
+        return true;
+      }
+      
+      // If no numbered requests tab found, don't navigate
+      log('No requests tab with pending requests found - skipping requests navigation');
+      return false;
+    }
+
+    async function processMessageRequests() {
+      if (!shouldWatchRequests) {
+        log('Message requests monitoring disabled');
+        return;
+      }
+
+      log('Processing message requests...');
+      
+      // Find request items - look for elements with user profiles and "Unread" indicators
+      // BUT exclude "Hidden Requests" items
+      const requestItems = Array.from(document.querySelectorAll('[role="button"]')).filter(item => {
+        const text = item.textContent || '';
+        // Look for items that have profile pictures and "Unread" text
+        const hasProfilePic = !!item.querySelector('img[alt*="profile"]');
+        const hasUnread = text.includes('Unread');
+        const hasUserName = !!item.querySelector('[title]'); // User names usually have title attributes
+        const isHiddenRequest = text.includes('Hidden Requests') || text.includes('Hidden Request');
+        
+        return hasProfilePic && hasUnread && hasUserName && text.length > 50 && !isHiddenRequest; // Exclude hidden requests
+      });
+
+      log('Found ' + requestItems.length + ' potential message requests (excluding hidden requests)');
+
+      for (const item of requestItems) {
+        if (isStopped()) break;
+        
+        // Extract user name for logging
+        const nameElement = item.querySelector('[title]');
+        const userName = nameElement ? nameElement.getAttribute('title') || nameElement.textContent : 'Unknown User';
+        
+        log('Processing request from: ' + userName);
+        
+        // If auto-accept is enabled, we need to click into the conversation first
+        if (shouldAutoAccept) {
+          log('Auto-accept enabled, opening conversation to accept request');
+          
+          // Click into the conversation
+          item.click();
+          await sleep(3000); // Wait for conversation to load
+          
+          // Look for accept button in the conversation
+          const acceptButtons = Array.from(document.querySelectorAll('button, div[role="button"]')).filter(btn => {
+            const text = btn.textContent?.toLowerCase() || '';
+            const ariaLabel = btn.getAttribute('aria-label')?.toLowerCase() || '';
+            return text.includes('accept') || text.includes('allow') || 
+                   ariaLabel.includes('accept') || ariaLabel.includes('allow');
+          });
+          
+          if (acceptButtons.length > 0) {
+            log('Found accept button, clicking to accept request from ' + userName);
+            acceptButtons[0].click();
+            await sleep(2000); // Wait for accept to process
+            
+            // After clicking accept, look for "Primary" button
+            const primaryButtons = Array.from(document.querySelectorAll('button, div[role="button"]')).filter(btn => {
+              const text = btn.textContent?.toLowerCase() || '';
+              const ariaLabel = btn.getAttribute('aria-label')?.toLowerCase() || '';
+              return text.includes('primary') || ariaLabel.includes('primary');
+            });
+            
+            if (primaryButtons.length > 0) {
+              log('Found primary button, clicking to complete acceptance for ' + userName);
+              primaryButtons[0].click();
+              await sleep(1500);
+            } else {
+              log('No primary button found after accepting request from ' + userName);
+            }
+            
+            // After accepting, we can optionally process the conversation like a normal DM
+            if (shouldWatchDMs) {
+              log('Processing accepted request as normal conversation');
+              const messages = getConversationMessages();
+              if (messages.length > 0) {
+                const latestMsg = getLatestIncomingMessage(messages);
+                if (latestMsg) {
+                  const reply = await generateReply(latestMsg.text);
+                  if (reply && Math.random() > (CONFIG?.randomSkipProbability || 0.15)) {
+                    const delay = Math.floor(Math.random() * (preReplyDelayRange[1] - preReplyDelayRange[0])) + preReplyDelayRange[0];
+                    log('Waiting ' + delay + 'ms before replying to accepted request');
+                    await sleep(delay);
+                    if (!isStopped()) {
+                      await typeMessage(reply);
+                      await sleep(500);
+                      const sent = await sendMessage();
+                      if (sent) {
+                        log('✓ Reply sent to accepted request from ' + userName);
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          } else {
+            log('No accept button found for request from ' + userName);
+          }
+          
+          // Navigate back to main DMs (not requests) after processing
+          await sleep(1000);
+          navigateBackToDMs();
+          await sleep(2000);
+        } else {
+          log('Auto-accept disabled, skipping request from ' + userName);
+        }
+      }
+      
+      log('Finished processing message requests');
+    }
+
     async function poll() {
       if (!isRunning || isProcessing) return;
       isProcessing = true;
@@ -746,6 +881,28 @@ export function buildInstagramBotScript(config: Configuration): string {
           await sleep(2000);
           isProcessing = false;
           return;
+        }
+
+        // Handle message requests if enabled
+        if (shouldWatchRequests) {
+          if (isOnRequestsPage()) {
+            await processMessageRequests();
+            // After processing requests, always navigate back to main DMs
+            log('Finished processing requests, navigating back to main DMs');
+            navigateBackToDMs();
+            await sleep(2000);
+          } else if (!isInConversation()) {
+            // We're on main DMs page, check if we should go to requests
+            const navigatedToRequests = navigateToRequests();
+            if (navigatedToRequests) {
+              await sleep(2000);
+              isProcessing = false;
+              return;
+            } else {
+              // No pending requests found, continue with DM processing
+              log('No pending requests to process, continuing with DM monitoring');
+            }
+          }
         }
 
         if (shouldWatchDMs) {

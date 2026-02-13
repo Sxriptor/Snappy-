@@ -46,7 +46,7 @@
   },
   "siteSettings": {
     "instagram": {
-      "watchDirectMessages": false,
+      "watchDirectMessages": true,
       "watchMessageRequests": true,
       "autoAcceptRequests": true,
       "pollIntervalMs": 15000,
