@@ -49,10 +49,15 @@ class WindowManager {
 
     // Handle window close
     detachedWindow.on('closed', () => {
+      console.log(`[WindowManager] Detached window ${windowId} closed`);
       this.detachedWindows.delete(windowId);
       // Notify main window that this detached window was closed
-      if (this.mainWindow) {
-        this.mainWindow.webContents.send('detached-window:closed', { windowId, sessionId });
+      try {
+        if (this.mainWindow && !this.mainWindow.isDestroyed()) {
+          this.mainWindow.webContents.send('detached-window:closed', { windowId, sessionId });
+        }
+      } catch (error) {
+        console.error('[WindowManager] Error notifying main window of close:', error);
       }
     });
 
@@ -97,15 +102,26 @@ class WindowManager {
   async reattachSession(sessionId: string): Promise<boolean> {
     const detached = this.findWindowBySessionId(sessionId);
     if (detached && this.mainWindow) {
-      // Notify main window to reattach the session
-      this.mainWindow.webContents.send('session:reattach', { sessionId });
-      
-      // Close the detached window after a short delay to allow for cleanup
-      setTimeout(() => {
-        detached.window.close();
-      }, 100);
-      
-      return true;
+      try {
+        // Notify main window to reattach the session
+        this.mainWindow.webContents.send('session:reattach', { sessionId });
+        
+        // Close the detached window immediately - the main window will handle the reattach
+        setImmediate(() => {
+          try {
+            if (!detached.window.isDestroyed()) {
+              detached.window.close();
+            }
+          } catch (error) {
+            console.error('[WindowManager] Error closing detached window:', error);
+          }
+        });
+        
+        return true;
+      } catch (error) {
+        console.error('[WindowManager] Error during reattach:', error);
+        return false;
+      }
     }
     return false;
   }

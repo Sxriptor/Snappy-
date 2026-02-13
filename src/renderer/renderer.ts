@@ -2338,6 +2338,19 @@ function showTabContextMenu(sessionId: string, x: number, y: number) {
   const menu = document.getElementById('tab-context-menu');
   if (!menu) return;
   
+  // Update detach/reattach menu item based on window type
+  const detachItem = menu.querySelector('[data-action="detach"]') as HTMLElement;
+  if (detachItem) {
+    const isDetachedWindow = (window as any).isDetachedWindow;
+    if (isDetachedWindow) {
+      detachItem.textContent = 'Reattach to Main';
+      detachItem.dataset.action = 'reattach';
+    } else {
+      detachItem.textContent = 'Detach to New Window';
+      detachItem.dataset.action = 'detach';
+    }
+  }
+  
   menu.style.left = `${x}px`;
   menu.style.top = `${y}px`;
   menu.classList.remove('hidden');
@@ -2384,6 +2397,9 @@ function setupContextMenu() {
           break;
         case 'detach':
           await detachSession(sessionId);
+          break;
+        case 'reattach':
+          await reattachSession(sessionId);
           break;
         case 'hibernate':
           await (window as any).session.hibernateSession(sessionId);
@@ -2621,7 +2637,7 @@ function setupDetachedWindowHandlers() {
   
   // Listen for session reattach requests
   (window as any).windowManager.onSessionReattach((data: { sessionId: string }) => {
-    reattachSession(data.sessionId);
+    handleSessionReattachToMain(data.sessionId);
   });
   
   // Listen for webview data from detached windows
@@ -2723,17 +2739,70 @@ async function loadDetachedSession(sessionId: string, sessionName: string) {
 // Reattach a session from detached window
 async function reattachSession(sessionId: string) {
   try {
-    // Get the session data and recreate it in the main window
+    addLog(`Reattaching session to main window...`, 'info');
+    
+    // Don't wait for the response since the window will be closed
+    // Just fire and forget - the main window will handle the reattach
+    (window as any).windowManager.reattachSession(sessionId).catch((e: any) => {
+      // Ignore errors since the window is being closed
+      console.log('Reattach call completed (window closing)');
+    });
+    
+    // Show success message immediately since we know it will work
+    addLog(`Session reattach initiated`, 'success');
+    
+  } catch (e) {
+    console.error('Reattach error:', e);
+    addLog(`Error during reattach: ${e}`, 'error');
+  }
+}
+
+// Handle session reattach to main window (from detached window)
+async function handleSessionReattachToMain(sessionId: string) {
+  try {
+    // Get the session data from the main process
     const session = await (window as any).session.getSession(sessionId);
     if (session) {
-      addSessionToUI(session);
-      addLog(`Session "${session.name}" reattached to main window`, 'success');
+      // Check if the session tab already exists
+      const existingTab = document.getElementById(`tab-${sessionId}`);
+      if (!existingTab) {
+        // Session tab doesn't exist, add it to the UI
+        addSessionToUIWithoutActivation(session);
+        addLog(`Session "${session.name}" reattached to main window`, 'success');
+      } else {
+        // Session tab exists, just make sure it's not marked as detached
+        existingTab.classList.remove('detached');
+        existingTab.title = '';
+        addLog(`Session "${session.name}" reattached to main window`, 'success');
+      }
+      
+      // Refresh the sidebar to show the updated session
+      refreshSessionSidebar();
+      
+      // Activate the reattached session
+      activateSession(sessionId);
+      
     } else {
       addLog(`Could not reattach session: ${sessionId}`, 'error');
     }
   } catch (e) {
     addLog(`Error reattaching session: ${e}`, 'error');
   }
+}
+
+// Refresh the session sidebar to update the UI
+function refreshSessionSidebar() {
+  // Update all tab indicators and states
+  updateAllTabIndicators();
+  
+  // Ensure the new session button is visible
+  const newBtn = document.getElementById('new-session-btn');
+  if (newBtn) {
+    newBtn.style.display = 'flex';
+  }
+  
+  // Update the session count or any other sidebar elements if needed
+  console.log('[Snappy] Session sidebar refreshed');
 }
 
 // Receive webview from detached window
@@ -2870,6 +2939,11 @@ function setupMultiSessionUI() {
   const newBtn = document.getElementById('new-session-btn');
   if (newBtn) {
     newBtn.onclick = showNewSessionModal;
+    // Ensure button is visible in main window
+    newBtn.style.display = 'flex';
+    console.log('[Snappy] New session button initialized and made visible');
+  } else {
+    console.warn('[Snappy] New session button not found in DOM');
   }
   
   // Modal close buttons
