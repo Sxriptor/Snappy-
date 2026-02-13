@@ -1172,8 +1172,6 @@ function buildRedditFallbackBotScript(config: any): string {
 `;
 }
 
-<<<<<<< HEAD
-=======
 function buildRedditBotScript(config: any): string {
   const req = (window as any).require;
   if (typeof req !== 'function') {
@@ -1201,7 +1199,7 @@ function buildRedditBotScript(config: any): string {
 })();
 `;
   } catch (error) {
-    const message = String(error && error.message ? error.message : error);
+    const message = error instanceof Error ? error.message : String(error);
     return `
 (function() {
   console.error('[Snappy][Reddit] Module load failed: ${message}');
@@ -1998,7 +1996,6 @@ function buildInstagramBotScript(config: any): string {
 `;
 }
 
->>>>>>> 8b6447cb6b2db7d88dcafea2b02481c961ded7fd
 interface ReplyRule {
   match: string;
   reply: string;
@@ -7097,11 +7094,8 @@ async function injectBotIntoSpecificWebview(webview: Electron.WebviewTag, sessio
     } else if (site === 'reddit') {
       botScript = buildRedditBotScript(resolvedConfig);
     } else if (site === 'instagram') {
-<<<<<<< HEAD
       botScript = await getInstagramBotScript(config as Config);
-=======
       botScript = buildInstagramBotScript(resolvedConfig);
->>>>>>> 8b6447cb6b2db7d88dcafea2b02481c961ded7fd
     } else {
       addLog(`Unknown site: ${site}`, 'error', sessionId);
       return false;

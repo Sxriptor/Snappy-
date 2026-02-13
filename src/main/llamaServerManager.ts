@@ -6,11 +6,14 @@
  */
 
 import { spawn, ChildProcess, exec } from 'child_process';
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
 import { LlamaServerConfig, LlamaServerStatus } from '../types';
 
 export class LlamaServerManager {
   private processes: Map<number, { process: ChildProcess; startTime: number; cmdPid?: number }> = new Map();
-  private cmdPids: Set<number> = new Set(); // Track CMD window PIDs separately
+  private cmdPids: Set<number> = new Set(); // Track top-level launched process PIDs
   private config: LlamaServerConfig | null = null;
   private statusCallback: ((status: LlamaServerStatus) => void) | null = null;
 
@@ -146,25 +149,77 @@ export class LlamaServerManager {
           console.error('[LlamaServerManager] Failed to capture CMD PID!');
           throw new Error('Failed to capture CMD process ID');
         }
-      } else {
-        // Parse the command for non-Windows platforms
-        const args = this.parseCommand(startCommand);
-        const executable = args.shift();
+      } else if (process.platform === 'darwin') {
+        const normalizedCommand = this.normalizeUnixCommand(startCommand);
+        // On macOS, open a visible Terminal window so behavior matches manual usage.
+        const pidFile = path.join(os.tmpdir(), `snappy-llama-${Date.now()}-${Math.random().toString(36).slice(2)}.pid`);
+        const shellCommand = this.buildMacStartShellCommand(buildPath, normalizedCommand, pidFile);
 
-        if (!executable) {
-          throw new Error('Invalid start command');
+        const appleScript = [
+          'tell application "Terminal"',
+          '  activate',
+          `  do script "${this.escapeAppleScriptString(shellCommand)}"`,
+          'end tell'
+        ].join('\n');
+
+        await new Promise<void>((resolve, reject) => {
+          const scriptProcess = spawn('osascript', ['-e', appleScript], {
+            stdio: ['ignore', 'pipe', 'pipe'],
+            shell: false
+          });
+
+          let stderr = '';
+          scriptProcess.stderr?.on('data', (data) => {
+            stderr += data.toString();
+          });
+
+          scriptProcess.on('error', (err) => reject(err));
+          scriptProcess.on('exit', (code) => {
+            if (code === 0) resolve();
+            else reject(new Error(stderr.trim() || `osascript exited with code ${code}`));
+          });
+        });
+
+        const macPid = await this.waitForPidFile(pidFile, 10000);
+        try {
+          if (fs.existsSync(pidFile)) fs.unlinkSync(pidFile);
+        } catch {
+          // Ignore cleanup errors
         }
 
-        const newProcess = spawn(executable, args, {
+        if (!macPid) {
+          throw new Error('Failed to capture server PID from Terminal launch');
+        }
+
+        const startTime = Date.now();
+        this.cmdPids.add(macPid);
+        console.log(`[LlamaServerManager] Added macOS PID ${macPid} to tracking set. Total tracked: ${this.cmdPids.size}`);
+
+        const status: LlamaServerStatus = {
+          running: true,
+          pid: macPid,
+          startTime
+        };
+        this.notifyStatus(status);
+        console.log('[LlamaServerManager] Server started successfully in Terminal, PID:', macPid);
+        return status;
+      } else {
+        const normalizedCommand = this.normalizeUnixCommand(startCommand);
+        // On macOS/Linux, run the command exactly through the user's shell.
+        // This matches manual terminal behavior and preserves quoting/operators.
+        const shellPath = process.env.SHELL || '/bin/bash';
+        const newProcess = spawn(shellPath, ['-lc', normalizedCommand], {
           cwd: buildPath,
           stdio: ['ignore', 'pipe', 'pipe'],
-          shell: true,
-          detached: false
+          shell: false,
+          detached: true
         });
         
         const startTime = Date.now();
         if (newProcess.pid) {
           this.processes.set(newProcess.pid, { process: newProcess, startTime });
+          this.cmdPids.add(newProcess.pid);
+          console.log(`[LlamaServerManager] Added PID ${newProcess.pid} to tracking set. Total tracked: ${this.cmdPids.size}`);
         }
       }
 
@@ -195,10 +250,11 @@ export class LlamaServerManager {
         console.log(`[LlamaServerManager] Process ${pid} exited with code ${code}, signal ${signal}`);
         if (pid) {
           this.processes.delete(pid);
+          this.cmdPids.delete(pid);
         }
         this.notifyStatus({
-          running: this.processes.size > 0,
-          error: this.processes.size === 0 ? `Last process exited with code ${code}` : undefined
+          running: this.cmdPids.size > 0,
+          error: this.cmdPids.size === 0 ? `Last process exited with code ${code}` : undefined
         });
       });
 
@@ -208,10 +264,11 @@ export class LlamaServerManager {
         console.error(`[LlamaServerManager] Process ${pid} error:`, err);
         if (pid) {
           this.processes.delete(pid);
+          this.cmdPids.delete(pid);
         }
         this.notifyStatus({
-          running: this.processes.size > 0,
-          error: this.processes.size === 0 ? err.message : undefined
+          running: this.cmdPids.size > 0,
+          error: this.cmdPids.size === 0 ? err.message : undefined
         });
       });
 
@@ -238,7 +295,7 @@ export class LlamaServerManager {
       console.error('[LlamaServerManager] Failed to start server:', errorMsg);
 
       const status: LlamaServerStatus = {
-        running: this.processes.size > 0,
+        running: this.cmdPids.size > 0,
         error: errorMsg
       };
 
@@ -248,20 +305,18 @@ export class LlamaServerManager {
   }
 
   /**
-   * Stop a specific llama.cpp server by its CMD PID
+   * Stop a specific llama.cpp server by its tracked PID
    */
   async stopByPid(pid: number): Promise<LlamaServerStatus> {
     try {
       console.log(`[LlamaServerManager] Stopping server with PID ${pid}...`);
       console.log(`[LlamaServerManager] Currently tracked PIDs: ${Array.from(this.cmdPids).join(', ')}`);
 
-      if (!this.cmdPids.has(pid)) {
+      if (!this.cmdPids.has(pid) && !this.processes.has(pid)) {
         console.log(`[LlamaServerManager] PID ${pid} not found in tracked processes`);
         return { running: this.cmdPids.size > 0, error: `PID ${pid} not tracked` };
       }
 
-      // On Windows, kill the CMD and its child processes (llama-server.exe)
-      // /T kills the process tree, /F forces termination
       if (process.platform === 'win32') {
         await new Promise<void>((resolve) => {
           console.log(`[LlamaServerManager] Executing: taskkill /F /T /PID ${pid}`);
@@ -274,10 +329,13 @@ export class LlamaServerManager {
             resolve();
           });
         });
+      } else {
+        await this.killTrackedPid(pid);
       }
 
       // Remove from tracking
       this.cmdPids.delete(pid);
+      this.processes.delete(pid);
 
       const status: LlamaServerStatus = {
         running: this.cmdPids.size > 0
@@ -314,7 +372,7 @@ export class LlamaServerManager {
         return { running: false };
       }
 
-      // On Windows, kill only the tracked PIDs
+      // Kill only the tracked PIDs
       if (process.platform === 'win32') {
         // Kill each tracked CMD PID directly using taskkill with /T to kill child processes too
         const killByPidPromises = Array.from(this.cmdPids).map(pid => {
@@ -335,6 +393,10 @@ export class LlamaServerManager {
         await Promise.all(killByPidPromises);
         
         // Clear tracked PIDs
+        this.cmdPids.clear();
+      } else {
+        const killByPidPromises = Array.from(this.cmdPids).map(pid => this.killTrackedPid(pid));
+        await Promise.all(killByPidPromises);
         this.cmdPids.clear();
       }
 
@@ -467,6 +529,83 @@ export class LlamaServerManager {
 
     console.log('[LlamaServerManager] Parsed args:', args);
     return args;
+  }
+
+  /**
+   * Kill a tracked process PID on non-Windows platforms.
+   * Tries process group first to include child processes.
+   */
+  private async killTrackedPid(pid: number): Promise<void> {
+    const tryKill = (targetPid: number, signal: NodeJS.Signals | number): boolean => {
+      try {
+        process.kill(targetPid, signal);
+        return true;
+      } catch {
+        return false;
+      }
+    };
+
+    const sentGroupTerm = tryKill(-pid, 'SIGTERM');
+    const sentPidTerm = sentGroupTerm ? true : tryKill(pid, 'SIGTERM');
+
+    if (!sentGroupTerm && !sentPidTerm) {
+      return;
+    }
+
+    await new Promise(resolve => setTimeout(resolve, 500));
+
+    if (this.isPidAlive(pid)) {
+      if (!tryKill(-pid, 'SIGKILL')) {
+        tryKill(pid, 'SIGKILL');
+      }
+    }
+  }
+
+  private isPidAlive(pid: number): boolean {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  private escapeShellSingleQuotes(value: string): string {
+    return value.replace(/'/g, `'\\''`);
+  }
+
+  private escapeAppleScriptString(value: string): string {
+    return value.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+  }
+
+  private buildMacStartShellCommand(buildPath: string, startCommand: string, pidFile: string): string {
+    const safeBuildPath = this.escapeShellSingleQuotes(buildPath);
+    const safePidFile = this.escapeShellSingleQuotes(pidFile);
+    const cleanedCommand = this.normalizeUnixCommand(startCommand);
+    return `cd '${safeBuildPath}' && (${cleanedCommand}) & SERVER_PID=$!; echo $SERVER_PID > '${safePidFile}'; wait $SERVER_PID`;
+  }
+
+  private normalizeUnixCommand(command: string): string {
+    return command
+      .replace(/\\\s*\r?\n\s*/g, ' ')       // line continuation with newline
+      .replace(/\\\s+(?=-{1,2}\w)/g, ' ')   // continuation artifacts before flags
+      .replace(/\s+/g, ' ')
+      .trim();
+  }
+
+  private async waitForPidFile(pidFile: string, timeoutMs: number): Promise<number | null> {
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+      if (fs.existsSync(pidFile)) {
+        const rawPid = fs.readFileSync(pidFile, 'utf-8').trim();
+        const parsed = parseInt(rawPid, 10);
+        if (!isNaN(parsed) && parsed > 0) {
+          return parsed;
+        }
+      }
+      await new Promise(resolve => setTimeout(resolve, 200));
+    }
+    return null;
   }
 
   /**
