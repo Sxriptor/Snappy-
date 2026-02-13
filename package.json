@@ -98,8 +98,8 @@
     },
     "publish": {
       "provider": "github",
-      "owner": "OWNER",
-      "repo": "snappy"
+      "owner": "sxriptor",
+      "repo": "Snappy-"
     }
   }
 }

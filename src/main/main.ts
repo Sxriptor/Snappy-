@@ -3,10 +3,11 @@
  * Responsible for window management, script injection, and configuration
  */
 
-import { app, BrowserWindow, ipcMain, session } from 'electron';
+import { app, BrowserWindow, ipcMain, session, shell } from 'electron';
 import { autoUpdater } from 'electron-updater';
 import * as path from 'path';
 import * as fs from 'fs';
+import * as https from 'https';
 import { Configuration, DEFAULT_CONFIG, DEFAULT_AI_CONFIG, SessionConfig, ProxyConfig, IncomingMessage, AIConfig } from '../types';
 import { SessionManager } from './sessionManager';
 import { ProxyManager } from './proxyManager';
@@ -24,6 +25,7 @@ let injectionScript: string = '';
 let isInjected: boolean = false;
 let aiBrain: AIBrain | null = null;
 let isProcessingReply: boolean = false;
+let macManualUpdateUrl: string | null = null;
 
 // Multi-session managers
 const fingerprintGenerator = new FingerprintGenerator();
@@ -294,14 +296,32 @@ export function setupIPCHandlers(): void {
 
   // Handle update actions
   ipcMain.on('update:download', () => {
+    if (process.platform === 'darwin') {
+      const releaseUrl = macManualUpdateUrl || getGitHubReleasesUrl();
+      shell.openExternal(releaseUrl).catch(err => {
+        console.error('[Updater] Failed to open macOS manual update URL:', err);
+      });
+      return;
+    }
     autoUpdater.downloadUpdate();
   });
 
   ipcMain.on('update:install', () => {
+    if (process.platform === 'darwin') {
+      const releaseUrl = macManualUpdateUrl || getGitHubReleasesUrl();
+      shell.openExternal(releaseUrl).catch(err => {
+        console.error('[Updater] Failed to open macOS manual update URL:', err);
+      });
+      return;
+    }
     autoUpdater.quitAndInstall();
   });
 
   ipcMain.on('update:check', () => {
+    if (process.platform === 'darwin') {
+      checkMacManualUpdates();
+      return;
+    }
     autoUpdater.checkForUpdates().catch(err => {
       console.log('[Updater] Manual check failed:', err.message);
     });
@@ -747,6 +767,125 @@ function setupAutoUpdater(): void {
   }, 3000);
 }
 
+function getGitHubReleasesUrl(): string {
+  try {
+    const packageJsonPath = app.isPackaged
+      ? path.join(process.resourcesPath, 'app.asar', 'package.json')
+      : path.join(process.cwd(), 'package.json');
+
+    const packageJsonRaw = fs.readFileSync(packageJsonPath, 'utf-8');
+    const packageJson = JSON.parse(packageJsonRaw);
+    const owner = packageJson?.build?.publish?.owner;
+    const repo = packageJson?.build?.publish?.repo;
+
+    if (owner && repo && owner !== 'OWNER') {
+      return `https://github.com/${owner}/${repo}/releases/latest`;
+    }
+  } catch (error) {
+    console.log('[Updater] Could not resolve GitHub releases URL from package.json:', error);
+  }
+
+  return 'https://github.com';
+}
+
+function parseComparableVersion(version: string): number[] {
+  const cleaned = version.replace(/^v/i, '').split('-')[0];
+  return cleaned.split('.').map(part => {
+    const n = parseInt(part, 10);
+    return Number.isFinite(n) ? n : 0;
+  });
+}
+
+function isVersionNewer(candidate: string, current: string): boolean {
+  const a = parseComparableVersion(candidate);
+  const b = parseComparableVersion(current);
+  const max = Math.max(a.length, b.length);
+  for (let i = 0; i < max; i++) {
+    const av = a[i] ?? 0;
+    const bv = b[i] ?? 0;
+    if (av > bv) return true;
+    if (av < bv) return false;
+  }
+  return false;
+}
+
+function fetchJson(url: string): Promise<any> {
+  return new Promise((resolve, reject) => {
+    const req = https.get(
+      url,
+      {
+        headers: {
+          'User-Agent': 'Snappy-Updater',
+          Accept: 'application/vnd.github+json'
+        }
+      },
+      (res) => {
+        let data = '';
+        res.on('data', chunk => {
+          data += chunk;
+        });
+        res.on('end', () => {
+          if ((res.statusCode || 500) >= 400) {
+            reject(new Error(`HTTP ${res.statusCode}: ${data.slice(0, 200)}`));
+            return;
+          }
+          try {
+            resolve(JSON.parse(data));
+          } catch (error) {
+            reject(error);
+          }
+        });
+      }
+    );
+
+    req.on('error', reject);
+    req.end();
+  });
+}
+
+async function checkMacManualUpdates(): Promise<void> {
+  try {
+    const latestUrl = getGitHubReleasesUrl();
+    const match = latestUrl.match(/^https:\/\/github\.com\/([^/]+)\/([^/]+)\/releases\/latest$/);
+    if (!match) {
+      console.log('[Updater] macOS manual update check skipped: GitHub owner/repo not configured');
+      return;
+    }
+
+    const [, owner, repo] = match;
+    const apiUrl = `https://api.github.com/repos/${owner}/${repo}/releases/latest`;
+    const release = await fetchJson(apiUrl);
+    const latestVersion = String(release?.tag_name || release?.name || '').replace(/^v/i, '').trim();
+    const currentVersion = app.getVersion();
+
+    if (!latestVersion) {
+      console.log('[Updater] macOS manual update check: could not determine latest version');
+      return;
+    }
+
+    if (!isVersionNewer(latestVersion, currentVersion)) {
+      console.log(`[Updater] macOS manual update check: no update (${currentVersion})`);
+      return;
+    }
+
+    macManualUpdateUrl = release?.html_url || latestUrl;
+
+    if (mainWindow) {
+      mainWindow.webContents.send('update-available', {
+        version: latestVersion,
+        releaseNotes: release?.body || '',
+        manual: true,
+        downloadUrl: macManualUpdateUrl,
+        platform: 'darwin'
+      });
+    }
+
+    console.log(`[Updater] macOS manual update available: ${latestVersion}`);
+  } catch (error) {
+    console.error('[Updater] macOS manual update check failed:', error);
+  }
+}
+
 /**
  * Initialize and start the application
  */
@@ -816,9 +955,15 @@ async function initializeApp(): Promise<void> {
   const htmlPath = path.join(__dirname, '../renderer/index.html');
   await mainWindow.loadFile(htmlPath);
 
-  // Set up auto-updater (only in production)
+  // Set up updater checks (only in production)
   if (app.isPackaged) {
-    setupAutoUpdater();
+    if (process.platform === 'darwin') {
+      setTimeout(() => {
+        checkMacManualUpdates();
+      }, 3000);
+    } else {
+      setupAutoUpdater();
+    }
   }
 }
 
