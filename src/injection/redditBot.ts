@@ -727,19 +727,34 @@ export function buildRedditBotScript(config: Configuration): string {
   }
 
   async function generatePmReply(messageText, username) {
-    const rules = Array.isArray(CONFIG?.replyRules) ? CONFIG.replyRules : [];
+    const ruleSources = [];
+    if (Array.isArray(CONFIG?.replyRules)) ruleSources.push(...CONFIG.replyRules);
+    if (Array.isArray(CONFIG?.reddit?.replyRules)) ruleSources.push(...CONFIG.reddit.replyRules);
+    const rules = ruleSources;
+
+    function normalizeForMatch(text) {
+      return String(text || '')
+        .toLowerCase()
+        .replace(/[^a-z0-9\\s]/g, ' ')
+        .replace(/\\s+/g, ' ')
+        .trim();
+    }
+
     function findRuleReply(text) {
-      const lowerText = String(text || '').toLowerCase();
+      const normalizedText = normalizeForMatch(text);
       for (const rule of rules) {
         const matchStr = typeof rule.match === 'string' ? rule.match : '';
         const matchRaw = String(matchStr || '').trim();
         if (!matchRaw) continue;
-        const normalized = matchRaw.toLowerCase();
-        const target = lowerText;
+        const normalized = normalizeForMatch(matchRaw);
+        if (!normalized) continue;
+        const target = normalizedText;
         if (normalized === '*' || normalized === 'default' || normalized === 'fallback') {
           return String(rule.reply || '').trim() || null;
         }
-        if (target.includes(normalized)) {
+        const boundaryPattern = new RegExp('(^|\\\\s)' + normalized.replace(/[.*+?^()|[\]{}$\\\\]/g, '\\\\$&') + '(\\\\s|$)', 'i');
+        if (target.includes(normalized) || boundaryPattern.test(target)) {
+          log('Rule matched for u/' + (username || 'reddit_user') + ': "' + matchRaw + '"');
           return String(rule.reply || '').trim() || null;
         }
       }
@@ -747,10 +762,6 @@ export function buildRedditBotScript(config: Configuration): string {
     }
 
     const directRuleReply = findRuleReply(messageText);
-    if (directRuleReply) return directRuleReply;
-
-    const lower = String(messageText || '').toLowerCase();
-
     if (CONFIG?.ai?.enabled) {
       try {
         const reqId = 'rd-pm-' + Date.now() + '-' + Math.floor(Math.random() * 100000);
@@ -768,18 +779,38 @@ export function buildRedditBotScript(config: Configuration): string {
       }
     }
 
+    if (directRuleReply) {
+      log('Using matched rule fallback for u/' + (username || 'reddit_user'));
+      return directRuleReply;
+    }
+
     const fallbackRule = findRuleReply(messageText);
     if (fallbackRule) {
       log('Using keyword fallback reply for u/' + (username || 'reddit_user'));
       return fallbackRule;
     }
 
-    // Keep the flow moving even when AI returns empty/no-op.
+    // If rules exist but nothing matched, use first non-empty reply as final fallback.
+    for (const rule of rules) {
+      const reply = String(rule?.reply || '').trim();
+      if (reply) {
+        log('Using first configured rule reply as fallback for u/' + (username || 'reddit_user'));
+        return reply;
+      }
+    }
+
     return 'Thanks for your message.';
   }
 
   async function sendPmReply(text) {
+    log('Preparing to send PM reply (' + String(text || '').length + ' chars)');
     const inputSelectors = [
+      'main textarea[name="message"]',
+      'textarea[name="message"]',
+      'main textarea[aria-label*="write message" i]',
+      'textarea[aria-label*="write message" i]',
+      'main textarea[placeholder*="message" i]',
+      'textarea[placeholder*="message" i]',
       'main [contenteditable="true"][role="textbox"]',
       'main [role="textbox"][contenteditable="true"]',
       'main [contenteditable="plaintext-only"][role="textbox"]',
@@ -789,116 +820,297 @@ export function buildRedditBotScript(config: Configuration): string {
       'textarea[name="text"]',
       'textarea',
       '[contenteditable="true"][role="textbox"]',
-      '[contenteditable="true"]'
+      '[contenteditable="true"]',
+      'rs-message-composer'
     ];
 
-    let input = null;
-    for (const selector of inputSelectors) {
-      const nodes = deepQueryAll(selector);
-      for (const el of nodes) {
-        if (el && el instanceof HTMLElement && isVisibleElement(el)) {
-          if (Object.prototype.hasOwnProperty.call(el, 'disabled') && el.disabled) continue;
-          input = el;
-          break;
-        }
-      }
-      if (input) break;
-    }
-    if (!input) return false;
+    function findWritableInsideHost(host) {
+      if (!host) return null;
+      const candidateSelectors = [
+        'textarea[name="message"]',
+        'textarea[aria-label*="write message" i]',
+        'textarea[placeholder*="message" i]',
+        'textarea',
+        '[role="textbox"][contenteditable="true"]',
+        '[contenteditable="true"]'
+      ];
 
+      const visited = new Set();
+      function walk(root) {
+        if (!root || visited.has(root)) return null;
+        visited.add(root);
+
+        for (const sel of candidateSelectors) {
+          let found = null;
+          try {
+            found = root.querySelector(sel);
+          } catch (e) {}
+          if (found && found instanceof HTMLElement) return found;
+        }
+
+        let all = [];
+        try {
+          all = root.querySelectorAll('*');
+        } catch (e) {
+          all = [];
+        }
+        for (const node of all) {
+          if (node && node.shadowRoot) {
+            const nested = walk(node.shadowRoot);
+            if (nested) return nested;
+          }
+        }
+        return null;
+      }
+
+      const direct = walk(host);
+      if (direct) return direct;
+      if (host.shadowRoot) {
+        const viaShadow = walk(host.shadowRoot);
+        if (viaShadow) return viaShadow;
+      }
+      return null;
+    }
+
+    function isWritableComposer(el) {
+      if (!el || !(el instanceof HTMLElement)) return false;
+      const tag = String(el.tagName || '').toLowerCase();
+      if (tag === 'rs-message-composer') return true;
+      if (Object.prototype.hasOwnProperty.call(el, 'disabled') && el.disabled) return false;
+      if (Object.prototype.hasOwnProperty.call(el, 'readOnly') && el.readOnly) return false;
+      const nameAttr = String(el.getAttribute('name') || '').toLowerCase();
+      if (!isVisibleElement(el) && !(tag === 'textarea' && (nameAttr === 'message' || nameAttr === 'text'))) return false;
+      const ce = String(el.getAttribute('contenteditable') || '').toLowerCase();
+      if (ce === 'true' || ce === 'plaintext-only') return true;
+      if ('value' in el) return true;
+      return false;
+    }
+
+    function scoreComposer(el) {
+      if (!el || !(el instanceof HTMLElement)) return -1;
+      if (!isWritableComposer(el)) return -1;
+      let score = 0;
+      const name = String(el.getAttribute('name') || '').toLowerCase();
+      const aria = String(el.getAttribute('aria-label') || '').toLowerCase();
+      const placeholder = String(el.getAttribute('placeholder') || '').toLowerCase();
+      const tag = String(el.tagName || '').toLowerCase();
+      if (tag === 'textarea') score += 3;
+      if (name === 'message') score += 6;
+      if (name === 'text') score += 3;
+      if (aria.includes('write message')) score += 6;
+      if (aria.includes('message')) score += 2;
+      if (placeholder.includes('message')) score += 3;
+      if (isVisibleElement(el)) score += 2;
+      return score;
+    }
+
+    async function findComposerWithRetries() {
+      for (let attempt = 0; attempt < 6; attempt++) {
+        let best = null;
+        let bestScore = -1;
+
+        for (const selector of inputSelectors) {
+          const nodes = deepQueryAll(selector);
+          for (const el of nodes) {
+            const score = scoreComposer(el);
+            if (score > bestScore) {
+              best = el;
+              bestScore = score;
+            }
+          }
+          if (bestScore >= 8) break;
+        }
+
+        // Broad fallback scan in case selectors miss Reddit variant.
+        if (!best) {
+          const broad = deepQueryAll('textarea, [role="textbox"], [contenteditable="true"], [contenteditable="plaintext-only"]');
+          for (const el of broad) {
+            const score = scoreComposer(el);
+            if (score > bestScore) {
+              best = el;
+              bestScore = score;
+            }
+          }
+        }
+
+        // Dedicated web-component fallback for Reddit chat composer.
+        if (!best) {
+          const hosts = deepQueryAll('rs-message-composer');
+          for (const host of hosts) {
+            if (!(host instanceof HTMLElement)) continue;
+            const nested = findWritableInsideHost(host);
+            if (nested) {
+              best = nested;
+              bestScore = Math.max(bestScore, 10);
+              break;
+            }
+            if (isVisibleElement(host)) {
+              best = host;
+              bestScore = Math.max(bestScore, 6);
+            }
+          }
+        }
+
+        if (best && bestScore >= 0) {
+          log('Composer found (attempt ' + (attempt + 1) + ', score ' + bestScore + ')');
+          return best;
+        }
+
+        await sleep(220 + (attempt * 120));
+      }
+      return null;
+    }
+
+    let input = await findComposerWithRetries();
+    if (!input) {
+      log('No writable message composer found');
+      return false;
+    }
+
+    function getInputTextValue(el) {
+      if (!el) return '';
+      if (String(el.tagName || '').toLowerCase() === 'rs-message-composer') return '';
+      if (el.getAttribute('contenteditable') === 'true' || el.getAttribute('contenteditable') === 'plaintext-only') {
+        const v = normalizeText(el.innerText || el.textContent || '');
+        return v;
+      }
+      if ('value' in el) {
+        return String(el.value || '');
+      }
+      return '';
+    }
+
+    function setInputValue(el, value) {
+      if (!el) return;
+      const proto = Object.getPrototypeOf(el);
+      const desc = proto ? Object.getOwnPropertyDescriptor(proto, 'value') : null;
+      if (desc && typeof desc.set === 'function') {
+        desc.set.call(el, value);
+      } else {
+        el.value = value;
+      }
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+
+    function isEnabledButton(el) {
+      if (!el || !(el instanceof HTMLElement) || !isVisibleElement(el)) return false;
+      if (Object.prototype.hasOwnProperty.call(el, 'disabled') && el.disabled) return false;
+      const aria = String(el.getAttribute('aria-label') || '').toLowerCase();
+      const txt = normalizeText(el.textContent || '').toLowerCase();
+      const iconName = String(el.getAttribute('icon-name') || '').toLowerCase();
+      if (aria.includes('send') || txt === 'send' || txt.startsWith('send ') || iconName.includes('send')) return true;
+      if (aria.includes('message')) return true;
+      if (el.matches('button[type="submit"], button[data-testid*="send" i], button[aria-label*="send" i]')) return true;
+      return false;
+    }
+
+    input.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
+    if (typeof input.click === 'function') input.click();
+    input.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true }));
     input.focus();
-    if (input.getAttribute('contenteditable') === 'true') {
+    await sleep(80);
+
+    const active = document.activeElement;
+    if (active && active instanceof HTMLElement && isWritableComposer(active)) {
+      input = active;
+    }
+    if (String(input.tagName || '').toLowerCase() === 'rs-message-composer') {
+      const nested = findWritableInsideHost(input);
+      if (nested) {
+        input = nested;
+        input.focus();
+      }
+    }
+    log('Active composer: ' + String(input.tagName || '').toLowerCase() + ' name=' + String(input.getAttribute('name') || ''));
+
+    const isEditable = input.getAttribute('contenteditable') === 'true' || input.getAttribute('contenteditable') === 'plaintext-only';
+    if (isEditable) {
       input.textContent = '';
-    } else if (Object.prototype.hasOwnProperty.call(input, 'value')) {
-      input.value = '';
+    } else if ('value' in input) {
+      setInputValue(input, '');
     }
     input.dispatchEvent(new Event('input', { bubbles: true }));
-
-    // Try whole-text insert first for modern contenteditable composers.
-    if (input.getAttribute('contenteditable') === 'true') {
-      try {
-        if (document.execCommand) {
-          document.execCommand('insertText', false, text);
-        } else {
-          input.textContent = text;
-        }
-        input.dispatchEvent(new Event('input', { bubbles: true }));
-      } catch (e) {
-        // Fall back to char typing below.
-      }
-    } else if (Object.prototype.hasOwnProperty.call(input, 'value')) {
-      input.value = text;
-      input.dispatchEvent(new Event('input', { bubbles: true }));
-    }
 
     const delays = CONFIG?.typingDelayRangeMs || [10, 35];
     const minDelay = Number(delays[0]) || 10;
     const maxDelay = Number(delays[1]) || 35;
-    const quickValue = input.getAttribute('contenteditable') === 'true'
-      ? normalizeText(input.textContent || '')
-      : String(Object.prototype.hasOwnProperty.call(input, 'value') ? (input.value || '') : '');
+    for (let i = 0; i < text.length; i++) {
+      const char = text[i];
+      input.dispatchEvent(new KeyboardEvent('keydown', { key: char, bubbles: true, cancelable: true }));
+      input.dispatchEvent(new KeyboardEvent('keypress', { key: char, bubbles: true, cancelable: true }));
 
-    if (!quickValue || quickValue.length < 2) {
-      for (let i = 0; i < text.length; i++) {
-        const char = text[i];
-        input.dispatchEvent(new KeyboardEvent('keydown', { key: char, bubbles: true, cancelable: true }));
-        input.dispatchEvent(new KeyboardEvent('keypress', { key: char, bubbles: true, cancelable: true }));
-
-        if (input.getAttribute('contenteditable') === 'true') {
-          if (document.execCommand) {
-            try { document.execCommand('insertText', false, char); } catch (e) { input.textContent = (input.textContent || '') + char; }
-          } else {
-            input.textContent = (input.textContent || '') + char;
-          }
-        } else if (Object.prototype.hasOwnProperty.call(input, 'value')) {
-          input.value += char;
+      if (isEditable) {
+        if (document.execCommand) {
+          try { document.execCommand('insertText', false, char); } catch (e) { input.innerText = (input.innerText || '') + char; }
+        } else {
+          input.innerText = (input.innerText || '') + char;
         }
-
-        input.dispatchEvent(new Event('input', { bubbles: true }));
-        input.dispatchEvent(new KeyboardEvent('keyup', { key: char, bubbles: true, cancelable: true }));
-        const delay = Math.floor(Math.random() * Math.max(1, (maxDelay - minDelay + 1))) + minDelay;
-        await sleep(delay);
+      } else if ('value' in input) {
+        setInputValue(input, String(getInputTextValue(input) || '') + char);
       }
+
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      input.dispatchEvent(new KeyboardEvent('keyup', { key: char, bubbles: true, cancelable: true }));
+      const delay = Math.floor(Math.random() * Math.max(1, (maxDelay - minDelay + 1))) + minDelay;
+      await sleep(delay);
     }
     await sleep(180);
-    const typedLength = input.getAttribute('contenteditable') === 'true'
-      ? normalizeText(input.textContent || '').length
-      : Number(
-          Object.prototype.hasOwnProperty.call(input, 'value') && input.value != null
-            ? String(input.value).length
-            : 0
-        );
+    const typedLength = getInputTextValue(input).length;
+    log('Typed length in composer: ' + typedLength);
     if (typedLength < Math.min(2, text.length)) {
       log('Reply text was not applied to input; send aborted');
       return false;
     }
 
     const buttonSelectors = [
-      'button[type="submit"]',
       'button[aria-label*="send" i]',
-      'button[data-testid*="send"]'
+      'button[data-testid*="send" i]',
+      'button[type="submit"]',
+      'button[icon-name*="send" i]'
     ];
+    const localScope = input.closest('form, main, [role="main"], [class*="composer" i], [class*="message" i]') || document;
+    for (const selector of buttonSelectors) {
+      const localBtns = Array.from(localScope.querySelectorAll(selector));
+      for (const btn of localBtns) {
+        if (!isEnabledButton(btn)) continue;
+        btn.click();
+        log('Clicked local send button');
+        await sleep(220);
+        if (getInputTextValue(input).length === 0) return true;
+      }
+    }
     for (const selector of buttonSelectors) {
       const btns = deepQueryAll(selector);
       for (const btn of btns) {
-        if (btn && btn instanceof HTMLElement && isVisibleElement(btn)) {
-          if (Object.prototype.hasOwnProperty.call(btn, 'disabled') && btn.disabled) continue;
-          btn.click();
-          return true;
-        }
+        if (!isEnabledButton(btn)) continue;
+        btn.click();
+        log('Clicked global send button');
+        await sleep(220);
+        if (getInputTextValue(input).length === 0) return true;
       }
     }
 
-    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', keyCode: 13, bubbles: true }));
-    input.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', keyCode: 13, bubbles: true }));
+    const form = input.closest('form');
+    if (form && typeof form.requestSubmit === 'function') {
+      try {
+        form.requestSubmit();
+        log('Triggered form.requestSubmit()');
+        await sleep(220);
+        if (getInputTextValue(input).length === 0) return true;
+      } catch (e) {}
+    }
+
+    input.focus();
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true }));
+    input.dispatchEvent(new KeyboardEvent('keypress', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true }));
+    input.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true }));
+    log('Triggered Enter submit fallback');
     await sleep(200);
-    const remainingLength = input.getAttribute('contenteditable') === 'true'
-      ? normalizeText(input.textContent || '').length
-      : Number(
-          Object.prototype.hasOwnProperty.call(input, 'value') && input.value != null
-            ? String(input.value).length
-            : 0
-        );
+    const remainingLength = getInputTextValue(input).length;
+    if (remainingLength > 0) {
+      log('Send attempt exhausted; composer still contains text');
+    }
     return remainingLength === 0;
   }
 
@@ -918,6 +1130,36 @@ export function buildRedditBotScript(config: Configuration): string {
       return true;
     } catch (e) {
       return false;
+    }
+  }
+
+  function clickAnyButtonByText(textOptions) {
+    const buttons = deepQueryAll('button, [role="button"], faceplate-button');
+    for (const node of buttons) {
+      if (!(node instanceof HTMLElement) || !isVisibleElement(node)) continue;
+      const txt = normalizeText(node.textContent || '').toLowerCase();
+      if (!txt) continue;
+      for (const opt of textOptions) {
+        if (txt === opt || txt.startsWith(opt + ' ')) {
+          node.click();
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  async function ensureConversationReadyForReply(convoEl, author) {
+    if (convoEl) {
+      clickConversationElement(convoEl);
+      log('Re-opened conversation for u/' + (author || 'reddit_user') + ' before send');
+      await sleep(900);
+    }
+    // Some chats/requests gate composer behind an accept CTA.
+    const accepted = clickAnyButtonByText(['accept', 'approve', 'start chat']);
+    if (accepted) {
+      log('Clicked request acceptance button before send');
+      await sleep(700);
     }
   }
 
@@ -1002,7 +1244,11 @@ export function buildRedditBotScript(config: Configuration): string {
           await returnToThreads('no reply generated');
           return;
         }
-        const sent = await sendPmReply(reply);
+        let sent = await sendPmReply(reply);
+        if (!sent) {
+          await ensureConversationReadyForReply(convoEl, author);
+          sent = await sendPmReply(reply);
+        }
         if (sent) {
           lastIncomingByAuthor.set(author.toLowerCase(), latestIncoming.normalized);
           processedItems.add(convoKey);
@@ -1074,7 +1320,11 @@ export function buildRedditBotScript(config: Configuration): string {
           return;
         }
 
-        const sent = await sendPmReply(reply);
+        let sent = await sendPmReply(reply);
+        if (!sent) {
+          await ensureConversationReadyForReply(convoEl, author);
+          sent = await sendPmReply(reply);
+        }
         if (sent) {
           lastIncomingByAuthor.set(author.toLowerCase(), normalizedIncoming);
           processedItems.add(repliedKey);
