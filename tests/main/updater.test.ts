@@ -8,7 +8,7 @@ import { autoUpdater } from 'electron-updater';
 jest.mock('electron', () => ({
   app: {
     getPath: jest.fn(() => '/mock/path'),
-    getVersion: jest.fn(() => '1.5.2'),
+    getVersion: jest.fn(() => '1.5.3'),
     isPackaged: false,
     whenReady: jest.fn(() => Promise.resolve()),
     on: jest.fn(),
@@ -51,7 +51,7 @@ jest.mock('electron-updater', () => ({
 
 // Mock fs
 jest.mock('fs', () => ({
-  readFileSync: jest.fn(() => '{"name": "snappy", "version": "1.5.2"}'),
+  readFileSync: jest.fn(() => '{"name": "snappy", "version": "1.5.3"}'),
   writeFileSync: jest.fn(),
   existsSync: jest.fn(() => true),
   mkdirSync: jest.fn()

@@ -63,7 +63,7 @@ describe('Updater Integration', () => {
     // Mock package.json content
     const mockPackageJson = {
       name: 'snappy',
-      version: '1.5.2',
+      version: '1.5.3',
       build: {
         publish: {
           provider: 'github',

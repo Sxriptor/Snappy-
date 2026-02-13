@@ -279,6 +279,11 @@ export function setupIPCHandlers(): void {
     };
   });
 
+  // Handle app version request
+  ipcMain.handle('app:getVersion', () => {
+    return app.getVersion();
+  });
+
   // Handle save config request
   ipcMain.handle('bot:saveConfig', (event, newConfig: Configuration) => {
     saveConfiguration(newConfig);
@@ -348,7 +353,14 @@ export function setupIPCHandlers(): void {
       console.log('[Updater] Checking for updates...');
       autoUpdater.checkForUpdates().catch(err => {
         console.log('[Updater] Manual check failed:', err.message);
-        if (mainWindow) {
+        
+        // Handle 404 errors more gracefully
+        if (err.message && err.message.includes('404')) {
+          console.log('[Updater] No releases found - repository may not have published releases yet');
+          if (mainWindow) {
+            mainWindow.webContents.send('update-not-available');
+          }
+        } else if (mainWindow) {
           mainWindow.webContents.send('update-error', { message: 'Update check failed: ' + err.message });
         }
       });
@@ -796,6 +808,14 @@ function setupAutoUpdater(): void {
   
   autoUpdater.on('error', (err) => {
     console.error('[Updater] Error:', err);
+    
+    // Handle specific GitHub 404 errors more gracefully
+    if (err.message && err.message.includes('404')) {
+      console.log('[Updater] No releases found on GitHub - this is normal for repositories without published releases');
+      // Don't show error to user for 404s - it's expected for repos without releases
+      return;
+    }
+    
     if (mainWindow) {
       mainWindow.webContents.send('update-error', { 
         message: err.message || 'Unknown updater error' 
@@ -803,13 +823,13 @@ function setupAutoUpdater(): void {
     }
   });
   
-  // Check for updates after a short delay
-  setTimeout(() => {
-    autoUpdater.checkForUpdates().catch(err => {
-      console.log('[Updater] Initial update check failed:', err.message);
-      // Don't show error for initial check failure - it's common in development
-    });
-  }, 3000);
+  // Check for updates after a short delay (disabled for now since repo has no releases)
+  // setTimeout(() => {
+  //   autoUpdater.checkForUpdates().catch(err => {
+  //     console.log('[Updater] Initial update check failed:', err.message);
+  //     // Don't show error for initial check failure - it's common in development
+  //   });
+  // }, 3000);
 }
 
 function getGitHubReleasesUrl(): string {

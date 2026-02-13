@@ -137,6 +137,9 @@ const updaterAPI = {
   },
   onUpdateError: (callback: (error: unknown) => void): void => {
     ipcRenderer.on('update-error', (_, error) => callback(error));
+  },
+  onUpdateNotAvailable: (callback: () => void): void => {
+    ipcRenderer.on('update-not-available', () => callback());
   }
 };
 
@@ -387,6 +390,13 @@ const windowAPI = {
  * Electron API for detached windows
  */
 const electronAPI = {
+  /**
+   * Get the application version
+   */
+  getAppVersion: (): Promise<string> => {
+    return ipcRenderer.invoke('app:getVersion');
+  },
+
   /**
    * Listen for detached window initialization
    */

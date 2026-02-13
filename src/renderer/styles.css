@@ -941,6 +941,39 @@ body.resizing * {
   transform: translateY(0);
 }
 
+.tab-bar-bottom {
+  margin-top: auto;
+  padding: 8px 4px 4px 4px;
+  border-top: 1px solid #333;
+}
+
+#sidebar-check-updates-btn {
+  width: 100%;
+  height: 28px;
+  background: none;
+  border: none;
+  color: #666;
+  cursor: pointer;
+  border-radius: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  transition: all 0.2s ease;
+}
+
+#sidebar-check-updates-btn:hover {
+  background: #1a1a1a;
+  color: #aaa;
+  transform: translateY(-1px);
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.3);
+}
+
+#sidebar-check-updates-btn:active {
+  background: #0a0a0a;
+  transform: translateY(0);
+}
+
 /* Context Menu */
 .context-menu {
   position: fixed;

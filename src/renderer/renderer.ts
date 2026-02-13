@@ -7423,6 +7423,12 @@ if ((window as any).updater) {
     console.error('[Updater] Update error:', error);
     showUpdateError(error);
   });
+  
+  // No update available
+  (window as any).updater.onUpdateNotAvailable(() => {
+    console.log('[Updater] No updates available');
+    addLog('No updates available - you have the latest version', 'info');
+  });
 } else {
   console.warn('[Updater] Updater API not available - running in development mode?');
 }
@@ -7441,3 +7447,29 @@ const checkUpdatesBtn = document.getElementById('check-updates-btn');
 if (checkUpdatesBtn) {
   checkUpdatesBtn.addEventListener('click', checkForUpdates);
 }
+
+// Wire up sidebar check for updates button
+const sidebarCheckUpdatesBtn = document.getElementById('sidebar-check-updates-btn');
+if (sidebarCheckUpdatesBtn) {
+  sidebarCheckUpdatesBtn.addEventListener('click', checkForUpdates);
+}
+
+// Load and display app version dynamically
+async function loadAppVersion() {
+  try {
+    const version = await (window as any).electronAPI?.getAppVersion();
+    const versionElement = document.getElementById('app-version');
+    if (versionElement && version) {
+      versionElement.textContent = version;
+    }
+  } catch (error) {
+    console.error('Failed to load app version:', error);
+    const versionElement = document.getElementById('app-version');
+    if (versionElement) {
+      versionElement.textContent = 'Unknown';
+    }
+  }
+}
+
+// Load version when page loads
+loadAppVersion();
