@@ -15,6 +15,7 @@ import { FingerprintGenerator } from './fingerprintGenerator';
 import { createFingerprintInjectorScript } from '../injection/fingerprintInjector';
 import { buildSnapchatBotScript } from '../injection/snapchatBot';
 import { buildInstagramBotScript } from '../injection/instagramBot';
+import { buildRedditBotScript } from '../injection/redditBot';
 import { AIBrain } from '../brain/aiBrain';
 import { windowManager } from './windowManager';
 import { trayManager } from './trayManager';
@@ -292,6 +293,11 @@ export function setupIPCHandlers(): void {
   // Return the Instagram bot script generated from source-of-truth module
   ipcMain.handle('bot:getInstagramScript', (event, scriptConfig: unknown) => {
     return buildInstagramBotScript(scriptConfig as Configuration);
+  });
+
+  // Return the Reddit bot script generated from source-of-truth module
+  ipcMain.handle('bot:getRedditScript', (event, scriptConfig: unknown) => {
+    return buildRedditBotScript(scriptConfig as Configuration);
   });
 
   // Handle update actions
