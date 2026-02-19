@@ -546,15 +546,18 @@ export function buildRedditBotScript(config: Configuration): string {
 
   function normalizePostType(rawType) {
     const value = String(rawType || '').trim().toLowerCase();
+    if (value === 'post' || value === 'textpost' || value === 'self') return 'text';
     if (value === 'image' || value === 'images' || value === 'video' || value === 'media') return 'image';
     if (value === 'link' || value === 'url') return 'link';
     if (value === 'poll') return 'poll';
     return 'text';
   }
 
-  function parseScheduledRedditFile(rawText) {
-    const text = String(rawText || '').replace(/\\r/g, '');
-    if (!text.trim()) return null;
+  function parseScheduledRedditFileDetailed(rawText) {
+    const text = String(rawText || '').replace(/^\\uFEFF/, '').replace(/\\r/g, '');
+    if (!text.trim()) {
+      return { parsed: null, error: 'file is empty' };
+    }
 
     const fields = {
       community: '',
@@ -570,7 +573,7 @@ export function buildRedditBotScript(config: Configuration): string {
 
     for (const rawLine of lines) {
       const line = String(rawLine || '');
-      const match = line.match(/^\\s*(community|type|title|flair|body|img)\\s*:\\s*(.*)$/i);
+      const match = line.match(/^\\s*(community|type|title|flair|body|img)\\s*[:：]\\s*(.*)$/i);
       if (match) {
         currentKey = match[1].toLowerCase();
         const value = String(match[2] || '');
@@ -587,17 +590,46 @@ export function buildRedditBotScript(config: Configuration): string {
       }
     }
 
-    const title = fields.title.trim().slice(0, 300);
-    if (!title) return null;
+    let title = fields.title.trim().slice(0, 300);
+    if (!title) {
+      const fallbackTitle = text
+        .split('\\n')
+        .map(line => String(line || '').trim())
+        .find(line => line.length > 0 && !/^\\s*(community|type|title|flair|body|img)\\s*[:：]/i.test(line));
+      if (fallbackTitle) {
+        title = fallbackTitle.slice(0, 300);
+      }
+    }
+
+    if (!title) {
+      const bodyFirstLine = fields.body
+        .split('\\n')
+        .map(line => String(line || '').trim())
+        .find(line => line.length > 0) || '';
+      if (bodyFirstLine) {
+        title = bodyFirstLine.slice(0, 300);
+      }
+    }
+
+    if (!title) {
+      title = 'Scheduled post';
+    }
 
     return {
-      community: fields.community.trim(),
-      type: normalizePostType(fields.type),
-      title,
-      flair: fields.flair.trim(),
-      body: fields.body.trim(),
-      img: fields.img.trim()
+      parsed: {
+        community: fields.community.trim(),
+        type: normalizePostType(fields.type),
+        title,
+        flair: fields.flair.trim(),
+        body: fields.body.trim(),
+        img: fields.img.trim()
+      },
+      error: ''
     };
+  }
+
+  function parseScheduledRedditFile(rawText) {
+    return parseScheduledRedditFileDetailed(rawText).parsed;
   }
 
   async function requestRedditMediaAttach(filePaths) {
@@ -1087,9 +1119,10 @@ export function buildRedditBotScript(config: Configuration): string {
       return false;
     }
 
-    const parsed = parseScheduledRedditFile(post.body);
+    const parseResult = parseScheduledRedditFileDetailed(post.body);
+    const parsed = parseResult.parsed;
     if (!parsed) {
-      log('Scheduler: scheduled file parse failed for item ' + String(post.id || 'unknown'));
+      log('Scheduler: scheduled file parse failed for item ' + String(post.id || 'unknown') + ' (' + (parseResult.error || 'unknown parse error') + ')');
       return false;
     }
 
