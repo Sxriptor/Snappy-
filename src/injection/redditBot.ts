@@ -448,28 +448,74 @@ export function buildRedditBotScript(config: Configuration): string {
     return null;
   }
 
-  function splitRedditPostContent(rawText) {
-    const cleaned = String(rawText || '').replace(/\\r/g, '').trim();
-    if (!cleaned) return null;
-    const lines = cleaned.split('\\n').map(line => line.trim()).filter(Boolean);
-    if (!lines.length) return null;
+  function resolveSiblingPath(baseFilePath, siblingName) {
+    const base = String(baseFilePath || '').trim();
+    const sibling = String(siblingName || '').trim();
+    if (!sibling) return '';
+    if (/^[a-zA-Z]:[\\\\/]/.test(sibling) || sibling.startsWith('\\\\') || sibling.startsWith('/')) {
+      return sibling;
+    }
+    const separator = base.includes('\\\\') ? '\\\\' : '/';
+    const lastSlash = Math.max(base.lastIndexOf('\\\\'), base.lastIndexOf('/'));
+    const folder = lastSlash >= 0 ? base.slice(0, lastSlash) : '';
+    const cleanSibling = sibling.replace(/^[/\\\\]+/, '');
+    return folder ? (folder + separator + cleanSibling) : cleanSibling;
+  }
 
-    let flair = '';
-    let titleIndex = 0;
-    const flairMatch = lines[0].match(/^flair\\s*:\\s*(.+)$/i);
-    if (flairMatch && flairMatch[1]) {
-      flair = flairMatch[1].trim();
-      titleIndex = 1;
+  function normalizePostType(rawType) {
+    const value = String(rawType || '').trim().toLowerCase();
+    if (value === 'image' || value === 'images' || value === 'video' || value === 'media') return 'image';
+    if (value === 'link' || value === 'url') return 'link';
+    if (value === 'poll') return 'poll';
+    return 'text';
+  }
+
+  function parseScheduledRedditFile(rawText) {
+    const text = String(rawText || '').replace(/\\r/g, '');
+    if (!text.trim()) return null;
+
+    const fields = {
+      community: '',
+      type: 'text',
+      title: '',
+      flair: '',
+      body: '',
+      img: ''
+    };
+
+    const lines = text.split('\\n');
+    let currentKey = '';
+
+    for (const rawLine of lines) {
+      const line = String(rawLine || '');
+      const match = line.match(/^\\s*(community|type|title|flair|body|img)\\s*:\\s*(.*)$/i);
+      if (match) {
+        currentKey = match[1].toLowerCase();
+        const value = String(match[2] || '');
+        if (currentKey === 'body') {
+          fields.body = value;
+        } else {
+          fields[currentKey] = value.trim();
+        }
+        continue;
+      }
+
+      if (currentKey === 'body') {
+        fields.body += (fields.body ? '\\n' : '') + line;
+      }
     }
 
-    if (titleIndex >= lines.length) return null;
+    const title = fields.title.trim().slice(0, 300);
+    if (!title) return null;
 
-    let title = lines[titleIndex];
-    if (title.length > 300) {
-      title = title.substring(0, 300);
-    }
-    const body = lines.slice(titleIndex + 1).join('\\n\\n').trim();
-    return { flair, title, body };
+    return {
+      community: fields.community.trim(),
+      type: normalizePostType(fields.type),
+      title,
+      flair: fields.flair.trim(),
+      body: fields.body.trim(),
+      img: fields.img.trim()
+    };
   }
 
   async function requestRedditMediaAttach(filePaths) {
@@ -509,6 +555,23 @@ export function buildRedditBotScript(config: Configuration): string {
       await sleep(220);
     }
     return null;
+  }
+
+  async function typeCharacterByCharacter(inputEl, value) {
+    if (!inputEl || !(inputEl instanceof HTMLElement)) return;
+    const text = String(value || '');
+    setInputValue(inputEl, '');
+    for (const char of text) {
+      if (inputEl instanceof HTMLInputElement || inputEl instanceof HTMLTextAreaElement) {
+        inputEl.value += char;
+        inputEl.dispatchEvent(new Event('input', { bubbles: true }));
+      } else if (inputEl.getAttribute('contenteditable') === 'true' || inputEl.getAttribute('contenteditable') === 'plaintext-only') {
+        inputEl.textContent = (inputEl.textContent || '') + char;
+        inputEl.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: char }));
+      }
+      await sleep(35 + randomRange(0, 40));
+    }
+    inputEl.dispatchEvent(new Event('change', { bubbles: true }));
   }
 
   async function clickButtonByText(buttonText, timeoutMs) {
@@ -601,6 +664,90 @@ export function buildRedditBotScript(config: Configuration): string {
     }
   }
 
+  async function openCreatePostComposer() {
+    const clickedCreate =
+      await clickButtonByText('create', 6000) ||
+      await clickButtonByText('create post', 4000);
+
+    if (!clickedCreate) {
+      log('Scheduler: could not find Create button in Reddit header');
+      return false;
+    }
+
+    const composer = await waitForSelector([
+      'input[name="title"]',
+      'textarea[name="title"]',
+      '[data-testid*="post-composer" i]',
+      '[role="dialog"]',
+      'shreddit-post-composer'
+    ], 12000);
+
+    return !!composer;
+  }
+
+  async function selectCommunityByTyping(communityRaw) {
+    const community = String(communityRaw || '').trim();
+    if (!community) return true;
+
+    const selectorOpened =
+      await clickButtonByText('choose a community', 4000) ||
+      await clickButtonByText('select a community', 2500) ||
+      await clickButtonByText('community', 2500);
+
+    if (!selectorOpened) {
+      log('Scheduler: community selector button not found');
+      return false;
+    }
+
+    const input = await waitForSelector([
+      'input[aria-label*="community" i]',
+      'input[placeholder*="community" i]',
+      'input[placeholder*="choose" i]'
+    ], 6000);
+
+    if (!input) {
+      log('Scheduler: community search input not found');
+      return false;
+    }
+
+    await typeCharacterByCharacter(input, community);
+    await sleep(500);
+
+    const wanted = community.toLowerCase().replace(/\\s+/g, '');
+    const options = deepQueryAll('[role="option"], button, a, li, div');
+    for (const option of options) {
+      if (!(option instanceof HTMLElement) || !isVisibleElement(option)) continue;
+      const text = normalizeText(option.textContent || '').toLowerCase().replace(/\\s+/g, '');
+      if (!text) continue;
+      if (text.includes(wanted) || text.includes(wanted.replace(/^r\\//, '')) || text.includes(wanted.replace(/^u\\//, ''))) {
+        option.click();
+        await sleep(250);
+        return true;
+      }
+    }
+
+    log('Scheduler: community option not found for ' + community);
+    return false;
+  }
+
+  async function selectPostType(postType) {
+    const normalized = normalizePostType(postType);
+    if (normalized === 'text') {
+      await clickButtonByText('post', 3000) || await clickButtonByText('text', 1500);
+      return true;
+    }
+    if (normalized === 'image') {
+      return await clickButtonByText('images & video', 4000) || await clickButtonByText('image', 3000) || await clickButtonByText('media', 3000);
+    }
+    if (normalized === 'link') {
+      return await clickButtonByText('link', 4000);
+    }
+    if (normalized === 'poll') {
+      return await clickButtonByText('poll', 4000);
+    }
+    return true;
+  }
+
   async function navigateToRedditSubmit(subreddit) {
     const cleanSubreddit = normalizeScheduledSubreddit(subreddit);
     const targetUrl = cleanSubreddit
@@ -636,38 +783,52 @@ export function buildRedditBotScript(config: Configuration): string {
       return false;
     }
 
-    const scheduler = getSchedulerConfig();
-    const parsed = splitRedditPostContent(post.body);
+    const parsed = parseScheduledRedditFile(post.body);
     if (!parsed) {
-      log('Scheduler: text file is empty for item ' + String(post.id || 'unknown'));
+      log('Scheduler: scheduled file parse failed for item ' + String(post.id || 'unknown'));
       return false;
     }
 
     isPostingScheduledContent = true;
     try {
       const mediaPaths = getPostMediaPaths(post);
-      const targetSubreddit = normalizeScheduledSubreddit(scheduler.subreddit || '');
-      log('Scheduler: starting Reddit publish for item ' + String(post.id || 'unknown') + (targetSubreddit ? (' in r/' + targetSubreddit) : ' on profile'));
+      const targetCommunity = parsed.community || '';
+      log('Scheduler: starting Reddit publish for item ' + String(post.id || 'unknown') + (targetCommunity ? (' to ' + targetCommunity) : ''));
 
-      const ready = await navigateToRedditSubmit(targetSubreddit);
-      if (!ready) return false;
+      const opened = await openCreatePostComposer();
+      if (!opened) {
+        const fallbackReady = await navigateToRedditSubmit('');
+        if (!fallbackReady) return false;
+      }
 
-      await sleep(900);
-      if (mediaPaths.length > 0) {
-        const mediaTabClicked = await clickButtonByText('images & video', 3000) || await clickButtonByText('image', 3000);
-        if (!mediaTabClicked) {
-          log('Scheduler: media tab not found, trying direct file input');
+      await sleep(450);
+
+      const communitySelected = await selectCommunityByTyping(targetCommunity);
+      if (!communitySelected) {
+        return false;
+      }
+
+      const typeSelected = await selectPostType(parsed.type);
+      if (!typeSelected) {
+        log('Scheduler: failed selecting post type "' + parsed.type + '"');
+        return false;
+      }
+
+      await sleep(400);
+      if (parsed.type === 'image') {
+        const imgFromFile = parsed.img ? resolveSiblingPath(post.textPath || '', parsed.img) : '';
+        const filesToAttach = imgFromFile ? [imgFromFile] : mediaPaths;
+        if (filesToAttach.length === 0) {
+          log('Scheduler: type=image but no img file found');
+          return false;
         }
         await sleep(300);
-        const attached = await requestRedditMediaAttach(mediaPaths);
+        const attached = await requestRedditMediaAttach(filesToAttach);
         if (!attached) {
           log('Scheduler: media attach failed');
           return false;
         }
         await sleep(900);
-      } else {
-        await clickButtonByText('post', 2500);
-        await sleep(300);
       }
 
       const titleInput = await waitForSelector([
@@ -694,12 +855,17 @@ export function buildRedditBotScript(config: Configuration): string {
       if (parsed.body) {
         const bodyInput = await waitForSelector([
           'textarea[name="text"]',
+          'textarea[name="body"]',
           'textarea[aria-label*="body" i]',
+          'textarea[aria-label*="text" i]',
           '[role="textbox"][aria-label*="body" i]',
           '[contenteditable="true"][role="textbox"]'
-        ], 4000);
+        ], 7000);
         if (bodyInput) {
           setInputValue(bodyInput, parsed.body);
+        } else if (parsed.type === 'text' || parsed.type === 'poll') {
+          log('Scheduler: body input not found');
+          return false;
         }
       }
 

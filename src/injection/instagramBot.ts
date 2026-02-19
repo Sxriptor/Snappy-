@@ -250,6 +250,17 @@ export function buildInstagramBotScript(config: Configuration): string {
       return true;
     }
 
+    async function clickSelectFromComputerStep() {
+      const selected = await clickButtonByText('select from computer', 7000);
+      if (selected) {
+        log('Scheduler: clicked "Select from computer"');
+        await sleep(600);
+      } else {
+        log('Scheduler: "Select from computer" not found, trying direct file input');
+      }
+      return selected;
+    }
+
     async function clickButtonByText(buttonText, timeoutMs = 8000) {
       const start = Date.now();
       while (Date.now() - start < timeoutMs && !isStopped()) {
@@ -310,6 +321,8 @@ export function buildInstagramBotScript(config: Configuration): string {
 
         const openedCreate = await clickCreatePostFlow();
         if (!openedCreate) return false;
+
+        await clickSelectFromComputerStep();
 
         const input = await waitForSelector(['input[type="file"]'], 12000);
         if (!input) {
