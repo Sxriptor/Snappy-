@@ -59,6 +59,7 @@ export function buildInstagramBotScript(config: Configuration): string {
     const typingDelayRange = CONFIG?.typingDelayRangeMs || [50, 150];
     const preReplyDelayRange = CONFIG?.preReplyDelayRangeMs || [2000, 6000];
     const SCHEDULER_JITTER_MINUTES = 15;
+    let lastQuietWindowLogAt = 0;
 
     function getRandomPollInterval() {
       return BASE_POLL_MS + Math.floor(Math.random() * POLL_VARIANCE_MS);
@@ -393,6 +394,36 @@ export function buildInstagramBotScript(config: Configuration): string {
       }
 
       return null;
+    }
+
+    function isWithinSchedulerQuietWindow(date) {
+      if (!schedulerEnabled) return false;
+      const dayKey = getDayKey(date);
+      const dayConfig = schedulerConfig.days?.[dayKey];
+      if (!dayConfig || dayConfig.enabled !== true || !Array.isArray(dayConfig.times) || dayConfig.times.length === 0) {
+        return false;
+      }
+
+      for (const timeValue of dayConfig.times) {
+        const normalized = normalizeTime(timeValue);
+        if (!normalized) continue;
+        const baseTime = new Date(
+          date.getFullYear(),
+          date.getMonth(),
+          date.getDate(),
+          normalized.hour,
+          normalized.minute,
+          0,
+          0
+        );
+        const quietStart = new Date(baseTime.getTime() - (SCHEDULER_JITTER_MINUTES * 60 * 1000));
+        const quietEnd = new Date(baseTime.getTime() + (SCHEDULER_JITTER_MINUTES * 60 * 1000));
+        if (date >= quietStart && date <= quietEnd) {
+          return true;
+        }
+      }
+
+      return false;
     }
 
     async function processScheduledPosting() {
@@ -1206,6 +1237,16 @@ export function buildInstagramBotScript(config: Configuration): string {
       isProcessing = true;
 
       try {
+        if (isWithinSchedulerQuietWindow(new Date())) {
+          const now = Date.now();
+          if (now - lastQuietWindowLogAt > 60000) {
+            log('Scheduler quiet window active; pausing DM/request monitoring');
+            lastQuietWindowLogAt = now;
+          }
+          isProcessing = false;
+          return;
+        }
+
         if (!shouldWatchDMs && !shouldWatchRequests) {
           log('All monitoring disabled in site settings - bot will remain idle');
           isProcessing = false;
