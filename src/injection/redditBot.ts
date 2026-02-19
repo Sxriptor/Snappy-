@@ -722,6 +722,103 @@ export function buildRedditBotScript(config: Configuration): string {
     return null;
   }
 
+  async function requestRedditPointerClickAt(x, y, timeoutMs) {
+    const px = Number(x);
+    const py = Number(y);
+    if (!Number.isFinite(px) || !Number.isFinite(py)) return false;
+
+    const requestId = 'reddit-pointer-pt-' + Date.now() + '-' + Math.random().toString(36).slice(2);
+    window.__SNAPPY_REDDIT_POINTER_RESPONSE__ = null;
+    window.__SNAPPY_REDDIT_POINTER_REQUEST__ = {
+      id: requestId,
+      mode: 'point',
+      x: px,
+      y: py
+    };
+
+    let waited = 0;
+    const maxWait = Math.max(1000, Number(timeoutMs) || 6000);
+    while (waited < maxWait && isRunning) {
+      await sleep(140);
+      waited += 140;
+      const response = window.__SNAPPY_REDDIT_POINTER_RESPONSE__;
+      if (response && response.id === requestId) {
+        window.__SNAPPY_REDDIT_POINTER_RESPONSE__ = null;
+        return response.success === true;
+      }
+    }
+    return false;
+  }
+
+  async function requestRedditKeyboardSequence(events, timeoutMs) {
+    const normalizedEvents = Array.isArray(events) ? events : [];
+    if (!normalizedEvents.length) return false;
+
+    const requestId = 'reddit-kb-' + Date.now() + '-' + Math.random().toString(36).slice(2);
+    window.__SNAPPY_REDDIT_KEYBOARD_RESPONSE__ = null;
+    window.__SNAPPY_REDDIT_KEYBOARD_REQUEST__ = {
+      id: requestId,
+      events: normalizedEvents
+    };
+
+    let waited = 0;
+    const maxWait = Math.max(1200, Number(timeoutMs) || 7000);
+    while (waited < maxWait && isRunning) {
+      await sleep(140);
+      waited += 140;
+      const response = window.__SNAPPY_REDDIT_KEYBOARD_RESPONSE__;
+      if (response && response.id === requestId) {
+        window.__SNAPPY_REDDIT_KEYBOARD_RESPONSE__ = null;
+        return response.success === true;
+      }
+    }
+    return false;
+  }
+
+  async function typeTrustedTextViaCdp(text) {
+    const value = String(text || '');
+    if (!value) return false;
+
+    const events = [
+      { kind: 'dispatch', type: 'rawKeyDown', key: 'Control', code: 'ControlLeft', windowsVirtualKeyCode: 17, nativeVirtualKeyCode: 17, delayMs: 20 },
+      { kind: 'dispatch', type: 'rawKeyDown', key: 'a', code: 'KeyA', windowsVirtualKeyCode: 65, nativeVirtualKeyCode: 65, modifiers: 2, delayMs: 25 },
+      { kind: 'dispatch', type: 'keyUp', key: 'a', code: 'KeyA', windowsVirtualKeyCode: 65, nativeVirtualKeyCode: 65, modifiers: 2, delayMs: 20 },
+      { kind: 'dispatch', type: 'keyUp', key: 'Control', code: 'ControlLeft', windowsVirtualKeyCode: 17, nativeVirtualKeyCode: 17, delayMs: 30 },
+      { kind: 'dispatch', type: 'keyDown', key: 'Backspace', code: 'Backspace', windowsVirtualKeyCode: 8, nativeVirtualKeyCode: 8, delayMs: 30 },
+      { kind: 'dispatch', type: 'keyUp', key: 'Backspace', code: 'Backspace', windowsVirtualKeyCode: 8, nativeVirtualKeyCode: 8, delayMs: 35 },
+      { kind: 'insertText', text: value, delayMs: 80 }
+    ];
+
+    const typed = await requestRedditKeyboardSequence(events, 7000);
+    if (!typed) return false;
+
+    const lastChar = value.slice(-1);
+    if (lastChar) {
+      // Nudge suggestion engine similarly to manual erase/retype behavior.
+      const nudgeEvents = [
+        { kind: 'dispatch', type: 'keyDown', key: 'Backspace', code: 'Backspace', windowsVirtualKeyCode: 8, nativeVirtualKeyCode: 8, delayMs: 45 },
+        { kind: 'dispatch', type: 'keyUp', key: 'Backspace', code: 'Backspace', windowsVirtualKeyCode: 8, nativeVirtualKeyCode: 8, delayMs: 35 },
+        { kind: 'insertText', text: lastChar, delayMs: 75 }
+      ];
+      await requestRedditKeyboardSequence(nudgeEvents, 4500);
+    }
+    return true;
+  }
+
+  async function clickElementHuman(el, timeoutMs) {
+    if (!el || !(el instanceof HTMLElement)) return false;
+    try {
+      const rect = el.getBoundingClientRect();
+      const cx = rect.left + (rect.width / 2);
+      const cy = rect.top + (rect.height / 2);
+      const clickedByPointer = await requestRedditPointerClickAt(cx, cy, timeoutMs || 5000);
+      if (clickedByPointer) return true;
+    } catch {}
+
+    hardClickElement(el);
+    return true;
+  }
+
   async function typeCharacterByCharacter(inputEl, value) {
     if (!inputEl || !(inputEl instanceof HTMLElement)) return;
     const text = String(value || '');
@@ -1065,9 +1162,11 @@ export function buildRedditBotScript(config: Configuration): string {
       const txt = normalizeText(node.textContent || '').toLowerCase();
       const testId = normalizeText(node.getAttribute('data-testid') || '').toLowerCase();
       if (aria.includes('community') || txt.includes('community') || testId.includes('community')) {
-        node.click();
-        selectorOpened = true;
-        break;
+        const clicked = await clickElementHuman(node, 5000);
+        if (clicked) {
+          selectorOpened = true;
+          break;
+        }
       }
     }
     if (!selectorOpened) {
@@ -1082,19 +1181,25 @@ export function buildRedditBotScript(config: Configuration): string {
       return false;
     }
 
-    const input = await waitForDeepSelector([
+    const inputSelectors = [
       'input[aria-label*="community" i]',
       'input[placeholder*="community" i]',
       'input[placeholder*="choose" i]',
       'input[data-testid*="community" i]',
       'faceplate-search-input input[type="text"]',
       'faceplate-search-input input[placeholder*="select a community" i]'
-    ], 6000);
+    ];
+
+    const input = await waitForDeepSelector(inputSelectors, 6000);
 
     if (!input) {
       log('Scheduler: community search input not found');
       return false;
     }
+
+    await clickElementHuman(input, 4500);
+    try { input.focus(); } catch {}
+    await sleep(180);
 
     let prefix = '';
     let remainder = community;
@@ -1106,21 +1211,47 @@ export function buildRedditBotScript(config: Configuration): string {
       remainder = community.slice(2);
     }
 
-    if (prefix) {
-      await typeCharacterByCharacter(input, prefix);
-      await sleep(1000);
-    }
+    const communityToType = prefix + remainder;
+    const typedViaCdp = await typeTrustedTextViaCdp(communityToType);
+    if (!typedViaCdp) {
+      if (prefix) {
+        await typeCharacterByCharacter(input, prefix);
+        await sleep(1000);
+      }
 
-    for (const char of remainder) {
-      await appendCharWithTypingEvents(input, char);
-      await sleep(140 + randomRange(40, 140));
+      for (const char of remainder) {
+        await appendCharWithTypingEvents(input, char);
+        await sleep(140 + randomRange(40, 140));
+      }
+      input.dispatchEvent(new Event('change', { bubbles: true }));
+    } else {
+      log('Scheduler: community typed via trusted CDP keyboard events');
     }
-    input.dispatchEvent(new Event('change', { bubbles: true }));
-    await sleep(900);
+    await sleep(320);
+
+    // Reddit sometimes only shows community suggestions after a trusted re-focus click
+    // on the currently mounted search input, even when text is already present.
+    const liveInput = await waitForDeepSelector(inputSelectors, 2500);
+    if (liveInput && liveInput instanceof HTMLElement) {
+      await clickElementHuman(liveInput, 4500);
+      try { liveInput.focus(); } catch {}
+      await sleep(480);
+    } else {
+      await clickElementHuman(input, 3500);
+      try { input.focus(); } catch {}
+      await sleep(480);
+    }
 
     const clickedSuggestion = await clickCommunitySuggestion(community);
     if (clickedSuggestion) {
       return true;
+    }
+
+    const liveInputBeforeNudge = await waitForDeepSelector(inputSelectors, 2000);
+    if (liveInputBeforeNudge && liveInputBeforeNudge instanceof HTMLElement) {
+      await clickElementHuman(liveInputBeforeNudge, 3500);
+      try { liveInputBeforeNudge.focus(); } catch {}
+      await sleep(260);
     }
 
     await nudgeCommunitySearchInput(input);

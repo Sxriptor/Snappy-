@@ -454,6 +454,26 @@ const electronAPI = {
     });
   },
 
+  playKeyboardSequence: async (
+    webContentsId: number,
+    events: Array<{
+      kind?: 'dispatch' | 'insertText';
+      type?: string;
+      text?: string;
+      key?: string;
+      code?: string;
+      windowsVirtualKeyCode?: number;
+      nativeVirtualKeyCode?: number;
+      modifiers?: number;
+      delayMs?: number;
+    }>
+  ): Promise<{ success: boolean; error?: string }> => {
+    return await ipcRenderer.invoke('input:playKeyboardSequence', {
+      webContentsId,
+      events
+    });
+  },
+
   /**
    * Listen for detached window initialization
    */

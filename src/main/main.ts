@@ -750,6 +750,81 @@ export function setupIPCHandlers(): void {
     }
   });
 
+  ipcMain.handle('input:playKeyboardSequence', async (_event, payload: unknown) => {
+    let attachedHere = false;
+    let targetWebContentsRef: any = null;
+    try {
+      const data = (payload || {}) as { webContentsId?: number; events?: Array<any> };
+      const targetId = typeof data.webContentsId === 'number' ? data.webContentsId : 0;
+      const events = Array.isArray(data.events) ? data.events : [];
+
+      if (!targetId || events.length === 0) {
+        return { success: false, error: 'Invalid webContentsId or events' };
+      }
+
+      const targetWebContents = webContents.fromId(targetId);
+      if (!targetWebContents || targetWebContents.isDestroyed()) {
+        return { success: false, error: 'Target webContents not found' };
+      }
+      targetWebContentsRef = targetWebContents;
+
+      if (!targetWebContents.debugger.isAttached()) {
+        targetWebContents.debugger.attach('1.3');
+        attachedHere = true;
+      }
+
+      for (const event of events) {
+        const delay = Number(event?.delayMs || 0);
+        if (delay > 0) {
+          await delayMs(delay);
+        }
+
+        const kind = String(event?.kind || 'dispatch');
+        if (kind === 'insertText') {
+          const text = String(event?.text || '');
+          if (text.length > 0) {
+            await targetWebContents.debugger.sendCommand('Input.insertText', { text });
+          }
+          continue;
+        }
+
+        const type = String(event?.type || '');
+        if (!type) continue;
+
+        const params: Record<string, any> = { type };
+        const text = String(event?.text || '');
+        const key = String(event?.key || '');
+        const code = String(event?.code || '');
+        const windowsVirtualKeyCode = Number(event?.windowsVirtualKeyCode);
+        const nativeVirtualKeyCode = Number(event?.nativeVirtualKeyCode);
+        const modifiers = Number(event?.modifiers);
+
+        if (text) params.text = text;
+        if (key) params.key = key;
+        if (code) params.code = code;
+        if (Number.isFinite(windowsVirtualKeyCode)) params.windowsVirtualKeyCode = windowsVirtualKeyCode;
+        if (Number.isFinite(nativeVirtualKeyCode)) params.nativeVirtualKeyCode = nativeVirtualKeyCode;
+        if (Number.isFinite(modifiers)) params.modifiers = modifiers;
+
+        await targetWebContents.debugger.sendCommand('Input.dispatchKeyEvent', params);
+      }
+
+      if (attachedHere && targetWebContents.debugger.isAttached()) {
+        targetWebContents.debugger.detach();
+      }
+
+      return { success: true };
+    } catch (error) {
+      try {
+        if (attachedHere && targetWebContentsRef && targetWebContentsRef.debugger.isAttached()) {
+          targetWebContentsRef.debugger.detach();
+        }
+      } catch {}
+      const message = error instanceof Error ? error.message : String(error);
+      return { success: false, error: message };
+    }
+  });
+
   // Handle update actions
   ipcMain.on('update:download', () => {
     try {
