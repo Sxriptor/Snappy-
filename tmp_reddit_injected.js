@@ -1,9 +1,4 @@
-import { Configuration } from '../types';
 
-export function buildRedditBotScript(config: Configuration): string {
-  const serializedConfig = JSON.stringify(config || {});
-
-  return `
 (function() {
   if (window.__SNAPPY_RUNNING__ && window.__SNAPPY_REDDIT_RUNNING__) {
     console.log('[Snappy][Reddit] Already running');
@@ -13,7 +8,7 @@ export function buildRedditBotScript(config: Configuration): string {
   window.__SNAPPY_RUNNING__ = true;
   window.__SNAPPY_REDDIT_RUNNING__ = true;
 
-  const CONFIG = ${serializedConfig};
+  const CONFIG = {};
   const processedItems = new Set();
   const lastIncomingByAuthor = new Map();
   let isRunning = true;
@@ -106,7 +101,7 @@ export function buildRedditBotScript(config: Configuration): string {
   }
 
   function normalizeText(value) {
-    return String(value || '').replace(/\\s+/g, ' ').trim();
+    return String(value || '').replace(/\s+/g, ' ').trim();
   }
 
   function isVisibleElement(el) {
@@ -133,7 +128,7 @@ export function buildRedditBotScript(config: Configuration): string {
 
   function normalizeSubreddit(subreddit) {
     if (!subreddit || typeof subreddit !== 'string') return '';
-    return subreddit.trim().replace(/^r\\//i, '').replace(/^\\/+|\\/+$/g, '');
+    return subreddit.trim().replace(/^r\//i, '').replace(/^\/+|\/+$/g, '');
   }
 
   function getUnreadCount(itemSelector, unreadSelector) {
@@ -153,7 +148,7 @@ export function buildRedditBotScript(config: Configuration): string {
     const tabs = deepQueryAll('button, a, [role="tab"], [role="button"], faceplate-tab');
     for (const tab of tabs) {
       if (!(tab instanceof HTMLElement)) continue;
-      const txt = String(tab.textContent || '').replace(/\\s+/g, ' ').trim().toLowerCase();
+      const txt = String(tab.textContent || '').replace(/\s+/g, ' ').trim().toLowerCase();
       if (!txt) continue;
       if (txt === 'threads' || txt.startsWith('threads ')) {
         tab.click();
@@ -179,96 +174,17 @@ export function buildRedditBotScript(config: Configuration): string {
     return false;
   }
 
-  function clickElementRobust(el) {
-    if (!el || !(el instanceof HTMLElement)) return false;
-    try {
-      el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-    } catch (e) {}
-    try {
-      el.dispatchEvent(new PointerEvent('pointerover', { bubbles: true }));
-      el.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true }));
-      el.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
-      el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
-      el.click();
-      el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true }));
-      el.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, cancelable: true }));
-      // Some Reddit controls respond better to keyboard activation on focused role=button.
-      el.focus();
-      el.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true }));
-      el.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true }));
-      return true;
-    } catch (e) {
-      return false;
-    }
-  }
-
-  function isRequestsNavControl(el) {
-    if (!el || !(el instanceof HTMLElement)) return false;
-    const testId = String(el.getAttribute('data-testid') || '').toLowerCase();
-    if (testId.includes('requests-button') || testId.includes('nav-item-requests')) return true;
-    const aria = String(el.getAttribute('aria-label') || '').toLowerCase();
-    if (aria.includes('view chat requests') || aria.includes('chat requests')) return true;
-    const txt = normalizeText(el.textContent || '').toLowerCase();
-    if (txt === 'requests' || txt.startsWith('requests ')) return true;
-    return false;
-  }
-
-  function findVisibleRequestsTabTargets() {
-    const out = [];
-    const seen = new Set();
-    const selectors = [
-      'li[data-testid="requests-button"] [role="button"]',
-      '[data-testid="requests-button"] [role="button"]',
-      '[data-testid="requests-button"]',
-      '[data-testid="nav-item-requests"]',
-      '[aria-label="View chat requests"]',
-      '[aria-label*="chat requests" i]'
-    ];
-    for (const selector of selectors) {
-      const nodes = deepQueryAll(selector);
-      for (const node of nodes) {
-        if (!(node instanceof HTMLElement)) continue;
-        if (!isVisibleElement(node)) continue;
-        let target = node;
-        if (!target.matches('[role="button"]') && target.querySelector('[role="button"]')) {
-          const roleButton = target.querySelector('[role="button"]');
-          if (roleButton && roleButton instanceof HTMLElement) target = roleButton;
-        }
-        if (!target || !(target instanceof HTMLElement)) continue;
-        if (!isVisibleElement(target)) continue;
-        const key = String(target.tagName) + '|' + String(target.getAttribute('data-testid') || '') + '|' + normalizeText(target.textContent || '').slice(0, 120);
-        if (seen.has(key)) continue;
-        seen.add(key);
-        out.push(target);
-      }
-    }
-    return out;
-  }
-
   function ensureRequestsTab() {
-    // First pass: exact requests tab selectors from Reddit chat nav.
-    const strictTargets = findVisibleRequestsTabTargets();
-    for (const target of strictTargets) {
-      if (!(target instanceof HTMLElement)) continue;
-      if (!clickElementRobust(target)) continue;
-      log('Focused Requests tab (strict requests-button)');
-      return true;
-    }
-
     const tabs = deepQueryAll('button, a, [role="tab"], [role="button"], faceplate-tab, [data-testid]');
     for (const tab of tabs) {
       if (!(tab instanceof HTMLElement)) continue;
-      if (!isVisibleElement(tab)) continue;
       const txt = normalizeText(tab.textContent || '').toLowerCase();
       const testId = String(tab.getAttribute('data-testid') || '').toLowerCase();
-      const requestsTextMatch = /^requests(?:\\b|\\s|\\(|\\d)/.test(txt);
-      const isCreateNewChat = txt.includes('create new chat') || testId.includes('create-new-chat');
-      if (isCreateNewChat) continue;
-      if (testId.includes('requests-button') || testId.includes('nav-item-requests') || requestsTextMatch || txt.includes('message requests') || isRequestsNavControl(tab)) {
-        if (clickElementRobust(tab)) {
-          log('Focused Requests tab (fallback)');
-          return true;
-        }
+      const requestsTextMatch = /^requests(?:\b|\s|\(|\d)/.test(txt);
+      if (testId.includes('nav-item-requests') || requestsTextMatch || txt.includes('message requests')) {
+        tab.click();
+        log('Focused Requests tab');
+        return true;
       }
     }
     return false;
@@ -406,7 +322,7 @@ export function buildRedditBotScript(config: Configuration): string {
       } else {
         log('Found ' + posts.length + ' new post(s) in r/' + subreddit);
         posts.slice(0, Math.max(1, Number(settings.maxItemsPerPoll) || 3)).forEach(post => {
-          const title = String(post.title || '').replace(/\\s+/g, ' ').trim();
+          const title = String(post.title || '').replace(/\s+/g, ' ').trim();
           log('New post: ' + title.substring(0, 120));
         });
       }
@@ -431,7 +347,7 @@ export function buildRedditBotScript(config: Configuration): string {
   }
 
   function normalizeTime(value) {
-    const match = String(value || '').trim().match(/^(\\d{1,2}):(\\d{2})$/);
+    const match = String(value || '').trim().match(/^(\d{1,2}):(\d{2})$/);
     if (!match) return null;
     const hour = Math.max(0, Math.min(23, parseInt(match[1], 10)));
     const minute = Math.max(0, Math.min(59, parseInt(match[2], 10)));
@@ -443,7 +359,7 @@ export function buildRedditBotScript(config: Configuration): string {
   }
 
   function normalizeScheduledSubreddit(raw) {
-    return String(raw || '').trim().replace(/^r\\//i, '').replace(/^\\/+|\\/+$/g, '');
+    return String(raw || '').trim().replace(/^r\//i, '').replace(/^\/+|\/+$/g, '');
   }
 
   function getSchedulerConfig() {
@@ -534,13 +450,13 @@ export function buildRedditBotScript(config: Configuration): string {
     const base = String(baseFilePath || '').trim();
     const sibling = String(siblingName || '').trim();
     if (!sibling) return '';
-    if (/^[a-zA-Z]:[\\\\/]/.test(sibling) || sibling.startsWith('\\\\') || sibling.startsWith('/')) {
+    if (/^[a-zA-Z]:[\\/]/.test(sibling) || sibling.startsWith('\\') || sibling.startsWith('/')) {
       return sibling;
     }
-    const separator = base.includes('\\\\') ? '\\\\' : '/';
-    const lastSlash = Math.max(base.lastIndexOf('\\\\'), base.lastIndexOf('/'));
+    const separator = base.includes('\\') ? '\\' : '/';
+    const lastSlash = Math.max(base.lastIndexOf('\\'), base.lastIndexOf('/'));
     const folder = lastSlash >= 0 ? base.slice(0, lastSlash) : '';
-    const cleanSibling = sibling.replace(/^[/\\\\]+/, '');
+    const cleanSibling = sibling.replace(/^[/\\]+/, '');
     return folder ? (folder + separator + cleanSibling) : cleanSibling;
   }
 
@@ -553,7 +469,7 @@ export function buildRedditBotScript(config: Configuration): string {
   }
 
   function parseScheduledRedditFile(rawText) {
-    const text = String(rawText || '').replace(/\\r/g, '');
+    const text = String(rawText || '').replace(/\r/g, '');
     if (!text.trim()) return null;
 
     const fields = {
@@ -565,12 +481,12 @@ export function buildRedditBotScript(config: Configuration): string {
       img: ''
     };
 
-    const lines = text.split('\\n');
+    const lines = text.split('\n');
     let currentKey = '';
 
     for (const rawLine of lines) {
       const line = String(rawLine || '');
-      const match = line.match(/^\\s*(community|type|title|flair|body|img)\\s*:\\s*(.*)$/i);
+      const match = line.match(/^\s*(community|type|title|flair|body|img)\s*:\s*(.*)$/i);
       if (match) {
         currentKey = match[1].toLowerCase();
         const value = String(match[2] || '');
@@ -583,7 +499,7 @@ export function buildRedditBotScript(config: Configuration): string {
       }
 
       if (currentKey === 'body') {
-        fields.body += (fields.body ? '\\n' : '') + line;
+        fields.body += (fields.body ? '\n' : '') + line;
       }
     }
 
@@ -622,45 +538,6 @@ export function buildRedditBotScript(config: Configuration): string {
       if (response && response.id === requestId) {
         window.__SNAPPY_REDDIT_UPLOAD_RESPONSE__ = null;
         return response.success === true;
-      }
-    }
-    return false;
-  }
-
-  async function focusRequestsPanelWithRetry() {
-    for (let attempt = 0; attempt < 4; attempt++) {
-      const focused = ensureRequestsTab();
-      if (!focused) {
-        await sleep(250);
-        continue;
-      }
-
-      // Give Reddit time to hydrate request rows and controls.
-      await sleep(650 + (attempt * 250));
-
-      const requestCandidates = getRequestConversationCandidates();
-      const acceptedDirectly = clickAnyVisibleRequestAcceptButton();
-      if (acceptedDirectly) {
-        log('Clicked visible request accept button in Requests tab');
-        await sleep(700);
-        return true;
-      }
-      if (requestCandidates.length > 0) {
-        return true;
-      }
-      const navUnread = getRequestsUnreadCountFromNav();
-      if (navUnread > 0) {
-        log('Requests nav badge reports ' + navUnread + ' unread request(s), waiting for rows');
-        const clickedRowFallback = clickFirstLikelyRequestRowFromRequestsList();
-        if (clickedRowFallback) {
-          log('Clicked first likely request row from Requests list fallback');
-          await sleep(850);
-          const acceptedAfterOpen = clickAnyVisibleRequestAcceptButton();
-          if (acceptedAfterOpen) {
-            log('Accepted request after fallback row click');
-          }
-          return true;
-        }
       }
     }
     return false;
@@ -708,33 +585,19 @@ export function buildRedditBotScript(config: Configuration): string {
   }
 
   function normalizeCommunityToken(value) {
-    let text = String(value || '').toLowerCase().replace(/\\s+/g, '');
-    if (text.startsWith('https://www.reddit.com/')) {
-      text = text.slice('https://www.reddit.com/'.length);
-    } else if (text.startsWith('https://reddit.com/')) {
-      text = text.slice('https://reddit.com/'.length);
-    } else if (text.startsWith('http://www.reddit.com/')) {
-      text = text.slice('http://www.reddit.com/'.length);
-    } else if (text.startsWith('http://reddit.com/')) {
-      text = text.slice('http://reddit.com/'.length);
-    }
-
-    while (text.startsWith('/')) {
-      text = text.slice(1);
-    }
-
-    if (text.startsWith('r/')) return 'r/' + text.slice(2);
-    if (text.startsWith('u/')) return 'u/' + text.slice(2);
-    return text;
+    return String(value || '')
+      .toLowerCase()
+      .replace(/\s+/g, '')
+      .replace(/^https?:\/\/(www\.)?reddit\.com\//, '')
+      .replace(/^\/+/, '')
+      .replace(/^r\//, 'r/')
+      .replace(/^u\//, 'u/');
   }
 
   function isCommunitySuggestionMatch(optionText, communityRaw) {
     const wanted = normalizeCommunityToken(communityRaw);
-    const cleanWanted = wanted.startsWith('r/') || wanted.startsWith('u/') ? wanted.slice(2) : wanted;
-    let text = normalizeCommunityToken(optionText);
-    while (text.startsWith('/')) {
-      text = text.slice(1);
-    }
+    const cleanWanted = wanted.replace(/^(r|u)\//, '');
+    const text = normalizeCommunityToken(optionText).replace(/^\/+/, '');
     if (!text) return false;
     if (text.includes(wanted)) return true;
     if (text.includes('r/' + cleanWanted)) return true;
@@ -787,44 +650,6 @@ export function buildRedditBotScript(config: Configuration): string {
           return true;
         }
       }
-      await sleep(220);
-    }
-    return false;
-  }
-
-  function isClickableEnabledButton(el) {
-    if (!el || !(el instanceof HTMLElement)) return false;
-    if (!isVisibleElement(el)) return false;
-    const maybeDisabled = Object.prototype.hasOwnProperty.call(el, 'disabled') ? el.disabled : false;
-    if (maybeDisabled === true) return false;
-    const ariaDisabled = String(el.getAttribute('aria-disabled') || '').toLowerCase();
-    if (ariaDisabled === 'true') return false;
-    return true;
-  }
-
-  async function clickPublishButton(timeoutMs) {
-    const start = Date.now();
-    while ((Date.now() - start) < timeoutMs && isRunning) {
-      const candidates = deepQueryAll('button, [role="button"], faceplate-button')
-        .filter(node => node instanceof HTMLElement && isClickableEnabledButton(node));
-
-      for (const node of candidates) {
-        const txt = normalizeText(node.textContent || '').toLowerCase();
-        const aria = normalizeText(node.getAttribute('aria-label') || '').toLowerCase();
-        const testId = String(node.getAttribute('data-testid') || '').toLowerCase();
-        const id = String(node.getAttribute('id') || '').toLowerCase();
-        if (
-          txt === 'post' || txt.startsWith('post ') || txt === 'publish' || txt.startsWith('publish ') ||
-          aria.includes('post') || aria.includes('publish') ||
-          testId.includes('post-submit') || testId.includes('submit-post') || testId.includes('post-button') ||
-          id.includes('post-button') || id.includes('submit-post')
-        ) {
-          node.click();
-          await sleep(300);
-          return true;
-        }
-      }
-
       await sleep(220);
     }
     return false;
@@ -984,22 +809,15 @@ export function buildRedditBotScript(config: Configuration): string {
       return false;
     }
 
-    let prefix = '';
-    let remainder = community;
-    if (community.toLowerCase().startsWith('u/')) {
-      prefix = 'u/';
-      remainder = community.slice(2);
-    } else if (community.toLowerCase().startsWith('r/')) {
-      prefix = 'r/';
-      remainder = community.slice(2);
+    const head = community.length > 2 ? community.slice(0, -2) : '';
+    const tail = community.length > 2 ? community.slice(-2) : community;
+
+    if (head) {
+      await typeCharacterByCharacter(input, head);
+      await sleep(350);
     }
 
-    if (prefix) {
-      await typeCharacterByCharacter(input, prefix);
-      await sleep(1000);
-    }
-
-    for (const char of remainder) {
+    for (const char of tail) {
       if (input instanceof HTMLInputElement || input instanceof HTMLTextAreaElement) {
         input.value += char;
         input.dispatchEvent(new Event('input', { bubbles: true }));
@@ -1007,10 +825,10 @@ export function buildRedditBotScript(config: Configuration): string {
         input.textContent = (input.textContent || '') + char;
         input.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: char }));
       }
-      await sleep(140 + randomRange(40, 140));
+      await sleep(180 + randomRange(30, 120));
     }
     input.dispatchEvent(new Event('change', { bubbles: true }));
-    await sleep(900);
+    await sleep(500);
 
     const clickedSuggestion = await clickCommunitySuggestion(community);
     if (clickedSuggestion) {
@@ -1187,7 +1005,7 @@ export function buildRedditBotScript(config: Configuration): string {
 
       await sleep(500);
 
-      const posted = await clickPublishButton(12000) || await clickButtonByText('post', 6000) || await clickButtonByText('publish', 6000);
+      const posted = await clickButtonByText('post', 10000) || await clickButtonByText('publish', 10000);
       if (!posted) {
         log('Scheduler: post submit button not found');
         return false;
@@ -1276,7 +1094,7 @@ export function buildRedditBotScript(config: Configuration): string {
         const randomOffset = (hashString(slotKeyBase) % (SCHEDULER_JITTER_MINUTES * 2 + 1)) - SCHEDULER_JITTER_MINUTES;
         const runAt = new Date(baseTime.getTime() + randomOffset * 60 * 1000);
         const pauseStart = new Date(runAt.getTime() - 15 * 60 * 1000);
-        const pauseEnd = new Date(runAt.getTime());
+        const pauseEnd = new Date(runAt.getTime() + 15 * 60 * 1000);
 
         if (now >= pauseStart && now <= pauseEnd) {
           return {
@@ -1342,7 +1160,7 @@ export function buildRedditBotScript(config: Configuration): string {
     const data = item?.data || {};
     const author = String(data.author || data.dest || 'unknown');
     const subject = String(data.subject || '').trim();
-    const body = String(data.body || '').replace(/\\s+/g, ' ').trim();
+    const body = String(data.body || '').replace(/\s+/g, ' ').trim();
     const preview = body.substring(0, 120);
     return { author, subject, preview };
   }
@@ -1408,13 +1226,13 @@ export function buildRedditBotScript(config: Configuration): string {
   }
 
   function sanitizeAuthor(author) {
-    return String(author || '').replace(/^u\\//i, '').trim();
+    return String(author || '').replace(/^u\//i, '').trim();
   }
 
   function extractConversationAuthor(container) {
     if (!container || !(container instanceof HTMLElement)) return '';
     const aria = String(container.getAttribute('aria-label') || '');
-    const directChatMatch = aria.match(/direct\\s+chat\\s+with\\s+(.+)$/i);
+    const directChatMatch = aria.match(/direct\s+chat\s+with\s+(.+)$/i);
     if (directChatMatch && directChatMatch[1]) {
       return sanitizeAuthor(directChatMatch[1]);
     }
@@ -1426,18 +1244,18 @@ export function buildRedditBotScript(config: Configuration): string {
     }
 
     const directHref = String(container.getAttribute('href') || '');
-    const directMatch = directHref.match(/\\/message\\/messages\\/([^/?#]+)/i);
+    const directMatch = directHref.match(/\/message\/messages\/([^/?#]+)/i);
     if (directMatch && directMatch[1]) return decodeURIComponent(directMatch[1]);
 
     const profileLink = container.querySelector('a[href*="/user/"]');
     if (profileLink) {
       const href = String(profileLink.getAttribute('href') || '');
-      const match = href.match(/\\/user\\/([^/?#]+)/i);
+      const match = href.match(/\/user\/([^/?#]+)/i);
       if (match && match[1]) return decodeURIComponent(match[1]);
     }
 
-    const txt = String(container.textContent || '').replace(/\\s+/g, ' ').trim();
-    if (!txt || /^\\d+$/.test(txt)) return '';
+    const txt = String(container.textContent || '').replace(/\s+/g, ' ').trim();
+    if (!txt || /^\d+$/.test(txt)) return '';
     const first = txt.split(' ')[0] || '';
     return sanitizeAuthor(first);
   }
@@ -1445,7 +1263,7 @@ export function buildRedditBotScript(config: Configuration): string {
   function hasUnreadSignal(el) {
     if (!el || !(el instanceof HTMLElement)) return false;
     const text = normalizeText(el.textContent || '').toLowerCase();
-    if (/\\bunread\\b|\\bnew\\s+message\\b/.test(text)) return true;
+    if (/\bunread\b|\bnew\s+message\b/.test(text)) return true;
     if (el.matches('[data-unread="true"], [data-is-unread="true"], [aria-label*="unread" i], [class*="unread" i]')) return true;
     if (el.classList.contains('has-notifications')) return true;
     if (String(el.className || '').toLowerCase().includes('has-notifications')) return true;
@@ -1461,43 +1279,8 @@ export function buildRedditBotScript(config: Configuration): string {
     }
     // Reddit room cards place unread marker in the trailing badges slot.
     if (el.querySelector('.badges rs-notifications-badge')) return true;
-    if (el.querySelector('.notifications-badge.count')) return true;
-    const ariaUnreadNode = el.querySelector('[aria-label*="unread" i]');
-    if (ariaUnreadNode) return true;
 
     return false;
-  }
-
-  function getRequestsUnreadCountFromNav() {
-    const requestHosts = deepQueryAll('[data-testid="requests-button"], [data-testid="nav-item-requests"], [aria-label="View chat requests"]')
-      .filter(node => node instanceof HTMLElement && isVisibleElement(node));
-    for (const requestsHost of requestHosts) {
-      if (!(requestsHost instanceof HTMLElement)) continue;
-      const badgeCandidates = [];
-      if (requestsHost.matches('rs-notifications-badge')) badgeCandidates.push(requestsHost);
-      requestsHost.querySelectorAll('rs-notifications-badge, .notifications-badge.count, [aria-label*="unread" i]').forEach(node => badgeCandidates.push(node));
-
-      for (const badgeEl of badgeCandidates) {
-        if (!(badgeEl instanceof HTMLElement)) continue;
-        if (badgeEl.matches('rs-notifications-badge')) {
-          const cnt = Number(badgeEl.getAttribute('count') || '0');
-          if (Number.isFinite(cnt) && cnt > 0) return cnt;
-          const badgeRoot = badgeEl.shadowRoot || null;
-          if (badgeRoot) {
-            const txt = normalizeText(badgeRoot.textContent || '');
-            const txtMatch = txt.match(/\\d+/);
-            if (txtMatch) return parseInt(txtMatch[0], 10) || 0;
-          }
-        }
-        const aria = String(badgeEl.getAttribute('aria-label') || '');
-        const ariaMatch = aria.match(/(\\d+)\\s+unread/i);
-        if (ariaMatch) return parseInt(ariaMatch[1], 10) || 0;
-        const txt = normalizeText(badgeEl.textContent || '');
-        const txtMatch = txt.match(/\\d+/);
-        if (txtMatch) return parseInt(txtMatch[0], 10) || 0;
-      }
-    }
-    return 0;
   }
 
   function isLikelyDirectChat(linkEl, rowEl) {
@@ -1518,11 +1301,6 @@ export function buildRedditBotScript(config: Configuration): string {
     const links = deepQueryAll('a[href*="/room/"], a[href*="/message/messages/"]').filter(el => el instanceof HTMLElement);
     for (const link of links) {
       if (!isVisibleElement(link)) continue;
-      const href = String(link.getAttribute('href') || '').toLowerCase();
-      const linkTextLower = normalizeText(link.textContent || '').toLowerCase();
-      if (href.includes('/room/create') || href.includes('/room/new') || href.includes('/new-chat') || href.includes('/compose')) continue;
-      if (linkTextLower.includes('create new chat') || linkTextLower.includes('new chat')) continue;
-      if (link.closest('[data-testid="requests-button"]') || link.closest('[data-testid="nav-item-requests"]')) continue;
 
       const row =
         link.closest('rs-rooms-nav-room, li, [role="listitem"], [role="row"], [data-testid*="thread"], [data-testid*="conversation"], [class*="thread" i], [class*="conversation" i], [class*="room" i]') ||
@@ -1532,7 +1310,7 @@ export function buildRedditBotScript(config: Configuration): string {
       if (!isLikelyDirectChat(link, row)) continue;
 
       const rowText = normalizeText(row.textContent || '');
-      if (!rowText || /^\\d+$/.test(rowText)) continue;
+      if (!rowText || /^\d+$/.test(rowText)) continue;
 
       const linkAuthor = extractConversationAuthor(link);
       const rowAuthor = extractConversationAuthor(row);
@@ -1562,11 +1340,6 @@ export function buildRedditBotScript(config: Configuration): string {
     const links = deepQueryAll('a[href*="/room/"], a[href*="/message/messages/"]').filter(el => el instanceof HTMLElement);
     for (const link of links) {
       if (!isVisibleElement(link)) continue;
-      const href = String(link.getAttribute('href') || '').toLowerCase();
-      const linkTextLower = normalizeText(link.textContent || '').toLowerCase();
-      if (href.includes('/room/create') || href.includes('/room/new') || href.includes('/new-chat') || href.includes('/compose')) continue;
-      if (linkTextLower.includes('create new chat') || linkTextLower.includes('new chat')) continue;
-      if (link.closest('[data-testid="requests-button"]') || link.closest('[data-testid="nav-item-requests"]')) continue;
       const row =
         link.closest('rs-rooms-nav-room, li, [role="listitem"], [role="row"], [data-testid*="thread"], [data-testid*="conversation"], [class*="thread" i], [class*="conversation" i], [class*="room" i]') ||
         link.parentElement ||
@@ -1575,73 +1348,20 @@ export function buildRedditBotScript(config: Configuration): string {
       if (!isLikelyDirectChat(link, row)) continue;
 
       const rowText = normalizeText(row.textContent || '');
-      if (!rowText || /^\\d+$/.test(rowText)) continue;
+      if (!rowText || /^\d+$/.test(rowText)) continue;
       const lowered = rowText.toLowerCase();
-      if (lowered.includes('hidden request') || lowered.includes('invitation to moderate') || lowered.includes('modmail') || lowered.includes('create new chat')) continue;
+      if (lowered.includes('hidden request') || lowered.includes('invitation to moderate') || lowered.includes('modmail')) continue;
 
       const linkAuthor = extractConversationAuthor(link);
       const rowAuthor = extractConversationAuthor(row);
       const author = sanitizeAuthor(linkAuthor || rowAuthor);
-      const key = String(link.getAttribute('href') || '') + '|' + (author || 'unknown') + '|' + rowText.substring(0, 160);
+      const key = String(link.getAttribute('href') || '') + '|' + author + '|' + rowText.substring(0, 160);
       if (!key.trim() || seenKeys.has(key)) continue;
       seenKeys.add(key);
       candidates.push(link);
     }
-
-    // Fallback for UIs where requests are rendered as rows/buttons without room/message href.
-    if (candidates.length === 0) {
-      const rows = deepQueryAll('rs-rooms-nav-room, [role="button"], li, [role="listitem"], [role="row"]');
-      for (const row of rows) {
-        if (!(row instanceof HTMLElement)) continue;
-        if (!isVisibleElement(row)) continue;
-        if (row.closest('[data-testid="requests-button"]') || row.matches('[data-testid="requests-button"]')) continue;
-        if (row.closest('[data-testid="nav-item-requests"]') || row.matches('[data-testid="nav-item-requests"]')) continue;
-
-        const rowText = normalizeText(row.textContent || '');
-        if (!rowText || /^\\d+$/.test(rowText)) continue;
-        const lowered = rowText.toLowerCase();
-        if (lowered.includes('create new chat') || lowered.includes('new chat')) continue;
-        if (lowered === 'requests' || lowered.startsWith('requests ')) continue;
-        if (lowered === 'threads' || lowered.startsWith('threads ')) continue;
-        if (lowered.includes('hidden request') || lowered.includes('modmail')) continue;
-        const hasAcceptControl = !!row.querySelector('button, [role="button"]') && /(accept|approve|start chat|join chat)/i.test(normalizeText(row.textContent || ''));
-        const containsUserHint = lowered.includes('u/') || lowered.includes('chat with') || lowered.includes('direct chat');
-        if (!hasUnreadSignal(row) && !lowered.includes('request') && !hasAcceptControl && !containsUserHint) continue;
-
-        const key = 'row|' + rowText.substring(0, 180);
-        if (seenKeys.has(key)) continue;
-        seenKeys.add(key);
-        candidates.push(row);
-      }
-    }
-
     log('PM scan: requestsCandidates=' + candidates.length);
     return candidates;
-  }
-
-  function clickFirstLikelyRequestRowFromRequestsList() {
-    const rows = deepQueryAll('rs-rooms-nav-room, [role="row"], [role="listitem"], li, a[href*="/room/"], a[href*="/message/messages/"]');
-    for (const row of rows) {
-      if (!(row instanceof HTMLElement)) continue;
-      if (!isVisibleElement(row)) continue;
-      if (row.closest('[data-testid="requests-button"]') || row.matches('[data-testid="requests-button"]')) continue;
-      if (row.closest('[data-testid="nav-item-requests"]') || row.matches('[data-testid="nav-item-requests"]')) continue;
-
-      const txt = normalizeText(row.textContent || '').toLowerCase();
-      if (!txt || txt.length < 2) continue;
-      if (txt === 'requests' || txt.startsWith('requests ')) continue;
-      if (txt === 'threads' || txt.startsWith('threads ')) continue;
-      if (txt === 'inbox' || txt.startsWith('inbox ')) continue;
-      if (txt.includes('create new chat') || txt === 'new chat') continue;
-      if (txt.includes('invitation to moderate') || txt.includes('modmail')) continue;
-
-      const inMainArea = !!row.closest('main, [role="main"], rs-chatroom, rs-rooms-pane, rs-rooms-nav');
-      const looksLikeConversation = txt.includes('u/') || txt.includes('chat with') || txt.includes('direct chat') || hasUnreadSignal(row);
-      if (!inMainArea && !looksLikeConversation) continue;
-
-      if (clickConversationElement(row)) return true;
-    }
-    return false;
   }
 
   function findConversationElementForAuthor(author) {
@@ -1666,7 +1386,7 @@ export function buildRedditBotScript(config: Configuration): string {
 
     const candidates = deepQueryAll('a, button, [role="button"], li, div').slice(0, 700);
     for (const node of candidates) {
-      const text = String(node.textContent || '').replace(/\\s+/g, ' ').toLowerCase();
+      const text = String(node.textContent || '').replace(/\s+/g, ' ').toLowerCase();
       if (!text) continue;
       if (text.includes('u/' + cleanAuthor) || text.includes(cleanAuthor)) {
         if (node instanceof HTMLElement) return node;
@@ -1685,9 +1405,9 @@ export function buildRedditBotScript(config: Configuration): string {
       const nodes = deepQueryAll(selector);
       for (const node of nodes) {
         const href = node.getAttribute ? (node.getAttribute('href') || '') : '';
-        const match = href.match(/\\/user\\/([^/?#]+)/i);
+        const match = href.match(/\/user\/([^/?#]+)/i);
         if (match && match[1]) return decodeURIComponent(match[1]).toLowerCase();
-        const txt = normalizeText(node.textContent || '').replace(/^u\\//i, '');
+        const txt = normalizeText(node.textContent || '').replace(/^u\//i, '');
         if (txt && txt.length > 1 && !txt.includes('open')) return txt.toLowerCase();
       }
     }
@@ -1727,10 +1447,10 @@ export function buildRedditBotScript(config: Configuration): string {
       let author = '';
       let forceOutgoing = false;
 
-      const saidMatch = aria.match(/^(.+?)\\s+said\\s+/i);
+      const saidMatch = aria.match(/^(.+?)\s+said\s+/i);
       if (saidMatch && saidMatch[1]) {
         author = sanitizeAuthor(saidMatch[1]);
-      } else if (/^you\\s+(said|sent)\\s+/i.test(aria) || /^me\\s+(said|sent)\\s+/i.test(aria)) {
+      } else if (/^you\s+(said|sent)\s+/i.test(aria) || /^me\s+(said|sent)\s+/i.test(aria)) {
         author = 'you';
         forceOutgoing = true;
       } else if (ariaLower.includes('you said') || ariaLower.includes('you sent') || ariaLower.startsWith('you:')) {
@@ -1795,7 +1515,7 @@ export function buildRedditBotScript(config: Configuration): string {
     // Keep only the most recent inbound burst.
     const bounded = batch.slice(-3);
 
-    const joined = bounded.map(msg => msg.text).join('\\n').trim();
+    const joined = bounded.map(msg => msg.text).join('\n').trim();
     if (!joined) return null;
     const author = sanitizeAuthor(bounded[bounded.length - 1].author || authorHint || 'reddit_user') || 'reddit_user';
     return {
@@ -1874,8 +1594,8 @@ export function buildRedditBotScript(config: Configuration): string {
     function normalizeForMatch(text) {
       return String(text || '')
         .toLowerCase()
-        .replace(/[^a-z0-9\\s]/g, ' ')
-        .replace(/\\s+/g, ' ')
+        .replace(/[^a-z0-9\s]/g, ' ')
+        .replace(/\s+/g, ' ')
         .trim();
     }
 
@@ -1891,7 +1611,7 @@ export function buildRedditBotScript(config: Configuration): string {
         if (normalized === '*' || normalized === 'default' || normalized === 'fallback') {
           return String(rule.reply || '').trim() || null;
         }
-        const boundaryPattern = new RegExp('(^|\\\\s)' + normalized.replace(/[.*+?^()|[\]{}$\\\\]/g, '\\\\$&') + '(\\\\s|$)', 'i');
+        const boundaryPattern = new RegExp('(^|\\s)' + normalized.replace(/[.*+?^()|[]{}$\\]/g, '\\$&') + '(\\s|$)', 'i');
         if (target.includes(normalized) || boundaryPattern.test(target)) {
           log('Rule matched for u/' + (username || 'reddit_user') + ': "' + matchRaw + '"');
           return String(rule.reply || '').trim() || null;
@@ -2288,10 +2008,6 @@ export function buildRedditBotScript(config: Configuration): string {
     return false;
   }
 
-  function clickAnyVisibleRequestAcceptButton() {
-    return clickAnyButtonByText(['accept', 'approve', 'start chat', 'join chat']);
-  }
-
   async function ensureConversationReadyForReply(convoEl, author) {
     if (convoEl) {
       clickConversationElement(convoEl);
@@ -2323,7 +2039,7 @@ export function buildRedditBotScript(config: Configuration): string {
     lastPmReplyRunAt = Date.now();
 
     const limit = Math.max(1, Number(settings.maxItemsPerPoll) || 3);
-    // Keep current panel context unless we need to switch.
+    ensureThreadsTab();
     await sleep(220);
     const inboxFocused = ensureInboxTab();
     if (!inboxFocused) {
@@ -2333,20 +2049,12 @@ export function buildRedditBotScript(config: Configuration): string {
 
     let unreadCandidates = getUnreadConversationCandidates();
     if (unreadCandidates.length === 0) {
-      const requestsFocused = await focusRequestsPanelWithRetry();
+      const requestsFocused = ensureRequestsTab();
       if (requestsFocused) {
-        await sleep(350);
+        await sleep(300);
         unreadCandidates = getUnreadConversationCandidates();
         if (unreadCandidates.length === 0) {
           unreadCandidates = getRequestConversationCandidates();
-          if (unreadCandidates.length === 0) {
-            const navUnread = getRequestsUnreadCountFromNav();
-            if (navUnread > 0) {
-              log('Requests badge > 0 but no row candidates yet; keeping Requests tab context');
-              await sleep(800);
-              unreadCandidates = getRequestConversationCandidates();
-            }
-          }
         }
       }
     }
@@ -2633,5 +2341,3 @@ export function buildRedditBotScript(config: Configuration): string {
   });
   window.__SNAPPY_STOP__ = stop;
 })();
-`;
-}
