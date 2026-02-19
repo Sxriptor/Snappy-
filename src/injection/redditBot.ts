@@ -24,6 +24,7 @@ export function buildRedditBotScript(config: Configuration): string {
   let nextSubredditCheckAt = 0;
   let lastPmCheckAt = 0;
   let lastPmReplyRunAt = 0;
+  let lastDmPauseWindowKey = '';
   const processedScheduleSlots = new Set();
   let isPostingScheduledContent = false;
   const unreadPmQueue = [];
@@ -928,6 +929,69 @@ export function buildRedditBotScript(config: Configuration): string {
     }
 
     return null;
+  }
+
+  function getActiveDmPauseWindow() {
+    const scheduler = getSchedulerConfig();
+    if (scheduler.enabled !== true) return null;
+    const folderPath = typeof scheduler.folderPath === 'string' ? scheduler.folderPath.trim() : '';
+    if (!folderPath) return null;
+
+    const now = new Date();
+    const dayOffsets = [-1, 0, 1];
+
+    for (const dayOffset of dayOffsets) {
+      const dateRef = new Date(now.getFullYear(), now.getMonth(), now.getDate() + dayOffset, 0, 0, 0, 0);
+      const dayKey = getDayKey(dateRef);
+      const dayConfig = scheduler.days?.[dayKey];
+      if (!dayConfig || dayConfig.enabled !== true || !Array.isArray(dayConfig.times) || dayConfig.times.length === 0) {
+        continue;
+      }
+
+      const year = dateRef.getFullYear();
+      const month = dateRef.getMonth();
+      const day = dateRef.getDate();
+
+      for (const timeValue of dayConfig.times) {
+        const normalized = normalizeTime(timeValue);
+        if (!normalized) continue;
+
+        const baseTime = new Date(year, month, day, normalized.hour, normalized.minute, 0, 0);
+        const slotKeyBase = year + '-' + (month + 1) + '-' + day + '-' + dayKey + '-' + normalized.text;
+        const randomOffset = (hashString(slotKeyBase) % (SCHEDULER_JITTER_MINUTES * 2 + 1)) - SCHEDULER_JITTER_MINUTES;
+        const runAt = new Date(baseTime.getTime() + randomOffset * 60 * 1000);
+        const pauseStart = new Date(runAt.getTime() - 15 * 60 * 1000);
+        const pauseEnd = new Date(runAt.getTime() + 15 * 60 * 1000);
+
+        if (now >= pauseStart && now <= pauseEnd) {
+          return {
+            dayKey,
+            planned: normalized.text,
+            offsetMinutes: randomOffset,
+            runAt,
+            pauseStart,
+            pauseEnd
+          };
+        }
+      }
+    }
+
+    return null;
+  }
+
+  function shouldPauseDmAroundScheduledPost() {
+    const activeWindow = getActiveDmPauseWindow();
+    if (!activeWindow) {
+      lastDmPauseWindowKey = '';
+      return false;
+    }
+
+    const pauseKey = String(activeWindow.runAt.getTime()) + ':' + String(activeWindow.pauseStart.getTime());
+    if (lastDmPauseWindowKey !== pauseKey) {
+      lastDmPauseWindowKey = pauseKey;
+      log('Scheduler: pausing DM reading from ' + activeWindow.pauseStart.toLocaleTimeString() + ' to ' + activeWindow.pauseEnd.toLocaleTimeString() + ' around ' + activeWindow.planned);
+    }
+    return true;
   }
 
   async function processScheduledPosting() {
@@ -2018,6 +2082,10 @@ export function buildRedditBotScript(config: Configuration): string {
       await sleep(180);
     }
 
+    if (shouldPauseDmAroundScheduledPost()) {
+      return;
+    }
+
     await readUnreadPrivateMessages();
     await processUnreadPmConversations();
   }
@@ -2033,7 +2101,9 @@ export function buildRedditBotScript(config: Configuration): string {
         }
       }
 
-      if (settings.watchPrivateMessages) {
+      const pauseDm = shouldPauseDmAroundScheduledPost();
+
+      if (settings.watchPrivateMessages && !pauseDm) {
         const unreadMessages = getUnreadCount(SELECTORS.messageItems, SELECTORS.unreadMessage);
         if (unreadMessages > 0) {
           log('Unread messages: ' + unreadMessages);
@@ -2046,8 +2116,10 @@ export function buildRedditBotScript(config: Configuration): string {
         await sleep(150);
       }
 
-      await readUnreadPrivateMessages();
-      await processUnreadPmConversations();
+      if (!pauseDm) {
+        await readUnreadPrivateMessages();
+        await processUnreadPmConversations();
+      }
       await runSubredditCheck(false);
       await processScheduledPosting();
     } catch (error) {
