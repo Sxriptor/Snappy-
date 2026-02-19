@@ -31,6 +31,7 @@ export interface RedditSiteSettings {
 
 export interface RedditScheduledPost {
   id: string;
+  mediaPaths?: string[];
   textPath: string;
   body: string;
   mediaPath?: string;

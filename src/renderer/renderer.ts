@@ -2094,6 +2094,7 @@ interface RedditDaySchedule {
 
 interface RedditScheduledPost {
   id: string;
+  mediaPaths?: string[];
   textPath: string;
   body: string;
   mediaPath?: string;
@@ -3675,15 +3676,36 @@ function normalizeRedditSchedulerSettings(value: unknown): RedditPostSchedulerSe
   }
 
   const posts = Array.isArray(settings.posts)
-    ? settings.posts.filter((item): item is RedditScheduledPost => {
-      if (typeof item !== 'object' || item === null) return false;
+    ? settings.posts.map((item): RedditScheduledPost | null => {
+      if (typeof item !== 'object' || item === null) return null;
       const candidate = item as Partial<RedditScheduledPost>;
-      return typeof candidate.id === 'string' &&
-        typeof candidate.textPath === 'string' &&
-        typeof candidate.body === 'string' &&
-        (candidate.mediaPath === undefined || typeof candidate.mediaPath === 'string') &&
-        (candidate.mediaType === undefined || candidate.mediaType === 'image' || candidate.mediaType === 'video');
-    })
+      const mediaPaths = Array.isArray(candidate.mediaPaths)
+        ? candidate.mediaPaths.filter((p): p is string => typeof p === 'string' && p.trim().length > 0)
+        : (typeof candidate.mediaPath === 'string' && candidate.mediaPath.trim().length > 0 ? [candidate.mediaPath] : []);
+
+      if (typeof candidate.id !== 'string' ||
+          typeof candidate.textPath !== 'string' ||
+          typeof candidate.body !== 'string' ||
+          (candidate.mediaType !== undefined && candidate.mediaType !== 'image' && candidate.mediaType !== 'video')) {
+        return null;
+      }
+
+      const normalized: RedditScheduledPost = {
+        id: candidate.id,
+        textPath: candidate.textPath,
+        body: candidate.body
+      };
+
+      if (mediaPaths.length > 0) {
+        normalized.mediaPaths = mediaPaths;
+        normalized.mediaPath = mediaPaths[0];
+        normalized.mediaType = candidate.mediaType;
+      } else if (candidate.mediaType) {
+        normalized.mediaType = candidate.mediaType;
+      }
+
+      return normalized;
+    }).filter((item): item is RedditScheduledPost => item !== null)
     : [];
 
   return {
@@ -4066,7 +4088,13 @@ function renderRedditSchedulerContentPreview(posts: RedditScheduledPost[]): void
     return;
   }
 
-  const previewLines = posts.slice(0, 8).map((post) => `${post.id} -> ${post.mediaType ? post.mediaType.toUpperCase() : 'TEXT'}`);
+  const previewLines = posts.slice(0, 8).map((post) => {
+    const mediaCount = Array.isArray(post.mediaPaths) && post.mediaPaths.length > 0 ? post.mediaPaths.length : (post.mediaPath ? 1 : 0);
+    if (mediaCount > 0) {
+      return `${post.id} -> ${mediaCount} file(s), ${post.mediaType ? post.mediaType.toUpperCase() : 'MEDIA'}`;
+    }
+    return `${post.id} -> TEXT`;
+  });
   const suffix = posts.length > 8 ? `\n...and ${posts.length - 8} more` : '';
   redditSchedulerPreview.textContent = `Found ${posts.length} scheduled post(s):\n${previewLines.join('\n')}${suffix}`;
 }
