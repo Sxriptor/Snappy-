@@ -185,7 +185,8 @@ export function buildRedditBotScript(config: Configuration): string {
       if (!(tab instanceof HTMLElement)) continue;
       const txt = normalizeText(tab.textContent || '').toLowerCase();
       const testId = String(tab.getAttribute('data-testid') || '').toLowerCase();
-      if (testId.includes('nav-item-requests') || txt === 'requests' || txt.startsWith('requests ')) {
+      const requestsTextMatch = /^requests(?:\\b|\\s|\\(|\\d)/.test(txt);
+      if (testId.includes('nav-item-requests') || requestsTextMatch || txt.includes('message requests')) {
         tab.click();
         log('Focused Requests tab');
         return true;
@@ -1266,6 +1267,36 @@ export function buildRedditBotScript(config: Configuration): string {
     return candidates;
   }
 
+  function getRequestConversationCandidates() {
+    const candidates = [];
+    const seenKeys = new Set();
+    const links = deepQueryAll('a[href*="/room/"], a[href*="/message/messages/"]').filter(el => el instanceof HTMLElement);
+    for (const link of links) {
+      if (!isVisibleElement(link)) continue;
+      const row =
+        link.closest('rs-rooms-nav-room, li, [role="listitem"], [role="row"], [data-testid*="thread"], [data-testid*="conversation"], [class*="thread" i], [class*="conversation" i], [class*="room" i]') ||
+        link.parentElement ||
+        link;
+      if (!row || !(row instanceof HTMLElement)) continue;
+      if (!isLikelyDirectChat(link, row)) continue;
+
+      const rowText = normalizeText(row.textContent || '');
+      if (!rowText || /^\\d+$/.test(rowText)) continue;
+      const lowered = rowText.toLowerCase();
+      if (lowered.includes('hidden request') || lowered.includes('invitation to moderate') || lowered.includes('modmail')) continue;
+
+      const linkAuthor = extractConversationAuthor(link);
+      const rowAuthor = extractConversationAuthor(row);
+      const author = sanitizeAuthor(linkAuthor || rowAuthor);
+      const key = String(link.getAttribute('href') || '') + '|' + author + '|' + rowText.substring(0, 160);
+      if (!key.trim() || seenKeys.has(key)) continue;
+      seenKeys.add(key);
+      candidates.push(link);
+    }
+    log('PM scan: requestsCandidates=' + candidates.length);
+    return candidates;
+  }
+
   function findConversationElementForAuthor(author) {
     const cleanAuthor = sanitizeAuthor(author).toLowerCase();
     if (!cleanAuthor) return null;
@@ -1955,6 +1986,9 @@ export function buildRedditBotScript(config: Configuration): string {
       if (requestsFocused) {
         await sleep(300);
         unreadCandidates = getUnreadConversationCandidates();
+        if (unreadCandidates.length === 0) {
+          unreadCandidates = getRequestConversationCandidates();
+        }
       }
     }
     if (unreadCandidates.length > 0) {
@@ -1970,6 +2004,12 @@ export function buildRedditBotScript(config: Configuration): string {
         }
         log('Clicked unread conversation for u/' + author);
         await sleep(900);
+
+        const acceptedPre = clickAnyButtonByText(['accept', 'approve', 'start chat']);
+        if (acceptedPre) {
+          log('Clicked request acceptance button after opening conversation');
+          await sleep(700);
+        }
 
         const latestIncoming = await extractLatestIncomingWithRetries(author, convoEl);
         if (!latestIncoming) {
