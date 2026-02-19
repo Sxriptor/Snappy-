@@ -28,10 +28,12 @@ export function buildInstagramBotScript(config: Configuration): string {
     const shouldWatchDMs = SITE_SETTINGS.watchDirectMessages !== false;
     const shouldWatchRequests = SITE_SETTINGS.watchMessageRequests === true;
     const shouldAutoAccept = SITE_SETTINGS.autoAcceptRequests === true;
+    const schedulerConfig = SITE_SETTINGS.postScheduler || {};
+    const schedulerEnabled = schedulerConfig.enabled === true;
     
-    console.log('[Snappy][Instagram] Bot settings - DMs: ' + shouldWatchDMs + ', Requests: ' + shouldWatchRequests + ', Auto-accept: ' + shouldAutoAccept);
+    console.log('[Snappy][Instagram] Bot settings - DMs: ' + shouldWatchDMs + ', Requests: ' + shouldWatchRequests + ', Auto-accept: ' + shouldAutoAccept + ', Scheduler: ' + schedulerEnabled);
     
-    if (!shouldWatchDMs && !shouldWatchRequests) {
+    if (!shouldWatchDMs && !shouldWatchRequests && !schedulerEnabled) {
       console.log('[Snappy][Instagram] All monitoring disabled - bot will remain idle');
       window.__SNAPPY_STOP__ = function() {
         window.__SNAPPY_RUNNING__ = false;
@@ -43,9 +45,12 @@ export function buildInstagramBotScript(config: Configuration): string {
 
     const seenMessages = new Set();
     const recentlyProcessedConversations = new Map();
+    const processedScheduleSlots = new Set();
     let isRunning = true;
     let pollInterval = null;
     let isProcessing = false;
+    let schedulerInterval = null;
+    let isPostingScheduledContent = false;
 
     const MIN_MESSAGE_LENGTH = 2;
     const BASE_POLL_MS = (CONFIG?.instagram && CONFIG.instagram.pollIntervalMs) || 8000;
@@ -53,6 +58,7 @@ export function buildInstagramBotScript(config: Configuration): string {
     const REPROCESS_COOLDOWN_MS = 20000;
     const typingDelayRange = CONFIG?.typingDelayRangeMs || [50, 150];
     const preReplyDelayRange = CONFIG?.preReplyDelayRangeMs || [2000, 6000];
+    const SCHEDULER_JITTER_MINUTES = 15;
 
     function getRandomPollInterval() {
       return BASE_POLL_MS + Math.floor(Math.random() * POLL_VARIANCE_MS);
@@ -70,6 +76,286 @@ export function buildInstagramBotScript(config: Configuration): string {
 
     function isStopped() {
       return !isRunning || window.__SNAPPY_RUNNING__ !== true || window.__SNAPPY_INSTAGRAM_RUNNING__ !== true;
+    }
+
+    function hashString(input) {
+      let hash = 0;
+      const str = String(input || '');
+      for (let i = 0; i < str.length; i++) {
+        hash = ((hash << 5) - hash + str.charCodeAt(i)) | 0;
+      }
+      return Math.abs(hash);
+    }
+
+    function normalizeTime(timeValue) {
+      const match = String(timeValue || '').trim().match(/^(\\d{1,2}):(\\d{2})$/);
+      if (!match) return null;
+      const hour = Math.max(0, Math.min(23, parseInt(match[1], 10)));
+      const minute = Math.max(0, Math.min(59, parseInt(match[2], 10)));
+      return { hour, minute, text: hour.toString().padStart(2, '0') + ':' + minute.toString().padStart(2, '0') };
+    }
+
+    function getDayKey(date) {
+      const map = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
+      return map[date.getDay()];
+    }
+
+    function clickElementByText(candidates, textMatch) {
+      const lowerMatch = textMatch.toLowerCase();
+      for (const el of candidates) {
+        const text = (el.textContent || '').trim().toLowerCase();
+        const ariaLabel = (el.getAttribute('aria-label') || '').trim().toLowerCase();
+        if (text === lowerMatch || text.includes(lowerMatch) || ariaLabel === lowerMatch || ariaLabel.includes(lowerMatch)) {
+          el.click();
+          return true;
+        }
+      }
+      return false;
+    }
+
+    async function waitForSelector(selectors, timeoutMs) {
+      const start = Date.now();
+      while (Date.now() - start < timeoutMs) {
+        for (const selector of selectors) {
+          const found = document.querySelector(selector);
+          if (found) {
+            return found;
+          }
+        }
+        await sleep(200);
+      }
+      return null;
+    }
+
+    function getSchedulerPosts() {
+      const posts = Array.isArray(schedulerConfig.posts) ? schedulerConfig.posts : [];
+      return posts.filter(post =>
+        post &&
+        typeof post.id === 'string' &&
+        typeof post.mediaPath === 'string' &&
+        typeof post.caption === 'string'
+      );
+    }
+
+    function getNextScheduledPost() {
+      const posts = getSchedulerPosts();
+      if (posts.length === 0) return null;
+      const key = '__snappy_ig_scheduler_next_post_index__';
+      const currentIndex = parseInt(localStorage.getItem(key) || '0', 10) || 0;
+      const selected = posts[currentIndex % posts.length];
+      localStorage.setItem(key, String((currentIndex + 1) % posts.length));
+      return selected;
+    }
+
+    async function requestMediaAttach(filePath) {
+      if (!filePath) return false;
+      const requestId = 'ig-upload-' + Date.now() + '-' + Math.random().toString(36).slice(2);
+      window.__SNAPPY_IG_UPLOAD_RESPONSE__ = null;
+      window.__SNAPPY_IG_UPLOAD_REQUEST__ = {
+        id: requestId,
+        filePaths: [filePath],
+        selector: 'input[type="file"]'
+      };
+
+      let waited = 0;
+      const timeoutMs = 30000;
+      while (waited < timeoutMs && !isStopped()) {
+        await sleep(250);
+        waited += 250;
+        const response = window.__SNAPPY_IG_UPLOAD_RESPONSE__;
+        if (response && response.id === requestId) {
+          window.__SNAPPY_IG_UPLOAD_RESPONSE__ = null;
+          return response.success === true;
+        }
+      }
+      return false;
+    }
+
+    async function clickCreatePostFlow() {
+      const homeLink = document.querySelector('a[href="/"], a[href="https://www.instagram.com/"]');
+      if (homeLink && window.location.pathname.startsWith('/direct')) {
+        homeLink.click();
+        await sleep(1200);
+      }
+
+      const createCandidates = Array.from(document.querySelectorAll('a, button, div[role="button"]'));
+      const createClicked = clickElementByText(createCandidates, 'create') || clickElementByText(createCandidates, 'new post');
+      if (!createClicked) {
+        log('Scheduler: Create button not found');
+        return false;
+      }
+
+      await sleep(1000);
+      const postCandidates = Array.from(document.querySelectorAll('a, button, div[role="button"]'));
+      clickElementByText(postCandidates, 'post');
+      await sleep(1000);
+      return true;
+    }
+
+    async function clickButtonByText(buttonText, timeoutMs = 8000) {
+      const start = Date.now();
+      while (Date.now() - start < timeoutMs && !isStopped()) {
+        const candidates = Array.from(document.querySelectorAll('button, div[role="button"]'));
+        if (clickElementByText(candidates, buttonText)) {
+          return true;
+        }
+        await sleep(200);
+      }
+      return false;
+    }
+
+    async function setPostCaption(caption) {
+      const captionInput = await waitForSelector([
+        'textarea[aria-label*="caption" i]',
+        '[contenteditable="true"][aria-label*="caption" i]',
+        'textarea[placeholder*="caption" i]'
+      ], 10000);
+
+      if (!captionInput) {
+        log('Scheduler: Caption input not found');
+        return false;
+      }
+
+      const text = String(caption || '').trim();
+      if (!text) {
+        return true;
+      }
+
+      captionInput.focus();
+      if (captionInput.tagName === 'TEXTAREA') {
+        captionInput.value = text;
+        captionInput.dispatchEvent(new Event('input', { bubbles: true }));
+        captionInput.dispatchEvent(new Event('change', { bubbles: true }));
+      } else {
+        captionInput.textContent = text;
+        captionInput.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: text }));
+      }
+
+      await sleep(400);
+      return true;
+    }
+
+    async function publishScheduledPost(post) {
+      if (!post || !post.mediaPath) {
+        log('Scheduler: No scheduled media found');
+        return false;
+      }
+
+      if (isPostingScheduledContent) {
+        return false;
+      }
+
+      isPostingScheduledContent = true;
+      try {
+        log('Scheduler: starting scheduled publish for slot item ' + post.id);
+
+        const openedCreate = await clickCreatePostFlow();
+        if (!openedCreate) return false;
+
+        const input = await waitForSelector(['input[type="file"]'], 12000);
+        if (!input) {
+          log('Scheduler: file input not found');
+          return false;
+        }
+
+        const attached = await requestMediaAttach(post.mediaPath);
+        if (!attached) {
+          log('Scheduler: media attach failed');
+          return false;
+        }
+
+        await sleep(2000);
+
+        const next1 = await clickButtonByText('next', 12000);
+        if (!next1) {
+          log('Scheduler: first Next button not found');
+          return false;
+        }
+
+        await sleep(1200);
+        await clickButtonByText('next', 5000);
+        await sleep(900);
+
+        const captionSet = await setPostCaption(post.caption || '');
+        if (!captionSet) return false;
+
+        const shareClicked = await clickButtonByText('share', 12000);
+        if (!shareClicked) {
+          log('Scheduler: Share button not found');
+          return false;
+        }
+
+        log('Scheduler: post submitted for publishing');
+        return true;
+      } catch (error) {
+        log('Scheduler publish error: ' + error);
+        return false;
+      } finally {
+        isPostingScheduledContent = false;
+      }
+    }
+
+    function getDueScheduleSlot() {
+      if (!schedulerEnabled) return null;
+      const folderPath = typeof schedulerConfig.folderPath === 'string' ? schedulerConfig.folderPath.trim() : '';
+      if (!folderPath) return null;
+
+      const now = new Date();
+      const dayKey = getDayKey(now);
+      const dayConfig = schedulerConfig.days?.[dayKey];
+      if (!dayConfig || dayConfig.enabled !== true || !Array.isArray(dayConfig.times) || dayConfig.times.length === 0) {
+        return null;
+      }
+
+      const year = now.getFullYear();
+      const month = now.getMonth();
+      const day = now.getDate();
+
+      for (const timeValue of dayConfig.times) {
+        const normalized = normalizeTime(timeValue);
+        if (!normalized) continue;
+
+        const baseTime = new Date(year, month, day, normalized.hour, normalized.minute, 0, 0);
+        const slotKeyBase = year + '-' + (month + 1) + '-' + day + '-' + dayKey + '-' + normalized.text;
+        const randomOffset = (hashString(slotKeyBase) % (SCHEDULER_JITTER_MINUTES * 2 + 1)) - SCHEDULER_JITTER_MINUTES;
+        const runAt = new Date(baseTime.getTime() + randomOffset * 60 * 1000);
+        const windowEnd = new Date(baseTime.getTime() + SCHEDULER_JITTER_MINUTES * 60 * 1000);
+        const slotKey = slotKeyBase + '-off-' + randomOffset;
+
+        if (processedScheduleSlots.has(slotKey)) continue;
+        if (now < runAt) continue;
+        if (now > windowEnd) continue;
+
+        return {
+          slotKey,
+          planned: normalized.text,
+          runAt,
+          offsetMinutes: randomOffset
+        };
+      }
+
+      return null;
+    }
+
+    async function processScheduledPosting() {
+      if (!schedulerEnabled || isStopped()) return;
+      if (isPostingScheduledContent) return;
+
+      const dueSlot = getDueScheduleSlot();
+      if (!dueSlot) return;
+
+      const post = getNextScheduledPost();
+      if (!post) {
+        log('Scheduler: no media/text pairs available to post');
+        processedScheduleSlots.add(dueSlot.slotKey);
+        return;
+      }
+
+      log('Scheduler due at ' + dueSlot.planned + ' with random offset ' + dueSlot.offsetMinutes + ' min');
+      const posted = await publishScheduledPost(post);
+      if (posted) {
+        processedScheduleSlots.add(dueSlot.slotKey);
+      }
     }
 
     function navigateToDMs() {
@@ -944,15 +1230,31 @@ export function buildInstagramBotScript(config: Configuration): string {
         clearTimeout(pollInterval);
         clearInterval(pollInterval);
       }
+      if (schedulerInterval) {
+        clearInterval(schedulerInterval);
+      }
       window.__SNAPPY_RUNNING__ = false;
       window.__SNAPPY_INSTAGRAM_RUNNING__ = false;
       log('Instagram bot stopped');
     }
 
-    // Start polling
-    log('🚀 Instagram DM bot started - navigating to DMs and monitoring messages');
-    poll();
-    scheduleNextPoll();
+    // Start workers
+    log('Instagram bot started');
+    if (shouldWatchDMs || shouldWatchRequests) {
+      log('DM/request monitoring enabled');
+      poll();
+      scheduleNextPoll();
+    } else {
+      log('DM/request monitoring disabled');
+    }
+
+    if (schedulerEnabled) {
+      log('Post scheduler enabled (local machine time with random +/- 15 minute window)');
+      processScheduledPosting();
+      schedulerInterval = setInterval(() => {
+        processScheduledPosting();
+      }, 30000);
+    }
 
     window.__SNAPPY_STOP__ = stop;
     
@@ -968,3 +1270,4 @@ export function buildInstagramBotScript(config: Configuration): string {
 })();
 `;
 }
+

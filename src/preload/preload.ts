@@ -404,6 +404,46 @@ const electronAPI = {
     ipcRenderer.send('siteSettings:update', siteSettings);
   },
 
+  pickInstagramSchedulerFolder: async (): Promise<{ canceled: boolean; folderPath?: string }> => {
+    return await ipcRenderer.invoke('instagram:scheduler:pickFolder');
+  },
+
+  scanInstagramSchedulerFolder: async (folderPath: string): Promise<{ success: boolean; error?: string; posts: unknown[] }> => {
+    return await ipcRenderer.invoke('instagram:scheduler:scanFolder', folderPath);
+  },
+
+  setInstagramSchedulerFileInput: async (
+    webContentsId: number,
+    filePaths: string[],
+    selector: string = 'input[type="file"]'
+  ): Promise<{ success: boolean; error?: string }> => {
+    return await ipcRenderer.invoke('instagram:scheduler:setFileInputFiles', {
+      webContentsId,
+      filePaths,
+      selector
+    });
+  },
+
+  pickRedditSchedulerFolder: async (): Promise<{ canceled: boolean; folderPath?: string }> => {
+    return await ipcRenderer.invoke('reddit:scheduler:pickFolder');
+  },
+
+  scanRedditSchedulerFolder: async (folderPath: string): Promise<{ success: boolean; error?: string; posts: unknown[] }> => {
+    return await ipcRenderer.invoke('reddit:scheduler:scanFolder', folderPath);
+  },
+
+  setRedditSchedulerFileInput: async (
+    webContentsId: number,
+    filePaths: string[],
+    selector: string = 'input[type="file"]'
+  ): Promise<{ success: boolean; error?: string }> => {
+    return await ipcRenderer.invoke('reddit:scheduler:setFileInputFiles', {
+      webContentsId,
+      filePaths,
+      selector
+    });
+  },
+
   /**
    * Listen for detached window initialization
    */

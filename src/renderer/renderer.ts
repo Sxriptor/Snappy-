@@ -2060,7 +2060,51 @@ interface Config {
     skipOwnComments?: boolean;
     authCookieString?: string;
     sessionCookie?: string;
+    postScheduler?: RedditPostSchedulerSettings;
   };
+}
+
+type SchedulerDayKey = 'monday' | 'tuesday' | 'wednesday' | 'thursday' | 'friday' | 'saturday' | 'sunday';
+
+interface InstagramDaySchedule {
+  enabled: boolean;
+  times: string[];
+}
+
+interface InstagramScheduledPost {
+  id: string;
+  mediaPath: string;
+  textPath: string;
+  caption: string;
+  mediaType: 'image' | 'video';
+}
+
+interface InstagramPostSchedulerSettings {
+  enabled: boolean;
+  folderPath: string;
+  days: Record<SchedulerDayKey, InstagramDaySchedule>;
+  posts: InstagramScheduledPost[];
+}
+
+interface RedditDaySchedule {
+  enabled: boolean;
+  times: string[];
+}
+
+interface RedditScheduledPost {
+  id: string;
+  textPath: string;
+  body: string;
+  mediaPath?: string;
+  mediaType?: 'image' | 'video';
+}
+
+interface RedditPostSchedulerSettings {
+  enabled: boolean;
+  folderPath: string;
+  subreddit: string;
+  days: Record<SchedulerDayKey, RedditDaySchedule>;
+  posts: RedditScheduledPost[];
 }
 
 let isPanelOpen = false;
@@ -3488,9 +3532,161 @@ const siteSettingsHeader = document.querySelector('.site-settings-header')!;
 const siteCollapseBtn = document.getElementById('site-settings-collapse')!;
 const sitePlatformSelect = document.getElementById('site-platform-select') as HTMLSelectElement;
 const saveSiteSettingsBtn = document.getElementById('save-site-settings-btn')!;
+const redditSchedulerOpenBtn = document.getElementById('reddit-open-scheduler') as HTMLButtonElement | null;
+const redditSchedulerOverlay = document.getElementById('reddit-scheduler-overlay') as HTMLDivElement | null;
+const redditSchedulerCloseBtn = document.getElementById('reddit-scheduler-close') as HTMLButtonElement | null;
+const redditSchedulerEnabledInput = document.getElementById('reddit-scheduler-enabled') as HTMLInputElement | null;
+const redditSchedulerSubredditInput = document.getElementById('reddit-scheduler-subreddit') as HTMLInputElement | null;
+const redditSchedulerFolderInput = document.getElementById('reddit-scheduler-folder') as HTMLInputElement | null;
+const redditSchedulerBrowseBtn = document.getElementById('reddit-scheduler-browse') as HTMLButtonElement | null;
+const redditSchedulerDaysContainer = document.getElementById('reddit-scheduler-days') as HTMLDivElement | null;
+const redditSchedulerPreview = document.getElementById('reddit-scheduler-content-preview') as HTMLDivElement | null;
+const instagramSchedulerOpenBtn = document.getElementById('instagram-open-scheduler') as HTMLButtonElement | null;
+const instagramSchedulerOverlay = document.getElementById('instagram-scheduler-overlay') as HTMLDivElement | null;
+const instagramSchedulerCloseBtn = document.getElementById('instagram-scheduler-close') as HTMLButtonElement | null;
+const instagramSchedulerEnabledInput = document.getElementById('instagram-scheduler-enabled') as HTMLInputElement | null;
+const instagramSchedulerFolderInput = document.getElementById('instagram-scheduler-folder') as HTMLInputElement | null;
+const instagramSchedulerBrowseBtn = document.getElementById('instagram-scheduler-browse') as HTMLButtonElement | null;
+const instagramSchedulerDaysContainer = document.getElementById('instagram-scheduler-days') as HTMLDivElement | null;
+const instagramSchedulerPreview = document.getElementById('instagram-scheduler-content-preview') as HTMLDivElement | null;
+
+const schedulerDayKeys: SchedulerDayKey[] = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday'];
+const schedulerDayLabels: Record<SchedulerDayKey, string> = {
+  monday: 'Monday',
+  tuesday: 'Tuesday',
+  wednesday: 'Wednesday',
+  thursday: 'Thursday',
+  friday: 'Friday',
+  saturday: 'Saturday',
+  sunday: 'Sunday'
+};
 
 // Site settings storage
 let currentSiteSettings: any = {};
+let redditSchedulerState: RedditPostSchedulerSettings = createDefaultRedditSchedulerSettings();
+let instagramSchedulerState: InstagramPostSchedulerSettings = createDefaultInstagramSchedulerSettings();
+let siteSettingsAutoSaveTimer: number | null = null;
+
+function createDefaultRedditSchedulerSettings(): RedditPostSchedulerSettings {
+  return {
+    enabled: false,
+    folderPath: '',
+    subreddit: '',
+    days: {
+      monday: { enabled: false, times: ['09:00'] },
+      tuesday: { enabled: false, times: ['09:00'] },
+      wednesday: { enabled: false, times: ['09:00'] },
+      thursday: { enabled: false, times: ['09:00'] },
+      friday: { enabled: false, times: ['09:00'] },
+      saturday: { enabled: false, times: ['09:00'] },
+      sunday: { enabled: false, times: ['09:00'] }
+    },
+    posts: []
+  };
+}
+
+function createDefaultInstagramSchedulerSettings(): InstagramPostSchedulerSettings {
+  return {
+    enabled: false,
+    folderPath: '',
+    days: {
+      monday: { enabled: false, times: ['09:00'] },
+      tuesday: { enabled: false, times: ['09:00'] },
+      wednesday: { enabled: false, times: ['09:00'] },
+      thursday: { enabled: false, times: ['09:00'] },
+      friday: { enabled: false, times: ['09:00'] },
+      saturday: { enabled: false, times: ['09:00'] },
+      sunday: { enabled: false, times: ['09:00'] }
+    },
+    posts: []
+  };
+}
+
+function normalizeSchedulerDay(value: unknown): InstagramDaySchedule {
+  const day = typeof value === 'object' && value !== null ? value as Partial<InstagramDaySchedule> : {};
+  const times = Array.isArray(day.times) ? day.times.filter((item): item is string => typeof item === 'string' && item.trim().length > 0) : [];
+  const normalizedTimes = times.map(t => normalizeTimeValue(t)).filter(Boolean);
+  return {
+    enabled: day.enabled === true,
+    times: normalizedTimes.length > 0 ? normalizedTimes : ['09:00']
+  };
+}
+
+function normalizeTimeValue(raw: string): string {
+  const match = raw.trim().match(/^(\d{1,2}):(\d{2})$/);
+  if (!match) return '';
+  const hour = Math.max(0, Math.min(23, parseInt(match[1], 10)));
+  const minute = Math.max(0, Math.min(59, parseInt(match[2], 10)));
+  return `${hour.toString().padStart(2, '0')}:${minute.toString().padStart(2, '0')}`;
+}
+
+function normalizeInstagramSchedulerSettings(value: unknown): InstagramPostSchedulerSettings {
+  const defaults = createDefaultInstagramSchedulerSettings();
+  const settings = typeof value === 'object' && value !== null ? value as Partial<InstagramPostSchedulerSettings> : {};
+  const normalizedDays = { ...defaults.days };
+
+  for (const day of schedulerDayKeys) {
+    normalizedDays[day] = normalizeSchedulerDay(settings.days?.[day]);
+  }
+
+  const posts = Array.isArray(settings.posts)
+    ? settings.posts.filter((item): item is InstagramScheduledPost => {
+      if (typeof item !== 'object' || item === null) return false;
+      const candidate = item as Partial<InstagramScheduledPost>;
+      return typeof candidate.id === 'string' &&
+        typeof candidate.mediaPath === 'string' &&
+        typeof candidate.textPath === 'string' &&
+        typeof candidate.caption === 'string' &&
+        (candidate.mediaType === 'image' || candidate.mediaType === 'video');
+    })
+    : [];
+
+  return {
+    enabled: settings.enabled === true,
+    folderPath: typeof settings.folderPath === 'string' ? settings.folderPath : '',
+    days: normalizedDays,
+    posts
+  };
+}
+
+function normalizeRedditSchedulerSettings(value: unknown): RedditPostSchedulerSettings {
+  const defaults = createDefaultRedditSchedulerSettings();
+  const settings = typeof value === 'object' && value !== null ? value as Partial<RedditPostSchedulerSettings> : {};
+  const normalizedDays = { ...defaults.days };
+
+  for (const day of schedulerDayKeys) {
+    normalizedDays[day] = normalizeSchedulerDay(settings.days?.[day]);
+  }
+
+  const posts = Array.isArray(settings.posts)
+    ? settings.posts.filter((item): item is RedditScheduledPost => {
+      if (typeof item !== 'object' || item === null) return false;
+      const candidate = item as Partial<RedditScheduledPost>;
+      return typeof candidate.id === 'string' &&
+        typeof candidate.textPath === 'string' &&
+        typeof candidate.body === 'string' &&
+        (candidate.mediaPath === undefined || typeof candidate.mediaPath === 'string') &&
+        (candidate.mediaType === undefined || candidate.mediaType === 'image' || candidate.mediaType === 'video');
+    })
+    : [];
+
+  return {
+    enabled: settings.enabled === true,
+    folderPath: typeof settings.folderPath === 'string' ? settings.folderPath : '',
+    subreddit: typeof settings.subreddit === 'string' ? settings.subreddit : '',
+    days: normalizedDays,
+    posts
+  };
+}
+
+function queueSiteSettingsAutoSave(): void {
+  if (siteSettingsAutoSaveTimer !== null) {
+    window.clearTimeout(siteSettingsAutoSaveTimer);
+  }
+  siteSettingsAutoSaveTimer = window.setTimeout(() => {
+    saveSiteSettings(false);
+  }, 250);
+}
 
 function toggleSiteSettingsCollapse() {
   isSiteSettingsCollapsed = !isSiteSettingsCollapsed;
@@ -3610,6 +3806,16 @@ function loadSiteSettingsForCurrentPlatform() {
   loadSiteSettingsFromStorage(platform);
 }
 
+function getAllSiteSettingsFromStorage(): Record<string, any> {
+  try {
+    const raw = localStorage.getItem('siteSettings');
+    return raw ? JSON.parse(raw) as Record<string, any> : {};
+  } catch (error) {
+    console.error('Error reading site settings from storage:', error);
+    return {};
+  }
+}
+
 function refreshSiteSettingsForSession() {
   // Only refresh if the settings panel is open
   if (!isPanelOpen) return;
@@ -3639,8 +3845,7 @@ function refreshSiteSettingsForSession() {
 
 function loadSiteSettingsFromStorage(platform: string) {
   try {
-    const stored = localStorage.getItem('siteSettings');
-    const allSettings = stored ? JSON.parse(stored) : {};
+    const allSettings = getAllSiteSettingsFromStorage();
     const platformSettings = allSettings[platform] || {};
     
     currentSiteSettings = platformSettings;
@@ -3668,6 +3873,8 @@ function populateSettingsUI(platform: string, settings: any) {
     setCheckboxValue('reddit-skip-own-posts', settings.skipOwnPosts ?? true);
     setTextValue('reddit-cookie-string', settings.authCookieString ?? '');
     setTextValue('reddit-session-cookie', settings.sessionCookie ?? '');
+    redditSchedulerState = normalizeRedditSchedulerSettings(settings.postScheduler);
+    renderRedditSchedulerOverlay();
   }
   
   // Instagram settings
@@ -3677,6 +3884,8 @@ function populateSettingsUI(platform: string, settings: any) {
     setCheckboxValue('instagram-auto-accept', settings.autoAcceptRequests ?? false);
     setNumberValue('instagram-poll-interval', settings.pollIntervalMs ?? 15000);
     setNumberValue('instagram-max-messages', settings.maxMessagesPerPoll ?? 5);
+    instagramSchedulerState = normalizeInstagramSchedulerSettings(settings.postScheduler);
+    renderInstagramSchedulerOverlay();
   }
   
   // Twitter settings
@@ -3706,6 +3915,256 @@ function populateSettingsUI(platform: string, settings: any) {
     setNumberValue('threads-max-comments', settings.maxCommentsPerPoll ?? 5);
   }
 }
+
+function renderSchedulerContentPreview(posts: InstagramScheduledPost[]): void {
+  if (!instagramSchedulerPreview) return;
+  if (posts.length === 0) {
+    instagramSchedulerPreview.textContent = 'No matched content pairs found yet.';
+    return;
+  }
+
+  const previewLines = posts.slice(0, 8).map((post) => `${post.id} -> ${post.mediaType.toUpperCase()}`);
+  const suffix = posts.length > 8 ? `\n...and ${posts.length - 8} more` : '';
+  instagramSchedulerPreview.textContent = `Found ${posts.length} post pair(s):\n${previewLines.join('\n')}${suffix}`;
+}
+
+function renderInstagramSchedulerOverlay(): void {
+  if (!instagramSchedulerEnabledInput || !instagramSchedulerFolderInput || !instagramSchedulerDaysContainer) return;
+
+  instagramSchedulerEnabledInput.checked = instagramSchedulerState.enabled;
+  instagramSchedulerFolderInput.value = instagramSchedulerState.folderPath;
+  renderSchedulerContentPreview(instagramSchedulerState.posts);
+
+  instagramSchedulerDaysContainer.innerHTML = '';
+
+  for (const day of schedulerDayKeys) {
+    const dayState = instagramSchedulerState.days[day];
+    const dayCard = document.createElement('div');
+    dayCard.className = 'scheduler-day';
+    dayCard.dataset.day = day;
+
+    const header = document.createElement('div');
+    header.className = 'scheduler-day-header';
+    const title = document.createElement('div');
+    title.className = 'scheduler-day-title';
+    title.textContent = schedulerDayLabels[day];
+
+    const toggleWrap = document.createElement('label');
+    toggleWrap.className = 'checkbox';
+    const toggle = document.createElement('input');
+    toggle.type = 'checkbox';
+    toggle.checked = dayState.enabled;
+    toggle.dataset.schedulerAction = 'toggle-day';
+    toggle.dataset.day = day;
+    const checkmark = document.createElement('span');
+    checkmark.className = 'checkmark';
+    toggleWrap.append(toggle, checkmark);
+    header.append(title, toggleWrap);
+    dayCard.appendChild(header);
+
+    const timesContainer = document.createElement('div');
+    timesContainer.className = 'scheduler-times';
+
+    dayState.times.forEach((timeValue, index) => {
+      const row = document.createElement('div');
+      row.className = 'scheduler-time-row';
+      row.dataset.day = day;
+      row.dataset.index = index.toString();
+
+      const timeInput = document.createElement('input');
+      timeInput.type = 'time';
+      timeInput.value = normalizeTimeValue(timeValue) || '09:00';
+      timeInput.dataset.schedulerAction = 'time';
+      timeInput.dataset.day = day;
+      timeInput.dataset.index = index.toString();
+      row.appendChild(timeInput);
+
+      const removeBtn = document.createElement('button');
+      removeBtn.className = 'btn scheduler-time-remove';
+      removeBtn.type = 'button';
+      removeBtn.textContent = '-';
+      removeBtn.dataset.schedulerAction = 'remove-time';
+      removeBtn.dataset.day = day;
+      removeBtn.dataset.index = index.toString();
+      removeBtn.disabled = dayState.times.length <= 1;
+      row.appendChild(removeBtn);
+
+      if (index === dayState.times.length - 1) {
+        const addBtn = document.createElement('button');
+        addBtn.className = 'btn scheduler-time-add';
+        addBtn.type = 'button';
+        addBtn.textContent = '+';
+        addBtn.dataset.schedulerAction = 'add-time';
+        addBtn.dataset.day = day;
+        row.appendChild(addBtn);
+      }
+
+      timesContainer.appendChild(row);
+    });
+
+    dayCard.appendChild(timesContainer);
+    instagramSchedulerDaysContainer.appendChild(dayCard);
+  }
+}
+
+async function refreshInstagramSchedulerFolder(folderPath: string): Promise<void> {
+  if (!folderPath || !(window as any).electronAPI?.scanInstagramSchedulerFolder) {
+    instagramSchedulerState.posts = [];
+    renderSchedulerContentPreview(instagramSchedulerState.posts);
+    return;
+  }
+
+  const result = await (window as any).electronAPI.scanInstagramSchedulerFolder(folderPath);
+  if (result?.success) {
+    instagramSchedulerState.posts = Array.isArray(result.posts) ? result.posts as InstagramScheduledPost[] : [];
+    renderSchedulerContentPreview(instagramSchedulerState.posts);
+    queueSiteSettingsAutoSave();
+  } else {
+    instagramSchedulerState.posts = [];
+    renderSchedulerContentPreview(instagramSchedulerState.posts);
+    addLog(`Scheduler folder scan failed: ${result?.error || 'Unknown error'}`, 'error');
+  }
+}
+
+function openInstagramSchedulerOverlay(): void {
+  if (!instagramSchedulerOverlay) return;
+  instagramSchedulerOverlay.classList.remove('hidden');
+  renderInstagramSchedulerOverlay();
+}
+
+function closeInstagramSchedulerOverlay(): void {
+  if (!instagramSchedulerOverlay) return;
+  instagramSchedulerOverlay.classList.add('hidden');
+}
+
+function normalizeSubredditValue(raw: string): string {
+  const trimmed = String(raw || '').trim();
+  if (!trimmed) return '';
+  return trimmed.replace(/^r\//i, '').replace(/^\/+|\/+$/g, '');
+}
+
+function renderRedditSchedulerContentPreview(posts: RedditScheduledPost[]): void {
+  if (!redditSchedulerPreview) return;
+  if (posts.length === 0) {
+    redditSchedulerPreview.textContent = 'No scheduled text posts found yet.';
+    return;
+  }
+
+  const previewLines = posts.slice(0, 8).map((post) => `${post.id} -> ${post.mediaType ? post.mediaType.toUpperCase() : 'TEXT'}`);
+  const suffix = posts.length > 8 ? `\n...and ${posts.length - 8} more` : '';
+  redditSchedulerPreview.textContent = `Found ${posts.length} scheduled post(s):\n${previewLines.join('\n')}${suffix}`;
+}
+
+function renderRedditSchedulerOverlay(): void {
+  if (!redditSchedulerEnabledInput || !redditSchedulerFolderInput || !redditSchedulerSubredditInput || !redditSchedulerDaysContainer) return;
+
+  redditSchedulerEnabledInput.checked = redditSchedulerState.enabled;
+  redditSchedulerSubredditInput.value = redditSchedulerState.subreddit;
+  redditSchedulerFolderInput.value = redditSchedulerState.folderPath;
+  renderRedditSchedulerContentPreview(redditSchedulerState.posts);
+
+  redditSchedulerDaysContainer.innerHTML = '';
+
+  for (const day of schedulerDayKeys) {
+    const dayState = redditSchedulerState.days[day];
+    const dayCard = document.createElement('div');
+    dayCard.className = 'scheduler-day';
+    dayCard.dataset.day = day;
+
+    const header = document.createElement('div');
+    header.className = 'scheduler-day-header';
+    const title = document.createElement('div');
+    title.className = 'scheduler-day-title';
+    title.textContent = schedulerDayLabels[day];
+
+    const toggleWrap = document.createElement('label');
+    toggleWrap.className = 'checkbox';
+    const toggle = document.createElement('input');
+    toggle.type = 'checkbox';
+    toggle.checked = dayState.enabled;
+    toggle.dataset.redditSchedulerAction = 'toggle-day';
+    toggle.dataset.day = day;
+    const checkmark = document.createElement('span');
+    checkmark.className = 'checkmark';
+    toggleWrap.append(toggle, checkmark);
+    header.append(title, toggleWrap);
+    dayCard.appendChild(header);
+
+    const timesContainer = document.createElement('div');
+    timesContainer.className = 'scheduler-times';
+
+    dayState.times.forEach((timeValue, index) => {
+      const row = document.createElement('div');
+      row.className = 'scheduler-time-row';
+      row.dataset.day = day;
+      row.dataset.index = index.toString();
+
+      const timeInput = document.createElement('input');
+      timeInput.type = 'time';
+      timeInput.value = normalizeTimeValue(timeValue) || '09:00';
+      timeInput.dataset.redditSchedulerAction = 'time';
+      timeInput.dataset.day = day;
+      timeInput.dataset.index = index.toString();
+      row.appendChild(timeInput);
+
+      const removeBtn = document.createElement('button');
+      removeBtn.className = 'btn scheduler-time-remove';
+      removeBtn.type = 'button';
+      removeBtn.textContent = '-';
+      removeBtn.dataset.redditSchedulerAction = 'remove-time';
+      removeBtn.dataset.day = day;
+      removeBtn.dataset.index = index.toString();
+      removeBtn.disabled = dayState.times.length <= 1;
+      row.appendChild(removeBtn);
+
+      if (index === dayState.times.length - 1) {
+        const addBtn = document.createElement('button');
+        addBtn.className = 'btn scheduler-time-add';
+        addBtn.type = 'button';
+        addBtn.textContent = '+';
+        addBtn.dataset.redditSchedulerAction = 'add-time';
+        addBtn.dataset.day = day;
+        row.appendChild(addBtn);
+      }
+
+      timesContainer.appendChild(row);
+    });
+
+    dayCard.appendChild(timesContainer);
+    redditSchedulerDaysContainer.appendChild(dayCard);
+  }
+}
+
+async function refreshRedditSchedulerFolder(folderPath: string): Promise<void> {
+  if (!folderPath || !(window as any).electronAPI?.scanRedditSchedulerFolder) {
+    redditSchedulerState.posts = [];
+    renderRedditSchedulerContentPreview(redditSchedulerState.posts);
+    return;
+  }
+
+  const result = await (window as any).electronAPI.scanRedditSchedulerFolder(folderPath);
+  if (result?.success) {
+    redditSchedulerState.posts = Array.isArray(result.posts) ? result.posts as RedditScheduledPost[] : [];
+    renderRedditSchedulerContentPreview(redditSchedulerState.posts);
+    queueSiteSettingsAutoSave();
+  } else {
+    redditSchedulerState.posts = [];
+    renderRedditSchedulerContentPreview(redditSchedulerState.posts);
+    addLog(`Reddit scheduler folder scan failed: ${result?.error || 'Unknown error'}`, 'error');
+  }
+}
+
+function openRedditSchedulerOverlay(): void {
+  if (!redditSchedulerOverlay) return;
+  redditSchedulerOverlay.classList.remove('hidden');
+  renderRedditSchedulerOverlay();
+}
+
+function closeRedditSchedulerOverlay(): void {
+  if (!redditSchedulerOverlay) return;
+  redditSchedulerOverlay.classList.add('hidden');
+}
+
 
 function setCheckboxValue(id: string, value: boolean) {
   const checkbox = document.getElementById(id) as HTMLInputElement;
@@ -3755,6 +4214,7 @@ function collectCurrentSettings(platform: string): any {
     settings.skipOwnPosts = getCheckboxValue('reddit-skip-own-posts');
     settings.authCookieString = getTextValue('reddit-cookie-string');
     settings.sessionCookie = getTextValue('reddit-session-cookie');
+    settings.postScheduler = normalizeRedditSchedulerSettings(redditSchedulerState);
   }
   
   if (platform === 'instagram') {
@@ -3763,6 +4223,7 @@ function collectCurrentSettings(platform: string): any {
     settings.autoAcceptRequests = getCheckboxValue('instagram-auto-accept');
     settings.pollIntervalMs = getNumberValue('instagram-poll-interval');
     settings.maxMessagesPerPoll = getNumberValue('instagram-max-messages');
+    settings.postScheduler = normalizeInstagramSchedulerSettings(instagramSchedulerState);
   }
   
   if (platform === 'twitter') {
@@ -3792,14 +4253,13 @@ function collectCurrentSettings(platform: string): any {
   return settings;
 }
 
-function saveSiteSettings() {
+function saveSiteSettings(showLog: boolean = true) {
   try {
     const platform = sitePlatformSelect.value;
     const settings = collectCurrentSettings(platform);
     
     // Load existing settings
-    const stored = localStorage.getItem('siteSettings');
-    const allSettings = stored ? JSON.parse(stored) : {};
+    const allSettings = getAllSiteSettingsFromStorage();
     
     // Update settings for current platform
     allSettings[platform] = settings;
@@ -3809,7 +4269,9 @@ function saveSiteSettings() {
     
     currentSiteSettings = settings;
     
-    addLog(`Site settings saved for ${platform}`, 'success');
+    if (showLog) {
+      addLog(`Site settings saved for ${platform}`, 'success');
+    }
     
     // Send settings to main process for bot configuration
     (window as any).electronAPI.updateSiteSettings(allSettings);
@@ -3821,14 +4283,8 @@ function saveSiteSettings() {
 }
 
 function getStoredPlatformSiteSettings(platform: string): any {
-  try {
-    const raw = localStorage.getItem('siteSettings');
-    const allSettings = raw ? JSON.parse(raw) : {};
-    return allSettings[platform] || {};
-  } catch (error) {
-    console.error('Error reading site settings from storage:', error);
-    return {};
-  }
+  const allSettings = getAllSiteSettingsFromStorage();
+  return allSettings[platform] || {};
 }
 
 function applySiteSettingsToConfig(baseConfig: Config, hostname: string): Config {
@@ -3906,7 +4362,222 @@ sitePlatformSelect.addEventListener('change', (e) => {
   loadSiteSettingsFromStorage(platform);
 });
 
-saveSiteSettingsBtn.addEventListener('click', saveSiteSettings);
+saveSiteSettingsBtn.addEventListener('click', () => saveSiteSettings(true));
+
+const siteSettingsContent = document.getElementById('site-settings-content');
+if (siteSettingsContent) {
+  siteSettingsContent.addEventListener('change', () => queueSiteSettingsAutoSave());
+  siteSettingsContent.addEventListener('input', (e) => {
+    const target = e.target as HTMLElement | null;
+    if (!target) return;
+    if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.tagName === 'SELECT') {
+      queueSiteSettingsAutoSave();
+    }
+  });
+}
+
+if (instagramSchedulerOpenBtn) {
+  instagramSchedulerOpenBtn.addEventListener('click', () => {
+    instagramSchedulerState = normalizeInstagramSchedulerSettings(getStoredPlatformSiteSettings('instagram').postScheduler);
+    openInstagramSchedulerOverlay();
+  });
+}
+
+if (redditSchedulerOpenBtn) {
+  redditSchedulerOpenBtn.addEventListener('click', () => {
+    redditSchedulerState = normalizeRedditSchedulerSettings(getStoredPlatformSiteSettings('reddit').postScheduler);
+    openRedditSchedulerOverlay();
+  });
+}
+
+if (redditSchedulerCloseBtn) {
+  redditSchedulerCloseBtn.addEventListener('click', closeRedditSchedulerOverlay);
+}
+
+if (redditSchedulerOverlay) {
+  redditSchedulerOverlay.addEventListener('click', (e) => {
+    if (e.target === redditSchedulerOverlay) {
+      closeRedditSchedulerOverlay();
+    }
+  });
+}
+
+if (redditSchedulerEnabledInput) {
+  redditSchedulerEnabledInput.addEventListener('change', () => {
+    redditSchedulerState.enabled = redditSchedulerEnabledInput.checked;
+    queueSiteSettingsAutoSave();
+  });
+}
+
+if (redditSchedulerSubredditInput) {
+  redditSchedulerSubredditInput.addEventListener('change', () => {
+    redditSchedulerState.subreddit = normalizeSubredditValue(redditSchedulerSubredditInput.value);
+    redditSchedulerSubredditInput.value = redditSchedulerState.subreddit;
+    queueSiteSettingsAutoSave();
+  });
+}
+
+if (redditSchedulerFolderInput) {
+  redditSchedulerFolderInput.addEventListener('change', async () => {
+    redditSchedulerState.folderPath = redditSchedulerFolderInput.value.trim();
+    await refreshRedditSchedulerFolder(redditSchedulerState.folderPath);
+    queueSiteSettingsAutoSave();
+  });
+}
+
+if (redditSchedulerBrowseBtn) {
+  redditSchedulerBrowseBtn.addEventListener('click', async () => {
+    const picker = await (window as any).electronAPI?.pickRedditSchedulerFolder?.();
+    if (!picker || picker.canceled || !picker.folderPath) return;
+    redditSchedulerState.folderPath = picker.folderPath;
+    if (redditSchedulerFolderInput) {
+      redditSchedulerFolderInput.value = picker.folderPath;
+    }
+    await refreshRedditSchedulerFolder(picker.folderPath);
+    queueSiteSettingsAutoSave();
+  });
+}
+
+if (redditSchedulerDaysContainer) {
+  redditSchedulerDaysContainer.addEventListener('click', (e) => {
+    const target = e.target as HTMLElement | null;
+    if (!target) return;
+    const action = target.dataset.redditSchedulerAction;
+    const day = target.dataset.day as SchedulerDayKey | undefined;
+    if (!action || !day || !redditSchedulerState.days[day]) return;
+
+    if (action === 'add-time') {
+      redditSchedulerState.days[day].times.push('09:00');
+      renderRedditSchedulerOverlay();
+      queueSiteSettingsAutoSave();
+      return;
+    }
+
+    if (action === 'remove-time') {
+      const index = Number(target.dataset.index);
+      if (Number.isFinite(index) && redditSchedulerState.days[day].times.length > 1) {
+        redditSchedulerState.days[day].times.splice(index, 1);
+        renderRedditSchedulerOverlay();
+        queueSiteSettingsAutoSave();
+      }
+    }
+  });
+
+  redditSchedulerDaysContainer.addEventListener('change', (e) => {
+    const target = e.target as HTMLInputElement | null;
+    if (!target) return;
+    const action = target.dataset.redditSchedulerAction;
+    const day = target.dataset.day as SchedulerDayKey | undefined;
+    if (!action || !day || !redditSchedulerState.days[day]) return;
+
+    if (action === 'toggle-day') {
+      redditSchedulerState.days[day].enabled = target.checked;
+      queueSiteSettingsAutoSave();
+      return;
+    }
+
+    if (action === 'time') {
+      const index = Number(target.dataset.index);
+      if (Number.isFinite(index)) {
+        const normalized = normalizeTimeValue(target.value) || '09:00';
+        redditSchedulerState.days[day].times[index] = normalized;
+        target.value = normalized;
+        queueSiteSettingsAutoSave();
+      }
+    }
+  });
+}
+
+if (instagramSchedulerCloseBtn) {
+  instagramSchedulerCloseBtn.addEventListener('click', closeInstagramSchedulerOverlay);
+}
+
+if (instagramSchedulerOverlay) {
+  instagramSchedulerOverlay.addEventListener('click', (e) => {
+    if (e.target === instagramSchedulerOverlay) {
+      closeInstagramSchedulerOverlay();
+    }
+  });
+}
+
+if (instagramSchedulerEnabledInput) {
+  instagramSchedulerEnabledInput.addEventListener('change', () => {
+    instagramSchedulerState.enabled = instagramSchedulerEnabledInput.checked;
+    queueSiteSettingsAutoSave();
+  });
+}
+
+if (instagramSchedulerFolderInput) {
+  instagramSchedulerFolderInput.addEventListener('change', async () => {
+    instagramSchedulerState.folderPath = instagramSchedulerFolderInput.value.trim();
+    await refreshInstagramSchedulerFolder(instagramSchedulerState.folderPath);
+    queueSiteSettingsAutoSave();
+  });
+}
+
+if (instagramSchedulerBrowseBtn) {
+  instagramSchedulerBrowseBtn.addEventListener('click', async () => {
+    const picker = await (window as any).electronAPI?.pickInstagramSchedulerFolder?.();
+    if (!picker || picker.canceled || !picker.folderPath) return;
+    instagramSchedulerState.folderPath = picker.folderPath;
+    if (instagramSchedulerFolderInput) {
+      instagramSchedulerFolderInput.value = picker.folderPath;
+    }
+    await refreshInstagramSchedulerFolder(picker.folderPath);
+    queueSiteSettingsAutoSave();
+  });
+}
+
+if (instagramSchedulerDaysContainer) {
+  instagramSchedulerDaysContainer.addEventListener('click', (e) => {
+    const target = e.target as HTMLElement | null;
+    if (!target) return;
+    const action = target.dataset.schedulerAction;
+    const day = target.dataset.day as SchedulerDayKey | undefined;
+    if (!action || !day || !instagramSchedulerState.days[day]) return;
+
+    if (action === 'add-time') {
+      instagramSchedulerState.days[day].times.push('09:00');
+      renderInstagramSchedulerOverlay();
+      queueSiteSettingsAutoSave();
+      return;
+    }
+
+    if (action === 'remove-time') {
+      const index = Number(target.dataset.index);
+      if (Number.isFinite(index) && instagramSchedulerState.days[day].times.length > 1) {
+        instagramSchedulerState.days[day].times.splice(index, 1);
+        renderInstagramSchedulerOverlay();
+        queueSiteSettingsAutoSave();
+      }
+    }
+  });
+
+  instagramSchedulerDaysContainer.addEventListener('change', (e) => {
+    const target = e.target as HTMLInputElement | null;
+    if (!target) return;
+    const action = target.dataset.schedulerAction;
+    const day = target.dataset.day as SchedulerDayKey | undefined;
+    if (!action || !day || !instagramSchedulerState.days[day]) return;
+
+    if (action === 'toggle-day') {
+      instagramSchedulerState.days[day].enabled = target.checked;
+      queueSiteSettingsAutoSave();
+      return;
+    }
+
+    if (action === 'time') {
+      const index = Number(target.dataset.index);
+      if (Number.isFinite(index)) {
+        const normalized = normalizeTimeValue(target.value) || '09:00';
+        instagramSchedulerState.days[day].times[index] = normalized;
+        target.value = normalized;
+        queueSiteSettingsAutoSave();
+      }
+    }
+  });
+}
+
 
 // Keyboard shortcut: Arrow Up to collapse site settings
 document.addEventListener('keydown', (e) => {
@@ -6171,6 +6842,118 @@ setInterval(async () => {
     // Ignore errors
   }
 }, 1000);
+
+// Track upload requests per session to avoid duplicate handling
+const processingInstagramUploadRequests = new Map<string, string>();
+const processingRedditUploadRequests = new Map<string, string>();
+
+// Poll for pending Instagram scheduler upload requests and set file input via main process
+setInterval(async () => {
+  if (!isBotActive) return;
+  if (!(window as any).electronAPI?.setInstagramSchedulerFileInput) return;
+
+  for (const [sessionId, targetWebview] of sessionWebviews.entries()) {
+    const activeRequestId = processingInstagramUploadRequests.get(sessionId);
+    if (activeRequestId) continue;
+
+    try {
+      const request = await targetWebview.executeJavaScript(`
+        (function() {
+          if (window.__SNAPPY_IG_UPLOAD_REQUEST__) {
+            return window.__SNAPPY_IG_UPLOAD_REQUEST__;
+          }
+          return null;
+        })();
+      `);
+
+      if (!request || !request.id || !Array.isArray(request.filePaths) || request.filePaths.length === 0) {
+        continue;
+      }
+
+      processingInstagramUploadRequests.set(sessionId, request.id);
+      await targetWebview.executeJavaScript('window.__SNAPPY_IG_UPLOAD_REQUEST__ = null;');
+
+      const targetContentsId = targetWebview.getWebContentsId();
+      const result = await (window as any).electronAPI.setInstagramSchedulerFileInput(
+        targetContentsId,
+        request.filePaths,
+        typeof request.selector === 'string' ? request.selector : 'input[type="file"]'
+      );
+
+      await targetWebview.executeJavaScript(`
+        window.__SNAPPY_IG_UPLOAD_RESPONSE__ = {
+          id: ${JSON.stringify(request.id)},
+          success: ${result?.success === true ? 'true' : 'false'},
+          error: ${JSON.stringify(result?.error || '')}
+        };
+      `);
+
+      if (result?.success) {
+        addLog(`Instagram scheduler media attached for ${getSessionName(sessionId)}`, 'success', sessionId);
+      } else {
+        addLog(`Instagram scheduler upload failed: ${result?.error || 'Unknown error'}`, 'error', sessionId);
+      }
+    } catch {
+      // Ignore per-webview polling errors.
+    } finally {
+      processingInstagramUploadRequests.delete(sessionId);
+    }
+  }
+}, 500);
+
+// Poll for pending Reddit scheduler upload requests and set file input via main process
+setInterval(async () => {
+  if (!isBotActive) return;
+  if (!(window as any).electronAPI?.setRedditSchedulerFileInput) return;
+
+  for (const [sessionId, targetWebview] of sessionWebviews.entries()) {
+    const activeRequestId = processingRedditUploadRequests.get(sessionId);
+    if (activeRequestId) continue;
+
+    try {
+      const request = await targetWebview.executeJavaScript(`
+        (function() {
+          if (window.__SNAPPY_REDDIT_UPLOAD_REQUEST__) {
+            return window.__SNAPPY_REDDIT_UPLOAD_REQUEST__;
+          }
+          return null;
+        })();
+      `);
+
+      if (!request || !request.id || !Array.isArray(request.filePaths) || request.filePaths.length === 0) {
+        continue;
+      }
+
+      processingRedditUploadRequests.set(sessionId, request.id);
+      await targetWebview.executeJavaScript('window.__SNAPPY_REDDIT_UPLOAD_REQUEST__ = null;');
+
+      const targetContentsId = targetWebview.getWebContentsId();
+      const result = await (window as any).electronAPI.setRedditSchedulerFileInput(
+        targetContentsId,
+        request.filePaths,
+        typeof request.selector === 'string' ? request.selector : 'input[type="file"]'
+      );
+
+      await targetWebview.executeJavaScript(`
+        window.__SNAPPY_REDDIT_UPLOAD_RESPONSE__ = {
+          id: ${JSON.stringify(request.id)},
+          success: ${result?.success === true ? 'true' : 'false'},
+          error: ${JSON.stringify(result?.error || '')}
+        };
+      `);
+
+      if (result?.success) {
+        addLog(`Reddit scheduler media attached for ${getSessionName(sessionId)}`, 'success', sessionId);
+      } else {
+        addLog(`Reddit scheduler upload failed: ${result?.error || 'Unknown error'}`, 'error', sessionId);
+      }
+    } catch {
+      // Ignore per-webview polling errors.
+    } finally {
+      processingRedditUploadRequests.delete(sessionId);
+    }
+  }
+}, 500);
 
 // Track currently processing AI request to prevent duplicates
 let processingAIRequest: string | null = null;

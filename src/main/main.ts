@@ -3,7 +3,7 @@
  * Responsible for window management, script injection, and configuration
  */
 
-import { app, BrowserWindow, ipcMain, session, shell } from 'electron';
+import { app, BrowserWindow, ipcMain, session, shell, dialog, webContents } from 'electron';
 import { autoUpdater } from 'electron-updater';
 import * as path from 'path';
 import * as fs from 'fs';
@@ -317,6 +317,318 @@ export function setupIPCHandlers(): void {
       console.log('[Shell] Site settings updated:', siteSettings);
     } catch (error) {
       console.error('[Shell] Error updating site settings:', error);
+    }
+  });
+
+  ipcMain.handle('instagram:scheduler:pickFolder', async () => {
+    if (!mainWindow) {
+      return { canceled: true };
+    }
+
+    const result = await dialog.showOpenDialog(mainWindow, {
+      properties: ['openDirectory']
+    });
+
+    if (result.canceled || result.filePaths.length === 0) {
+      return { canceled: true };
+    }
+
+    return {
+      canceled: false,
+      folderPath: result.filePaths[0]
+    };
+  });
+
+  ipcMain.handle('instagram:scheduler:scanFolder', async (_event, folderPath: unknown) => {
+    try {
+      if (typeof folderPath !== 'string' || folderPath.trim().length === 0) {
+        return { success: false, error: 'Folder path is required', posts: [] };
+      }
+
+      if (!fs.existsSync(folderPath)) {
+        return { success: false, error: 'Folder does not exist', posts: [] };
+      }
+
+      const stat = fs.statSync(folderPath);
+      if (!stat.isDirectory()) {
+        return { success: false, error: 'Path is not a directory', posts: [] };
+      }
+
+      const mediaExtensions = new Set([
+        '.jpg',
+        '.jpeg',
+        '.png',
+        '.webp',
+        '.mp4',
+        '.mov',
+        '.webm',
+        '.mkv'
+      ]);
+
+      const files = fs.readdirSync(folderPath, { withFileTypes: true }).filter(entry => entry.isFile());
+      const buckets = new Map<string, { media: string[]; text: string | null }>();
+
+      for (const file of files) {
+        const ext = path.extname(file.name).toLowerCase();
+        const base = path.basename(file.name, ext);
+        if (!base) continue;
+
+        if (!buckets.has(base)) {
+          buckets.set(base, { media: [], text: null });
+        }
+
+        const bucket = buckets.get(base)!;
+        if (mediaExtensions.has(ext)) {
+          bucket.media.push(file.name);
+        } else if (ext === '.txt') {
+          bucket.text = file.name;
+        }
+      }
+
+      const posts = Array.from(buckets.entries())
+        .filter(([, bucket]) => bucket.media.length > 0 && bucket.text !== null)
+        .sort((a, b) => a[0].localeCompare(b[0], undefined, { numeric: true, sensitivity: 'base' }))
+        .map(([id, bucket]) => {
+          const mediaFile = bucket.media.sort((a, b) => a.localeCompare(b, undefined, { numeric: true }))[0];
+          const mediaPath = path.join(folderPath, mediaFile);
+          const textPath = path.join(folderPath, bucket.text!);
+          const caption = fs.readFileSync(textPath, 'utf-8').trim();
+          const mediaExt = path.extname(mediaFile).toLowerCase();
+          const mediaType = ['.mp4', '.mov', '.webm', '.mkv'].includes(mediaExt) ? 'video' : 'image';
+          return {
+            id,
+            mediaPath,
+            textPath,
+            caption,
+            mediaType
+          };
+        });
+
+      return { success: true, posts };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return { success: false, error: message, posts: [] };
+    }
+  });
+
+  ipcMain.handle('instagram:scheduler:setFileInputFiles', async (_event, payload: unknown) => {
+    let attachedHere = false;
+    let targetWebContentsRef: any = null;
+    try {
+      const data = (payload || {}) as { webContentsId?: number; filePaths?: string[]; selector?: string };
+      const targetId = typeof data.webContentsId === 'number' ? data.webContentsId : 0;
+      const filePaths = Array.isArray(data.filePaths) ? data.filePaths.filter((item): item is string => typeof item === 'string' && item.length > 0) : [];
+      const selector = typeof data.selector === 'string' && data.selector.trim().length > 0
+        ? data.selector.trim()
+        : 'input[type="file"]';
+
+      if (!targetId || filePaths.length === 0) {
+        return { success: false, error: 'Invalid webContentsId or filePaths' };
+      }
+
+      const targetWebContents = webContents.fromId(targetId);
+      if (!targetWebContents || targetWebContents.isDestroyed()) {
+        return { success: false, error: 'Target webContents not found' };
+      }
+      targetWebContentsRef = targetWebContents;
+
+      if (!targetWebContents.debugger.isAttached()) {
+        targetWebContents.debugger.attach('1.3');
+        attachedHere = true;
+      }
+
+      const doc = await targetWebContents.debugger.sendCommand('DOM.getDocument', { depth: -1, pierce: true });
+      const rootNodeId = doc?.root?.nodeId;
+      if (!rootNodeId) {
+        if (attachedHere && targetWebContents.debugger.isAttached()) {
+          targetWebContents.debugger.detach();
+        }
+        return { success: false, error: 'Could not resolve DOM root node' };
+      }
+
+      const queryResult = await targetWebContents.debugger.sendCommand('DOM.querySelector', {
+        nodeId: rootNodeId,
+        selector
+      });
+
+      if (!queryResult?.nodeId) {
+        if (attachedHere && targetWebContents.debugger.isAttached()) {
+          targetWebContents.debugger.detach();
+        }
+        return { success: false, error: 'File input element not found' };
+      }
+
+      await targetWebContents.debugger.sendCommand('DOM.setFileInputFiles', {
+        nodeId: queryResult.nodeId,
+        files: filePaths
+      });
+
+      if (attachedHere && targetWebContents.debugger.isAttached()) {
+        targetWebContents.debugger.detach();
+      }
+
+      return { success: true };
+    } catch (error) {
+      try {
+        if (attachedHere && targetWebContentsRef && targetWebContentsRef.debugger.isAttached()) {
+          targetWebContentsRef.debugger.detach();
+        }
+      } catch {}
+      const message = error instanceof Error ? error.message : String(error);
+      return { success: false, error: message };
+    }
+  });
+
+  ipcMain.handle('reddit:scheduler:pickFolder', async () => {
+    if (!mainWindow) {
+      return { canceled: true };
+    }
+
+    const result = await dialog.showOpenDialog(mainWindow, {
+      properties: ['openDirectory']
+    });
+
+    if (result.canceled || result.filePaths.length === 0) {
+      return { canceled: true };
+    }
+
+    return {
+      canceled: false,
+      folderPath: result.filePaths[0]
+    };
+  });
+
+  ipcMain.handle('reddit:scheduler:scanFolder', async (_event, folderPath: unknown) => {
+    try {
+      if (typeof folderPath !== 'string' || folderPath.trim().length === 0) {
+        return { success: false, error: 'Folder path is required', posts: [] };
+      }
+
+      if (!fs.existsSync(folderPath)) {
+        return { success: false, error: 'Folder does not exist', posts: [] };
+      }
+
+      const stat = fs.statSync(folderPath);
+      if (!stat.isDirectory()) {
+        return { success: false, error: 'Path is not a directory', posts: [] };
+      }
+
+      const mediaExtensions = new Set([
+        '.jpg',
+        '.jpeg',
+        '.png',
+        '.webp',
+        '.gif',
+        '.mp4',
+        '.mov',
+        '.webm',
+        '.mkv'
+      ]);
+
+      const files = fs.readdirSync(folderPath, { withFileTypes: true }).filter(entry => entry.isFile());
+      const buckets = new Map<string, { media: string[]; text: string | null }>();
+
+      for (const file of files) {
+        const ext = path.extname(file.name).toLowerCase();
+        const base = path.basename(file.name, ext);
+        if (!base) continue;
+
+        if (!buckets.has(base)) {
+          buckets.set(base, { media: [], text: null });
+        }
+
+        const bucket = buckets.get(base)!;
+        if (mediaExtensions.has(ext)) {
+          bucket.media.push(file.name);
+        } else if (ext === '.txt') {
+          bucket.text = file.name;
+        }
+      }
+
+      const posts = Array.from(buckets.entries())
+        .filter(([, bucket]) => bucket.text !== null)
+        .sort((a, b) => a[0].localeCompare(b[0], undefined, { numeric: true, sensitivity: 'base' }))
+        .map(([id, bucket]) => {
+          const mediaFile = bucket.media.sort((a, b) => a.localeCompare(b, undefined, { numeric: true }))[0] || '';
+          const textPath = path.join(folderPath, bucket.text!);
+          const body = fs.readFileSync(textPath, 'utf-8').trim();
+          const mediaPath = mediaFile ? path.join(folderPath, mediaFile) : '';
+          const mediaExt = path.extname(mediaFile).toLowerCase();
+          const mediaType = ['.mp4', '.mov', '.webm', '.mkv'].includes(mediaExt) ? 'video' : 'image';
+          return {
+            id,
+            textPath,
+            body,
+            mediaPath: mediaPath || undefined,
+            mediaType: mediaFile ? mediaType : undefined
+          };
+        });
+
+      return { success: true, posts };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return { success: false, error: message, posts: [] };
+    }
+  });
+
+  ipcMain.handle('reddit:scheduler:setFileInputFiles', async (_event, payload: unknown) => {
+    try {
+      const data = (payload || {}) as { webContentsId?: number; filePaths?: string[]; selector?: string };
+      const targetId = typeof data.webContentsId === 'number' ? data.webContentsId : 0;
+      const filePaths = Array.isArray(data.filePaths) ? data.filePaths.filter((item): item is string => typeof item === 'string' && item.length > 0) : [];
+      const selector = typeof data.selector === 'string' && data.selector.trim().length > 0
+        ? data.selector.trim()
+        : 'input[type="file"]';
+
+      if (!targetId || filePaths.length === 0) {
+        return { success: false, error: 'Invalid webContentsId or filePaths' };
+      }
+
+      const targetWebContents = webContents.fromId(targetId);
+      if (!targetWebContents || targetWebContents.isDestroyed()) {
+        return { success: false, error: 'Target webContents not found' };
+      }
+
+      let attachedHere = false;
+      if (!targetWebContents.debugger.isAttached()) {
+        targetWebContents.debugger.attach('1.3');
+        attachedHere = true;
+      }
+
+      const doc = await targetWebContents.debugger.sendCommand('DOM.getDocument', { depth: -1, pierce: true });
+      const rootNodeId = doc?.root?.nodeId;
+      if (!rootNodeId) {
+        if (attachedHere && targetWebContents.debugger.isAttached()) {
+          targetWebContents.debugger.detach();
+        }
+        return { success: false, error: 'Could not resolve DOM root node' };
+      }
+
+      const queryResult = await targetWebContents.debugger.sendCommand('DOM.querySelector', {
+        nodeId: rootNodeId,
+        selector
+      });
+
+      if (!queryResult?.nodeId) {
+        if (attachedHere && targetWebContents.debugger.isAttached()) {
+          targetWebContents.debugger.detach();
+        }
+        return { success: false, error: 'File input element not found' };
+      }
+
+      await targetWebContents.debugger.sendCommand('DOM.setFileInputFiles', {
+        nodeId: queryResult.nodeId,
+        files: filePaths
+      });
+
+      if (attachedHere && targetWebContents.debugger.isAttached()) {
+        targetWebContents.debugger.detach();
+      }
+
+      return { success: true };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return { success: false, error: message };
     }
   });
 

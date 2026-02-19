@@ -40,6 +40,27 @@ export interface Configuration {
     maxItemsPerPoll?: number;
     authCookieString?: string;
     sessionCookie?: string;
+    postScheduler?: {
+      enabled?: boolean;
+      folderPath?: string;
+      subreddit?: string;
+      days?: {
+        monday?: { enabled?: boolean; times?: string[] };
+        tuesday?: { enabled?: boolean; times?: string[] };
+        wednesday?: { enabled?: boolean; times?: string[] };
+        thursday?: { enabled?: boolean; times?: string[] };
+        friday?: { enabled?: boolean; times?: string[] };
+        saturday?: { enabled?: boolean; times?: string[] };
+        sunday?: { enabled?: boolean; times?: string[] };
+      };
+      posts?: Array<{
+        id?: string;
+        textPath?: string;
+        body?: string;
+        mediaPath?: string;
+        mediaType?: 'image' | 'video';
+      }>;
+    };
   };
 }
 

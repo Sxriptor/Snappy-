@@ -24,12 +24,15 @@ export function buildRedditBotScript(config: Configuration): string {
   let nextSubredditCheckAt = 0;
   let lastPmCheckAt = 0;
   let lastPmReplyRunAt = 0;
+  const processedScheduleSlots = new Set();
+  let isPostingScheduledContent = false;
   const unreadPmQueue = [];
 
   const MIN_SUBREDDIT_CHECK_MS = 5 * 60 * 1000;
   const MAX_SUBREDDIT_CHECK_MS = 60 * 60 * 1000;
   const PM_CHECK_DEBOUNCE_MS = 3000;
   const PM_REPLY_DEBOUNCE_MS = 1500;
+  const SCHEDULER_JITTER_MINUTES = 15;
   const MIN_POLL_MS = 1000;
   const MAX_POLL_MS = 15000;
 
@@ -42,6 +45,13 @@ export function buildRedditBotScript(config: Configuration): string {
     autoReplyToComments: true,
     autoReplyToPMs: true,
     autoReplyToPosts: false,
+    postScheduler: {
+      enabled: false,
+      folderPath: '',
+      subreddit: '',
+      days: {},
+      posts: []
+    },
     authCookieString: '',
     sessionCookie: '',
     pollIntervalMs: 30000,

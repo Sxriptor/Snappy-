@@ -4,6 +4,7 @@
  */
 
 export interface RedditSiteSettings {
+  postScheduler?: RedditPostSchedulerSettings;
   // Monitoring settings
   watchNotifications: boolean;
   watchPrivateMessages: boolean;
@@ -28,7 +29,37 @@ export interface RedditSiteSettings {
   sessionCookie: string;
 }
 
+export interface RedditScheduledPost {
+  id: string;
+  textPath: string;
+  body: string;
+  mediaPath?: string;
+  mediaType?: 'image' | 'video';
+}
+
+export interface RedditDaySchedule {
+  enabled: boolean;
+  times: string[];
+}
+
+export interface RedditPostSchedulerSettings {
+  enabled: boolean;
+  folderPath: string;
+  subreddit: string;
+  days: {
+    monday: RedditDaySchedule;
+    tuesday: RedditDaySchedule;
+    wednesday: RedditDaySchedule;
+    thursday: RedditDaySchedule;
+    friday: RedditDaySchedule;
+    saturday: RedditDaySchedule;
+    sunday: RedditDaySchedule;
+  };
+  posts: RedditScheduledPost[];
+}
+
 export interface InstagramSiteSettings {
+  postScheduler?: InstagramPostSchedulerSettings;
   // DM settings
   watchDirectMessages: boolean;
   watchMessageRequests: boolean;
@@ -46,6 +77,34 @@ export interface InstagramSiteSettings {
   skipVerifiedAccounts: boolean;
   skipBusinessAccounts: boolean;
   minFollowerCount: number;
+}
+
+export interface InstagramScheduledPost {
+  id: string;
+  mediaPath: string;
+  textPath: string;
+  caption: string;
+  mediaType: 'image' | 'video';
+}
+
+export interface InstagramDaySchedule {
+  enabled: boolean;
+  times: string[];
+}
+
+export interface InstagramPostSchedulerSettings {
+  enabled: boolean;
+  folderPath: string;
+  days: {
+    monday: InstagramDaySchedule;
+    tuesday: InstagramDaySchedule;
+    wednesday: InstagramDaySchedule;
+    thursday: InstagramDaySchedule;
+    friday: InstagramDaySchedule;
+    saturday: InstagramDaySchedule;
+    sunday: InstagramDaySchedule;
+  };
+  posts: InstagramScheduledPost[];
 }
 
 export interface TwitterSiteSettings {
@@ -116,6 +175,21 @@ export interface SiteSettingsConfig {
 // Default settings for each platform
 export const DEFAULT_SITE_SETTINGS: SiteSettingsConfig = {
   reddit: {
+    postScheduler: {
+      enabled: false,
+      folderPath: '',
+      subreddit: '',
+      days: {
+        monday: { enabled: false, times: ['09:00'] },
+        tuesday: { enabled: false, times: ['09:00'] },
+        wednesday: { enabled: false, times: ['09:00'] },
+        thursday: { enabled: false, times: ['09:00'] },
+        friday: { enabled: false, times: ['09:00'] },
+        saturday: { enabled: false, times: ['09:00'] },
+        sunday: { enabled: false, times: ['09:00'] }
+      },
+      posts: []
+    },
     watchNotifications: true,
     watchPrivateMessages: true,
     watchSubreddits: [],
@@ -134,6 +208,20 @@ export const DEFAULT_SITE_SETTINGS: SiteSettingsConfig = {
   },
   
   instagram: {
+    postScheduler: {
+      enabled: false,
+      folderPath: '',
+      days: {
+        monday: { enabled: false, times: ['09:00'] },
+        tuesday: { enabled: false, times: ['09:00'] },
+        wednesday: { enabled: false, times: ['09:00'] },
+        thursday: { enabled: false, times: ['09:00'] },
+        friday: { enabled: false, times: ['09:00'] },
+        saturday: { enabled: false, times: ['09:00'] },
+        sunday: { enabled: false, times: ['09:00'] }
+      },
+      posts: []
+    },
     watchDirectMessages: true,
     watchMessageRequests: true,
     autoAcceptRequests: false,

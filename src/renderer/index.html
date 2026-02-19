@@ -264,6 +264,11 @@
                 <input type="text" id="reddit-session-cookie" placeholder="reddit_session value">
               </div>
             </section>
+
+            <section class="section">
+              <div class="section-header">POST SCHEDULER</div>
+              <button id="reddit-open-scheduler" class="btn btn-full">Open Scheduler</button>
+            </section>
           </div>
 
           <!-- Instagram Settings -->
@@ -303,6 +308,11 @@
                 <span>Max Messages Per Poll</span>
                 <input type="number" id="instagram-max-messages" value="5" class="input-sm">
               </div>
+            </section>
+
+            <section class="section">
+              <div class="section-header">POST SCHEDULER</div>
+              <button id="instagram-open-scheduler" class="btn btn-full">Open Scheduler</button>
             </section>
           </div>
 
@@ -758,6 +768,66 @@
         <button id="update-later" class="btn btn-secondary">Later</button>
         <button id="update-download" class="btn btn-primary">Download Update</button>
         <button id="update-install" class="btn btn-primary hidden">Install & Restart</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="instagram-scheduler-overlay" class="scheduler-overlay hidden">
+    <div class="scheduler-modal">
+      <div class="scheduler-header">
+        <h3>Instagram Post Scheduler</h3>
+        <button id="instagram-scheduler-close" class="scheduler-close-btn">&times;</button>
+      </div>
+      <div class="scheduler-body">
+        <div class="setting-row">
+          <span>Enabled</span>
+          <label class="checkbox">
+            <input type="checkbox" id="instagram-scheduler-enabled">
+            <span class="checkmark"></span>
+          </label>
+        </div>
+        <div class="scheduler-folder-row">
+          <label for="instagram-scheduler-folder">Content Folder</label>
+          <div class="scheduler-folder-input">
+            <input type="text" id="instagram-scheduler-folder" placeholder="Select folder with 1.mp4 + 1.txt pairs">
+            <button id="instagram-scheduler-browse" class="btn">Browse</button>
+          </div>
+        </div>
+        <div class="scheduler-days" id="instagram-scheduler-days"></div>
+        <div id="instagram-scheduler-content-preview" class="scheduler-preview">No matched content pairs found yet.</div>
+      </div>
+    </div>
+  </div>
+
+  <div id="reddit-scheduler-overlay" class="scheduler-overlay hidden">
+    <div class="scheduler-modal">
+      <div class="scheduler-header">
+        <h3>Reddit Post Scheduler</h3>
+        <button id="reddit-scheduler-close" class="scheduler-close-btn">&times;</button>
+      </div>
+      <div class="scheduler-body">
+        <div class="setting-row">
+          <span>Enabled</span>
+          <label class="checkbox">
+            <input type="checkbox" id="reddit-scheduler-enabled">
+            <span class="checkmark"></span>
+          </label>
+        </div>
+        <div class="scheduler-folder-row">
+          <label for="reddit-scheduler-subreddit">Subreddit (optional)</label>
+          <div class="scheduler-folder-input">
+            <input type="text" id="reddit-scheduler-subreddit" placeholder="e.g. AskReddit or r/AskReddit">
+          </div>
+        </div>
+        <div class="scheduler-folder-row">
+          <label for="reddit-scheduler-folder">Content Folder</label>
+          <div class="scheduler-folder-input">
+            <input type="text" id="reddit-scheduler-folder" placeholder="Select folder with .txt posts and optional matching media">
+            <button id="reddit-scheduler-browse" class="btn">Browse</button>
+          </div>
+        </div>
+        <div class="scheduler-days" id="reddit-scheduler-days"></div>
+        <div id="reddit-scheduler-content-preview" class="scheduler-preview">No scheduled text posts found yet.</div>
       </div>
     </div>
   </div>
