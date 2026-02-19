@@ -2279,7 +2279,7 @@ export function buildRedditBotScript(config: Configuration): string {
       const txt = normalizeText(node.textContent || '').toLowerCase();
       if (!txt) continue;
       for (const opt of textOptions) {
-        if (txt === opt || txt.startsWith(opt + ' ')) {
+        if (txt === opt || txt.startsWith(opt + ' ') || txt.includes(' ' + opt) || txt.includes(opt + ' ')) {
           node.click();
           return true;
         }
@@ -2292,18 +2292,34 @@ export function buildRedditBotScript(config: Configuration): string {
     return clickAnyButtonByText(['accept', 'approve', 'start chat', 'join chat']);
   }
 
+  async function handleRequestGateFlow(reason) {
+    let acted = false;
+    for (let step = 0; step < 5; step++) {
+      let clickedSomething = false;
+      const viewed = clickAnyButtonByText(['view request', 'view requests']);
+      if (viewed) {
+        log('Clicked "View request" gate' + (reason ? ' (' + reason + ')' : ''));
+        clickedSomething = true;
+      }
+      const accepted = clickAnyVisibleRequestAcceptButton();
+      if (accepted) {
+        log('Clicked request acceptance gate' + (reason ? ' (' + reason + ')' : ''));
+        clickedSomething = true;
+      }
+      if (!clickedSomething) break;
+      acted = true;
+      await sleep(750);
+    }
+    return acted;
+  }
+
   async function ensureConversationReadyForReply(convoEl, author) {
     if (convoEl) {
       clickConversationElement(convoEl);
       log('Re-opened conversation for u/' + (author || 'reddit_user') + ' before send');
       await sleep(900);
     }
-    // Some chats/requests gate composer behind an accept CTA.
-    const accepted = clickAnyButtonByText(['accept', 'approve', 'start chat']);
-    if (accepted) {
-      log('Clicked request acceptance button before send');
-      await sleep(700);
-    }
+    await handleRequestGateFlow('pre-send');
   }
 
   async function processUnreadPmConversations() {
@@ -2364,11 +2380,7 @@ export function buildRedditBotScript(config: Configuration): string {
         log('Clicked unread conversation for u/' + author);
         await sleep(900);
 
-        const acceptedPre = clickAnyButtonByText(['accept', 'approve', 'start chat']);
-        if (acceptedPre) {
-          log('Clicked request acceptance button after opening conversation');
-          await sleep(700);
-        }
+        await handleRequestGateFlow('post-open');
 
         const latestIncoming = await extractLatestIncomingWithRetries(author, convoEl);
         if (!latestIncoming) {
