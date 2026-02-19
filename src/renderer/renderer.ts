@@ -4331,6 +4331,42 @@ function getStoredPlatformSiteSettings(platform: string): any {
   return allSettings[platform] || {};
 }
 
+async function refreshRedditSchedulerPostsBeforeInject(): Promise<void> {
+  const api = (window as any).electronAPI;
+  if (!api?.scanRedditSchedulerFolder) return;
+
+  const allSettings = getAllSiteSettingsFromStorage();
+  const redditSettings = (allSettings.reddit || {}) as any;
+  const scheduler = (redditSettings.postScheduler || {}) as any;
+  const folderPath = typeof scheduler.folderPath === 'string' ? scheduler.folderPath.trim() : '';
+  if (!folderPath) return;
+
+  try {
+    const scanResult = await api.scanRedditSchedulerFolder(folderPath);
+    if (!scanResult?.success) return;
+
+    const scannedPosts = Array.isArray(scanResult.posts) ? scanResult.posts : [];
+    const currentPosts = Array.isArray(scheduler.posts) ? scheduler.posts : [];
+
+    const currentSignature = currentPosts.map((p: any) => `${String(p?.id || '')}|${String(p?.textPath || '')}`).join('||');
+    const scannedSignature = scannedPosts.map((p: any) => `${String(p?.id || '')}|${String(p?.textPath || '')}`).join('||');
+    if (currentSignature === scannedSignature && currentPosts.length === scannedPosts.length) {
+      return;
+    }
+
+    redditSettings.postScheduler = {
+      ...scheduler,
+      posts: scannedPosts
+    };
+    allSettings.reddit = redditSettings;
+    localStorage.setItem('siteSettings', JSON.stringify(allSettings));
+    api.updateSiteSettings(allSettings);
+    addLog(`Reddit scheduler cache refreshed: ${scannedPosts.length} post(s)`, 'info');
+  } catch {
+    // Ignore refresh errors; injection can still proceed with stored settings.
+  }
+}
+
 function applySiteSettingsToConfig(baseConfig: Config, hostname: string): Config {
   const site = detectSiteFromHost(hostname);
   const mergedConfig: Config = { ...(baseConfig || ({} as Config)) };
@@ -4700,6 +4736,10 @@ async function injectBotIntoWebview() {
     }
     
     addLog(`Injecting bot for host: ${hostname || 'unknown'}`, 'info', webviewSessionId);
+
+    if (detectSiteFromHost(hostname) === 'reddit') {
+      await refreshRedditSchedulerPostsBeforeInject();
+    }
 
     const resolvedConfig = applySiteSettingsToConfig(config as Config, hostname);
 
