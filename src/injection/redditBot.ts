@@ -33,7 +33,8 @@ export function buildRedditBotScript(config: Configuration): string {
   const MAX_SUBREDDIT_CHECK_MS = 60 * 60 * 1000;
   const PM_CHECK_DEBOUNCE_MS = 3000;
   const PM_REPLY_DEBOUNCE_MS = 1500;
-  const SCHEDULER_JITTER_MINUTES = 15;
+  const SCHEDULER_JITTER_MINUTES = 0;
+  const SCHEDULER_DUE_WINDOW_MINUTES = 15;
   const MIN_POLL_MS = 1000;
   const MAX_POLL_MS = 15000;
 
@@ -558,6 +559,18 @@ export function buildRedditBotScript(config: Configuration): string {
     return null;
   }
 
+  async function waitForDeepSelector(selectors, timeoutMs) {
+    const start = Date.now();
+    while ((Date.now() - start) < timeoutMs && isRunning) {
+      for (const selector of selectors) {
+        const found = deepQueryAll(selector).find(node => node instanceof HTMLElement && isVisibleElement(node));
+        if (found) return found;
+      }
+      await sleep(220);
+    }
+    return null;
+  }
+
   async function typeCharacterByCharacter(inputEl, value) {
     if (!inputEl || !(inputEl instanceof HTMLElement)) return;
     const text = String(value || '');
@@ -675,35 +688,72 @@ export function buildRedditBotScript(config: Configuration): string {
       return false;
     }
 
-    const composer = await waitForSelector([
+    const composerSurface = await waitForDeepSelector([
       'input[name="title"]',
       'textarea[name="title"]',
+      'input[aria-label*="title" i]',
       '[data-testid*="post-composer" i]',
       '[role="dialog"]',
-      'shreddit-post-composer'
+      'shreddit-post-composer',
+      'button[aria-label*="community" i]',
+      '[role="button"][aria-label*="community" i]'
     ], 12000);
 
-    return !!composer;
+    return !!composerSurface;
+  }
+
+  async function waitForAnyComposerSurface(timeoutMs) {
+    const found = await waitForDeepSelector([
+      'input[name="title"]',
+      'textarea[name="title"]',
+      'input[aria-label*="title" i]',
+      'textarea[aria-label*="title" i]',
+      'button[aria-label*="community" i]',
+      '[role="button"][aria-label*="community" i]',
+      '[data-testid*="community" i]',
+      '[data-testid*="post-composer" i]',
+      'shreddit-post-composer',
+      '[role="dialog"]'
+    ], timeoutMs);
+    return !!found;
   }
 
   async function selectCommunityByTyping(communityRaw) {
     const community = String(communityRaw || '').trim();
     if (!community) return true;
 
-    const selectorOpened =
-      await clickButtonByText('choose a community', 4000) ||
-      await clickButtonByText('select a community', 2500) ||
-      await clickButtonByText('community', 2500);
+    let selectorOpened = false;
+    const explicitCommunityButtons = deepQueryAll('button, [role="button"], [data-testid]')
+      .filter(node => node instanceof HTMLElement && isVisibleElement(node));
+    for (const node of explicitCommunityButtons) {
+      const aria = normalizeText(node.getAttribute('aria-label') || '').toLowerCase();
+      const txt = normalizeText(node.textContent || '').toLowerCase();
+      const testId = normalizeText(node.getAttribute('data-testid') || '').toLowerCase();
+      if (aria.includes('community') || txt.includes('community') || testId.includes('community')) {
+        node.click();
+        selectorOpened = true;
+        break;
+      }
+    }
+    if (!selectorOpened) {
+      selectorOpened =
+        await clickButtonByText('choose a community', 4000) ||
+        await clickButtonByText('select a community', 2500) ||
+        await clickButtonByText('community', 2500);
+    }
 
     if (!selectorOpened) {
       log('Scheduler: community selector button not found');
       return false;
     }
 
-    const input = await waitForSelector([
+    const input = await waitForDeepSelector([
       'input[aria-label*="community" i]',
       'input[placeholder*="community" i]',
-      'input[placeholder*="choose" i]'
+      'input[placeholder*="choose" i]',
+      'input[data-testid*="community" i]',
+      'faceplate-search-input input[type="text"]',
+      'faceplate-search-input input[placeholder*="select a community" i]'
     ], 6000);
 
     if (!input) {
@@ -759,11 +809,14 @@ export function buildRedditBotScript(config: Configuration): string {
       window.location.assign(targetUrl);
     }
 
-    const ready = await waitForSelector([
+    const ready = await waitForDeepSelector([
       'input[name="title"]',
       'textarea[name="title"]',
       '[data-testid*="post-composer" i]',
-      '[role="textbox"][aria-label*="title" i]'
+      '[role="textbox"][aria-label*="title" i]',
+      'faceplate-textarea-input textarea[name="title"]',
+      '#post-composer__title textarea[name="title"]',
+      'faceplate-search-input input[type="text"]'
     ], 15000);
 
     if (!ready) {
@@ -794,6 +847,7 @@ export function buildRedditBotScript(config: Configuration): string {
     try {
       const mediaPaths = getPostMediaPaths(post);
       const targetCommunity = parsed.community || '';
+      log('Scheduler: parsed file -> community="' + (targetCommunity || '(empty)') + '", type="' + parsed.type + '", title="' + parsed.title.substring(0, 80) + '", flair="' + (parsed.flair || '(none)') + '", bodyLen=' + parsed.body.length + ', img="' + (parsed.img || '(none)') + '"');
       log('Scheduler: starting Reddit publish for item ' + String(post.id || 'unknown') + (targetCommunity ? (' to ' + targetCommunity) : ''));
 
       const opened = await openCreatePostComposer();
@@ -802,6 +856,11 @@ export function buildRedditBotScript(config: Configuration): string {
         if (!fallbackReady) return false;
       }
 
+      const surfaceReady = await waitForAnyComposerSurface(10000);
+      if (!surfaceReady) {
+        log('Scheduler: post composer surface not available after Create');
+        return false;
+      }
       await sleep(450);
 
       const communitySelected = await selectCommunityByTyping(targetCommunity);
@@ -832,11 +891,14 @@ export function buildRedditBotScript(config: Configuration): string {
         await sleep(900);
       }
 
-      const titleInput = await waitForSelector([
+      const titleInput = await waitForDeepSelector([
         'input[name="title"]',
         'textarea[name="title"]',
+        'input[aria-label*="title" i]',
         'textarea[aria-label*="title" i]',
-        '[role="textbox"][aria-label*="title" i]'
+        '[role="textbox"][aria-label*="title" i]',
+        'faceplate-textarea-input textarea[name="title"]',
+        '#post-composer__title textarea[name="title"]'
       ], 10000);
 
       if (!titleInput) {
@@ -854,13 +916,16 @@ export function buildRedditBotScript(config: Configuration): string {
       }
 
       if (parsed.body) {
-        const bodyInput = await waitForSelector([
+        const bodyInput = await waitForDeepSelector([
           'textarea[name="text"]',
           'textarea[name="body"]',
           'textarea[aria-label*="body" i]',
           'textarea[aria-label*="text" i]',
           '[role="textbox"][aria-label*="body" i]',
-          '[contenteditable="true"][role="textbox"]'
+          '[contenteditable="true"][role="textbox"]',
+          'shreddit-composer [slot="rte"][name="body"][contenteditable="true"]',
+          '#post-composer_bodytext [slot="rte"][contenteditable="true"]',
+          'shreddit-composer div[name="body"][contenteditable="true"]'
         ], 7000);
         if (bodyInput) {
           setInputValue(bodyInput, parsed.body);
@@ -913,7 +978,7 @@ export function buildRedditBotScript(config: Configuration): string {
       const slotKeyBase = year + '-' + (month + 1) + '-' + day + '-' + dayKey + '-' + normalized.text;
       const randomOffset = (hashString(slotKeyBase) % (SCHEDULER_JITTER_MINUTES * 2 + 1)) - SCHEDULER_JITTER_MINUTES;
       const runAt = new Date(baseTime.getTime() + randomOffset * 60 * 1000);
-      const windowEnd = new Date(baseTime.getTime() + SCHEDULER_JITTER_MINUTES * 60 * 1000);
+      const windowEnd = new Date(baseTime.getTime() + SCHEDULER_DUE_WINDOW_MINUTES * 60 * 1000);
       const slotKey = slotKeyBase + '-off-' + randomOffset;
 
       if (processedScheduleSlots.has(slotKey)) continue;

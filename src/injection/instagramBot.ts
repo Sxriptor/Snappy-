@@ -255,6 +255,52 @@ export function buildInstagramBotScript(config: Configuration): string {
       return false;
     }
 
+    async function requestPointerClickAt(x, y, timeoutMs) {
+      const px = Number(x);
+      const py = Number(y);
+      if (!Number.isFinite(px) || !Number.isFinite(py)) return false;
+
+      const requestId = 'ig-pointer-pt-' + Date.now() + '-' + Math.random().toString(36).slice(2);
+      window.__SNAPPY_IG_POINTER_RESPONSE__ = null;
+      window.__SNAPPY_IG_POINTER_REQUEST__ = {
+        id: requestId,
+        mode: 'point',
+        x: px,
+        y: py
+      };
+
+      let waited = 0;
+      const maxWait = Math.max(1000, Number(timeoutMs) || 6000);
+      while (waited < maxWait && !isStopped()) {
+        await sleep(140);
+        waited += 140;
+        const response = window.__SNAPPY_IG_POINTER_RESPONSE__;
+        if (response && response.id === requestId) {
+          window.__SNAPPY_IG_POINTER_RESPONSE__ = null;
+          return response.success === true;
+        }
+      }
+
+      return false;
+    }
+
+    async function clickElementHuman(el, timeoutMs) {
+      if (!el || !(el instanceof HTMLElement)) return false;
+      try {
+        const rect = el.getBoundingClientRect();
+        const cx = rect.left + (rect.width / 2);
+        const cy = rect.top + (rect.height / 2);
+        const clickedByPointer = await requestPointerClickAt(cx, cy, timeoutMs || 5000);
+        if (clickedByPointer) return true;
+      } catch {}
+
+      try {
+        el.click();
+        return true;
+      } catch {}
+      return false;
+    }
+
     async function clickCreatePostFlow() {
       const homeLink = document.querySelector('a[href="/"], a[href="https://www.instagram.com/"]');
       if (homeLink && window.location.pathname.startsWith('/direct')) {
@@ -503,14 +549,13 @@ export function buildInstagramBotScript(config: Configuration): string {
       }
     }
 
-    function navigateToDMs() {
+    async function navigateToDMs() {
       const links = Array.from(document.querySelectorAll('a[href*="/direct/"]'));
       if (links.length > 0) {
         const dmLink = links[0];
         if (!window.location.href.includes('/direct/')) {
           log('Navigating to DMs...');
-          dmLink.click();
-          return true;
+          return await clickElementHuman(dmLink, 5000);
         }
       }
       return false;
@@ -524,13 +569,12 @@ export function buildInstagramBotScript(config: Configuration): string {
       return window.location.href.includes('/direct/t/');
     }
 
-    function navigateBackToDMs() {
+    async function navigateBackToDMs() {
       const dmLinks = Array.from(document.querySelectorAll('a[href*="/direct/"], a[href="/direct/inbox/"]'));
       for (const link of dmLinks) {
         if (link.href.includes('/direct/t/')) continue;
         log('Navigating back to main DMs page');
-        link.click();
-        return true;
+        return await clickElementHuman(link, 5000);
       }
       
       const backButtons = Array.from(document.querySelectorAll('button, div[role="button"]')).filter(btn => {
@@ -542,8 +586,7 @@ export function buildInstagramBotScript(config: Configuration): string {
       
       if (backButtons.length > 0) {
         log('Clicking back button to return to DMs');
-        backButtons[0].click();
-        return true;
+        return await clickElementHuman(backButtons[0], 5000);
       }
       
       log('Could not find way to navigate back to DMs');
@@ -684,7 +727,11 @@ export function buildInstagramBotScript(config: Configuration): string {
         }
 
         log('Clicking element: ' + clickTarget.tagName);
-        clickTarget.click();
+        const clicked = await clickElementHuman(clickTarget, 6000);
+        if (!clicked) {
+          log('Failed to click conversation element');
+          return false;
+        }
         
         await sleep(3000);
         
@@ -1009,7 +1056,11 @@ export function buildInstagramBotScript(config: Configuration): string {
 
       if (sendBtn) {
         log('Found send button: ' + sendBtn.tagName + ' - clicking...');
-        sendBtn.click();
+        const clicked = await clickElementHuman(sendBtn, 5000);
+        if (!clicked) {
+          log('Could not click send button');
+          return false;
+        }
         await sleep(1000);
         if (isStopped()) return false;
         
@@ -1071,7 +1122,7 @@ export function buildInstagramBotScript(config: Configuration): string {
           seenMessages.add(conversation.id);
           recentlyProcessedConversations.set(conversation.id, Date.now());
           await sleep(1000);
-          navigateBackToDMs();
+          await navigateBackToDMs();
           return;
         }
 
@@ -1081,7 +1132,7 @@ export function buildInstagramBotScript(config: Configuration): string {
           seenMessages.add(conversation.id);
           recentlyProcessedConversations.set(conversation.id, Date.now());
           await sleep(1000);
-          navigateBackToDMs();
+          await navigateBackToDMs();
           return;
         }
 
@@ -1098,7 +1149,7 @@ export function buildInstagramBotScript(config: Configuration): string {
           log('No reply generated - navigating back to DMs');
           recentlyProcessedConversations.set(conversation.id, Date.now());
           await sleep(1000);
-          navigateBackToDMs();
+          await navigateBackToDMs();
           return;
         }
 
@@ -1107,7 +1158,7 @@ export function buildInstagramBotScript(config: Configuration): string {
           log('Randomly skipping reply (prob ' + Math.round(skipProb * 100) + '%) - navigating back to DMs');
           recentlyProcessedConversations.set(conversation.id, Date.now());
           await sleep(1000);
-          navigateBackToDMs();
+          await navigateBackToDMs();
           return;
         }
 
@@ -1121,7 +1172,7 @@ export function buildInstagramBotScript(config: Configuration): string {
           log('Failed to type message - navigating back to DMs');
           recentlyProcessedConversations.set(conversation.id, Date.now());
           await sleep(1000);
-          navigateBackToDMs();
+          await navigateBackToDMs();
           return;
         }
 
@@ -1140,14 +1191,14 @@ export function buildInstagramBotScript(config: Configuration): string {
 
         // Always navigate back to DMs after processing
         await sleep(2000);
-        navigateBackToDMs();
+        await navigateBackToDMs();
         
       } catch (err) {
         log('Error processing conversation: ' + err + ' - marking as seen and navigating back to DMs');
         seenMessages.add(conversation.id);
         recentlyProcessedConversations.set(conversation.id, Date.now());
         await sleep(1000);
-        navigateBackToDMs();
+        await navigateBackToDMs();
       }
     }
 
@@ -1155,7 +1206,7 @@ export function buildInstagramBotScript(config: Configuration): string {
       return window.location.href.includes('/direct/requests/');
     }
 
-    function navigateToRequests() {
+    async function navigateToRequests() {
       // ONLY look for the "Request (X)" tab with a number - don't click if no pending requests
       const requestTabs = Array.from(document.querySelectorAll('[role="tab"]')).filter(tab => {
         const text = tab.textContent?.toLowerCase() || '';
@@ -1169,8 +1220,7 @@ export function buildInstagramBotScript(config: Configuration): string {
         const requestCount = numberMatch ? numberMatch[1] : 'unknown';
         
         log('Found requests tab with ' + requestCount + ' pending request(s), clicking...');
-        requestTabs[0].click();
-        return true;
+        return await clickElementHuman(requestTabs[0], 5000);
       }
       
       // If no numbered requests tab found, don't navigate
@@ -1215,7 +1265,7 @@ export function buildInstagramBotScript(config: Configuration): string {
           log('Auto-accept enabled, opening conversation to accept request');
           
           // Click into the conversation
-          item.click();
+          await clickElementHuman(item, 6000);
           await sleep(3000); // Wait for conversation to load
           
           // Look for accept button in the conversation
@@ -1228,7 +1278,7 @@ export function buildInstagramBotScript(config: Configuration): string {
           
           if (acceptButtons.length > 0) {
             log('Found accept button, clicking to accept request from ' + userName);
-            acceptButtons[0].click();
+            await clickElementHuman(acceptButtons[0], 5000);
             await sleep(2000); // Wait for accept to process
             
             // After clicking accept, look for "Primary" button
@@ -1240,7 +1290,7 @@ export function buildInstagramBotScript(config: Configuration): string {
             
             if (primaryButtons.length > 0) {
               log('Found primary button, clicking to complete acceptance for ' + userName);
-              primaryButtons[0].click();
+              await clickElementHuman(primaryButtons[0], 5000);
               await sleep(1500);
             } else {
               log('No primary button found after accepting request from ' + userName);
@@ -1276,7 +1326,7 @@ export function buildInstagramBotScript(config: Configuration): string {
           
           // Navigate back to main DMs (not requests) after processing
           await sleep(1000);
-          navigateBackToDMs();
+          await navigateBackToDMs();
           await sleep(2000);
         } else {
           log('Auto-accept disabled, skipping request from ' + userName);
@@ -1308,7 +1358,7 @@ export function buildInstagramBotScript(config: Configuration): string {
         }
 
         if (!isOnDMsPage()) {
-          const navigated = navigateToDMs();
+          const navigated = await navigateToDMs();
           if (navigated) {
             await sleep(2000);
           }
@@ -1318,7 +1368,7 @@ export function buildInstagramBotScript(config: Configuration): string {
         
         if (isInConversation()) {
           log('Currently in conversation, navigating back to main DMs');
-          navigateBackToDMs();
+          await navigateBackToDMs();
           await sleep(2000);
           isProcessing = false;
           return;
@@ -1330,11 +1380,11 @@ export function buildInstagramBotScript(config: Configuration): string {
             await processMessageRequests();
             // After processing requests, always navigate back to main DMs
             log('Finished processing requests, navigating back to main DMs');
-            navigateBackToDMs();
+            await navigateBackToDMs();
             await sleep(2000);
           } else if (!isInConversation()) {
             // We're on main DMs page, check if we should go to requests
-            const navigatedToRequests = navigateToRequests();
+            const navigatedToRequests = await navigateToRequests();
             if (navigatedToRequests) {
               await sleep(2000);
               isProcessing = false;

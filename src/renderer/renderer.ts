@@ -7136,14 +7136,25 @@ setInterval(async () => {
         })();
       `);
 
-      if (!request || !request.id || typeof request.text !== 'string' || request.text.trim().length === 0) {
+      if (!request || !request.id) {
         continue;
       }
 
       processingInstagramPointerRequests.set(sessionId, request.id);
       await targetWebview.executeJavaScript('window.__SNAPPY_IG_POINTER_REQUEST__ = null;');
 
-      const targetPoint = await resolveClickablePointByText(targetWebview, request.text);
+      let targetPoint: { x: number; y: number } | null = null;
+      const mode = typeof request.mode === 'string' ? request.mode : 'text';
+      if (mode === 'point') {
+        const px = Number(request.x);
+        const py = Number(request.y);
+        if (Number.isFinite(px) && Number.isFinite(py)) {
+          targetPoint = { x: px, y: py };
+        }
+      } else if (typeof request.text === 'string' && request.text.trim().length > 0) {
+        targetPoint = await resolveClickablePointByText(targetWebview, request.text);
+      }
+
       if (!targetPoint) {
         await targetWebview.executeJavaScript(`
           window.__SNAPPY_IG_POINTER_RESPONSE__ = {
