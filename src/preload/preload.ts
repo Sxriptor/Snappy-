@@ -444,6 +444,16 @@ const electronAPI = {
     });
   },
 
+  playMousePath: async (
+    webContentsId: number,
+    events: Array<{ type: string; x: number; y: number; delayMs?: number }>
+  ): Promise<{ success: boolean; error?: string }> => {
+    return await ipcRenderer.invoke('input:playMousePath', {
+      webContentsId,
+      events
+    });
+  },
+
   /**
    * Listen for detached window initialization
    */

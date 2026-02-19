@@ -229,6 +229,32 @@ export function buildInstagramBotScript(config: Configuration): string {
       return false;
     }
 
+    async function requestPointerClickByText(buttonText, timeoutMs) {
+      const text = String(buttonText || '').trim();
+      if (!text) return false;
+
+      const requestId = 'ig-pointer-' + Date.now() + '-' + Math.random().toString(36).slice(2);
+      window.__SNAPPY_IG_POINTER_RESPONSE__ = null;
+      window.__SNAPPY_IG_POINTER_REQUEST__ = {
+        id: requestId,
+        text
+      };
+
+      let waited = 0;
+      const maxWait = Math.max(1000, Number(timeoutMs) || 8000);
+      while (waited < maxWait && !isStopped()) {
+        await sleep(180);
+        waited += 180;
+        const response = window.__SNAPPY_IG_POINTER_RESPONSE__;
+        if (response && response.id === requestId) {
+          window.__SNAPPY_IG_POINTER_RESPONSE__ = null;
+          return response.success === true;
+        }
+      }
+
+      return false;
+    }
+
     async function clickCreatePostFlow() {
       const homeLink = document.querySelector('a[href="/"], a[href="https://www.instagram.com/"]');
       if (homeLink && window.location.pathname.startsWith('/direct')) {
@@ -237,7 +263,11 @@ export function buildInstagramBotScript(config: Configuration): string {
       }
 
       const createCandidates = Array.from(document.querySelectorAll('a, button, div[role="button"]'));
-      const createClicked = clickElementByText(createCandidates, 'create') || clickElementByText(createCandidates, 'new post');
+      const createClicked =
+        await requestPointerClickByText('create', 7000) ||
+        await requestPointerClickByText('new post', 7000) ||
+        clickElementByText(createCandidates, 'create') ||
+        clickElementByText(createCandidates, 'new post');
       if (!createClicked) {
         log('Scheduler: Create button not found');
         return false;
@@ -245,7 +275,13 @@ export function buildInstagramBotScript(config: Configuration): string {
 
       await sleep(1000);
       const postCandidates = Array.from(document.querySelectorAll('a, button, div[role="button"]'));
-      clickElementByText(postCandidates, 'post');
+      const postClicked =
+        await requestPointerClickByText('post', 6000) ||
+        clickElementByText(postCandidates, 'post');
+      if (!postClicked) {
+        log('Scheduler: Post option not found after Create');
+        return false;
+      }
       await sleep(1000);
       return true;
     }
@@ -262,6 +298,11 @@ export function buildInstagramBotScript(config: Configuration): string {
     }
 
     async function clickButtonByText(buttonText, timeoutMs = 8000) {
+      const pointerClicked = await requestPointerClickByText(buttonText, timeoutMs);
+      if (pointerClicked) {
+        return true;
+      }
+
       const start = Date.now();
       while (Date.now() - start < timeoutMs && !isStopped()) {
         const candidates = Array.from(document.querySelectorAll('button, div[role="button"]'));

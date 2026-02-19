@@ -46,6 +46,10 @@ function getRuntimeConfigPath(): string {
   }
 }
 
+function delayMs(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, Math.max(0, ms || 0)));
+}
+
 /**
  * Load configuration from config.json or use defaults
  */
@@ -676,6 +680,71 @@ export function setupIPCHandlers(): void {
 
       return { success: true };
     } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return { success: false, error: message };
+    }
+  });
+
+  ipcMain.handle('input:playMousePath', async (_event, payload: unknown) => {
+    let attachedHere = false;
+    let targetWebContentsRef: any = null;
+    try {
+      const data = (payload || {}) as { webContentsId?: number; events?: Array<any> };
+      const targetId = typeof data.webContentsId === 'number' ? data.webContentsId : 0;
+      const events = Array.isArray(data.events) ? data.events : [];
+
+      if (!targetId || events.length === 0) {
+        return { success: false, error: 'Invalid webContentsId or events' };
+      }
+
+      const targetWebContents = webContents.fromId(targetId);
+      if (!targetWebContents || targetWebContents.isDestroyed()) {
+        return { success: false, error: 'Target webContents not found' };
+      }
+      targetWebContentsRef = targetWebContents;
+
+      if (!targetWebContents.debugger.isAttached()) {
+        targetWebContents.debugger.attach('1.3');
+        attachedHere = true;
+      }
+
+      for (const event of events) {
+        const type = String(event?.type || '');
+        const x = Number(event?.x);
+        const y = Number(event?.y);
+        const delay = Number(event?.delayMs || 0);
+        if (!type || !Number.isFinite(x) || !Number.isFinite(y)) continue;
+
+        if (delay > 0) {
+          await delayMs(delay);
+        }
+
+        const params: Record<string, any> = {
+          type,
+          x,
+          y,
+          buttons: type === 'mousePressed' ? 1 : 0
+        };
+
+        if (type === 'mousePressed' || type === 'mouseReleased') {
+          params.button = 'left';
+          params.clickCount = 1;
+        }
+
+        await targetWebContents.debugger.sendCommand('Input.dispatchMouseEvent', params);
+      }
+
+      if (attachedHere && targetWebContents.debugger.isAttached()) {
+        targetWebContents.debugger.detach();
+      }
+
+      return { success: true };
+    } catch (error) {
+      try {
+        if (attachedHere && targetWebContentsRef && targetWebContentsRef.debugger.isAttached()) {
+          targetWebContentsRef.debugger.detach();
+        }
+      } catch {}
       const message = error instanceof Error ? error.message : String(error);
       return { success: false, error: message };
     }

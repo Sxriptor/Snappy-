@@ -6890,6 +6890,178 @@ setInterval(async () => {
 // Track upload requests per session to avoid duplicate handling
 const processingInstagramUploadRequests = new Map<string, string>();
 const processingRedditUploadRequests = new Map<string, string>();
+const processingInstagramPointerRequests = new Map<string, string>();
+
+let automationCursorEl: HTMLDivElement | null = null;
+const lastPointerPositionBySession = new Map<string, { x: number; y: number }>();
+
+interface CdpMouseEventStep {
+  type: 'mouseMoved' | 'mousePressed' | 'mouseReleased';
+  x: number;
+  y: number;
+  delayMs?: number;
+}
+
+function ensureAutomationCursorEl(): HTMLDivElement {
+  if (automationCursorEl) return automationCursorEl;
+  const el = document.createElement('div');
+  el.id = 'automation-cursor-overlay';
+  el.style.position = 'fixed';
+  el.style.width = '12px';
+  el.style.height = '12px';
+  el.style.borderRadius = '50%';
+  el.style.border = '2px solid #ffffff';
+  el.style.background = 'rgba(14,173,255,0.35)';
+  el.style.boxShadow = '0 0 12px rgba(14,173,255,0.75)';
+  el.style.pointerEvents = 'none';
+  el.style.zIndex = '14000';
+  el.style.transform = 'translate(-9999px, -9999px)';
+  el.style.opacity = '0';
+  el.style.transition = 'opacity 0.12s ease';
+  document.body.appendChild(el);
+  automationCursorEl = el;
+  return el;
+}
+
+function shouldShowAutomationCursorForSession(sessionId: string): boolean {
+  const isDetachedWindow = (window as any).isDetachedWindow === true;
+  if (isDetachedWindow) return true;
+  return !!activeSessionId && sessionId === activeSessionId;
+}
+
+function moveAutomationCursor(targetWebview: Electron.WebviewTag, x: number, y: number, visible: boolean): void {
+  const cursor = ensureAutomationCursorEl();
+  if (!visible) {
+    cursor.style.opacity = '0';
+    return;
+  }
+
+  const rect = targetWebview.getBoundingClientRect();
+  const viewportX = rect.left + x;
+  const viewportY = rect.top + y;
+  cursor.style.transform = `translate(${viewportX - 6}px, ${viewportY - 6}px)`;
+  cursor.style.opacity = '1';
+}
+
+function hideAutomationCursor(): void {
+  if (!automationCursorEl) return;
+  automationCursorEl.style.opacity = '0';
+}
+
+function randomRangeFloat(min: number, max: number): number {
+  return min + Math.random() * (max - min);
+}
+
+function randomRangeInt(min: number, max: number): number {
+  return Math.floor(randomRangeFloat(min, max + 1));
+}
+
+function buildHumanMousePathEvents(start: { x: number; y: number }, end: { x: number; y: number }): CdpMouseEventStep[] {
+  const dx = end.x - start.x;
+  const dy = end.y - start.y;
+  const distance = Math.hypot(dx, dy);
+  const steps = Math.max(8, Math.min(42, Math.floor(distance / 22)));
+
+  const mx = (start.x + end.x) / 2;
+  const my = (start.y + end.y) / 2;
+  const normalX = distance > 0 ? -dy / distance : 0;
+  const normalY = distance > 0 ? dx / distance : 0;
+  const curveStrength = Math.min(90, Math.max(18, distance * 0.2));
+  const curveOffset = randomRangeFloat(-curveStrength, curveStrength);
+  const cx = mx + normalX * curveOffset;
+  const cy = my + normalY * curveOffset;
+
+  const events: CdpMouseEventStep[] = [];
+  for (let i = 1; i <= steps; i++) {
+    const t = i / steps;
+    const inv = 1 - t;
+    const bx = (inv * inv * start.x) + (2 * inv * t * cx) + (t * t * end.x);
+    const by = (inv * inv * start.y) + (2 * inv * t * cy) + (t * t * end.y);
+    events.push({
+      type: 'mouseMoved',
+      x: bx + randomRangeFloat(-1.3, 1.3),
+      y: by + randomRangeFloat(-1.3, 1.3),
+      delayMs: randomRangeInt(8, 24)
+    });
+  }
+
+  events.push({
+    type: 'mousePressed',
+    x: end.x + randomRangeFloat(-0.7, 0.7),
+    y: end.y + randomRangeFloat(-0.7, 0.7),
+    delayMs: randomRangeInt(40, 130)
+  });
+  events.push({
+    type: 'mouseReleased',
+    x: end.x + randomRangeFloat(-0.7, 0.7),
+    y: end.y + randomRangeFloat(-0.7, 0.7),
+    delayMs: randomRangeInt(45, 160)
+  });
+
+  return events;
+}
+
+async function playAutomationCursorPath(
+  targetWebview: Electron.WebviewTag,
+  events: CdpMouseEventStep[],
+  visible: boolean
+): Promise<void> {
+  for (const step of events) {
+    if (step.delayMs && step.delayMs > 0) {
+      await new Promise(resolve => setTimeout(resolve, step.delayMs));
+    }
+    moveAutomationCursor(targetWebview, step.x, step.y, visible);
+  }
+  await new Promise(resolve => setTimeout(resolve, 120));
+  hideAutomationCursor();
+}
+
+async function resolveClickablePointByText(targetWebview: Electron.WebviewTag, text: string): Promise<{ x: number; y: number } | null> {
+  const loweredText = String(text || '').trim().toLowerCase();
+  if (!loweredText) return null;
+
+  try {
+    const result = await targetWebview.executeJavaScript(`
+      (function() {
+        const target = ${JSON.stringify(loweredText)};
+        const nodes = Array.from(document.querySelectorAll('button, a, div[role="button"], span'));
+        const isVisible = (el) => {
+          if (!el || !(el instanceof HTMLElement)) return false;
+          const style = window.getComputedStyle(el);
+          if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
+          const rect = el.getBoundingClientRect();
+          return rect.width > 0 && rect.height > 0;
+        };
+
+        let best = null;
+        let bestScore = -1;
+        for (const node of nodes) {
+          if (!(node instanceof HTMLElement)) continue;
+          if (!isVisible(node)) continue;
+          const txt = String(node.textContent || '').replace(/\\s+/g, ' ').trim().toLowerCase();
+          const aria = String(node.getAttribute('aria-label') || '').replace(/\\s+/g, ' ').trim().toLowerCase();
+          if (!txt && !aria) continue;
+          const exact = txt === target || aria === target;
+          const include = txt.includes(target) || aria.includes(target);
+          if (!exact && !include) continue;
+          const score = exact ? 20 : 10;
+          if (score <= bestScore) continue;
+          const rect = node.getBoundingClientRect();
+          best = { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+          bestScore = score;
+        }
+        return best;
+      })();
+    `);
+
+    if (!result || typeof result.x !== 'number' || typeof result.y !== 'number') {
+      return null;
+    }
+    return { x: result.x, y: result.y };
+  } catch {
+    return null;
+  }
+}
 
 // Poll for pending Instagram scheduler upload requests and set file input via main process
 setInterval(async () => {
@@ -6944,6 +7116,68 @@ setInterval(async () => {
     }
   }
 }, 500);
+
+// Poll for pending Instagram scheduler pointer click requests and execute via CDP path
+setInterval(async () => {
+  if (!isBotActive) return;
+  if (!(window as any).electronAPI?.playMousePath) return;
+
+  for (const [sessionId, targetWebview] of sessionWebviews.entries()) {
+    const activeRequestId = processingInstagramPointerRequests.get(sessionId);
+    if (activeRequestId) continue;
+
+    try {
+      const request = await targetWebview.executeJavaScript(`
+        (function() {
+          if (window.__SNAPPY_IG_POINTER_REQUEST__) {
+            return window.__SNAPPY_IG_POINTER_REQUEST__;
+          }
+          return null;
+        })();
+      `);
+
+      if (!request || !request.id || typeof request.text !== 'string' || request.text.trim().length === 0) {
+        continue;
+      }
+
+      processingInstagramPointerRequests.set(sessionId, request.id);
+      await targetWebview.executeJavaScript('window.__SNAPPY_IG_POINTER_REQUEST__ = null;');
+
+      const targetPoint = await resolveClickablePointByText(targetWebview, request.text);
+      if (!targetPoint) {
+        await targetWebview.executeJavaScript(`
+          window.__SNAPPY_IG_POINTER_RESPONSE__ = {
+            id: ${JSON.stringify(request.id)},
+            success: false,
+            error: 'Target not found'
+          };
+        `);
+        continue;
+      }
+
+      const lastPos = lastPointerPositionBySession.get(sessionId) || { x: Math.max(12, targetPoint.x - randomRangeInt(40, 120)), y: Math.max(12, targetPoint.y - randomRangeInt(30, 90)) };
+      const steps = buildHumanMousePathEvents(lastPos, targetPoint);
+      lastPointerPositionBySession.set(sessionId, { x: targetPoint.x, y: targetPoint.y });
+
+      const shouldShowCursor = shouldShowAutomationCursorForSession(sessionId);
+      const visualPromise = playAutomationCursorPath(targetWebview, steps, shouldShowCursor);
+      const cdpResult = await (window as any).electronAPI.playMousePath(targetWebview.getWebContentsId(), steps);
+      await visualPromise;
+
+      await targetWebview.executeJavaScript(`
+        window.__SNAPPY_IG_POINTER_RESPONSE__ = {
+          id: ${JSON.stringify(request.id)},
+          success: ${cdpResult?.success === true ? 'true' : 'false'},
+          error: ${JSON.stringify(cdpResult?.error || '')}
+        };
+      `);
+    } catch {
+      // Ignore per-webview polling errors.
+    } finally {
+      processingInstagramPointerRequests.delete(sessionId);
+    }
+  }
+}, 350);
 
 // Poll for pending Reddit scheduler upload requests and set file input via main process
 setInterval(async () => {
