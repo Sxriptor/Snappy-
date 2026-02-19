@@ -750,6 +750,31 @@ export function buildRedditBotScript(config: Configuration): string {
     return false;
   }
 
+  async function requestRedditPointerClickByText(buttonText, timeoutMs) {
+    const text = String(buttonText || '').trim();
+    if (!text) return false;
+
+    const requestId = 'reddit-pointer-' + Date.now() + '-' + Math.random().toString(36).slice(2);
+    window.__SNAPPY_REDDIT_POINTER_RESPONSE__ = null;
+    window.__SNAPPY_REDDIT_POINTER_REQUEST__ = {
+      id: requestId,
+      text
+    };
+
+    let waited = 0;
+    const maxWait = Math.max(1200, Number(timeoutMs) || 7000);
+    while (waited < maxWait && isRunning) {
+      await sleep(180);
+      waited += 180;
+      const response = window.__SNAPPY_REDDIT_POINTER_RESPONSE__;
+      if (response && response.id === requestId) {
+        window.__SNAPPY_REDDIT_POINTER_RESPONSE__ = null;
+        return response.success === true;
+      }
+    }
+    return false;
+  }
+
   async function requestRedditKeyboardSequence(events, timeoutMs) {
     const normalizedEvents = Array.isArray(events) ? events : [];
     if (!normalizedEvents.length) return false;
@@ -805,6 +830,57 @@ export function buildRedditBotScript(config: Configuration): string {
     return true;
   }
 
+  async function tryCommitCommunityWithTabEnter() {
+    const pressTabOnce = async () => {
+      return await requestRedditKeyboardSequence([
+        { kind: 'dispatch', type: 'keyDown', key: 'Tab', code: 'Tab', windowsVirtualKeyCode: 9, nativeVirtualKeyCode: 9, delayMs: 40 },
+        { kind: 'dispatch', type: 'keyUp', key: 'Tab', code: 'Tab', windowsVirtualKeyCode: 9, nativeVirtualKeyCode: 9, delayMs: 70 }
+      ], 2200);
+    };
+    const pressEnterOnce = async () => {
+      return await requestRedditKeyboardSequence([
+        { kind: 'dispatch', type: 'keyDown', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13, delayMs: 40 },
+        { kind: 'dispatch', type: 'keyUp', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13, delayMs: 80 }
+      ], 2200);
+    };
+
+    const tabOne = await pressTabOnce();
+    await sleep(520);
+    const tabTwo = await pressTabOnce();
+    await sleep(560);
+    const enter = await pressEnterOnce();
+    const ok = tabOne && tabTwo && enter;
+    if (ok) {
+      log('Scheduler: attempted community commit via Tab, Tab, Enter');
+    }
+    return ok;
+  }
+
+  async function tryCommitCommunityViaRefocusCycle() {
+    // User-validated flow:
+    // Shift+Tab -> Tab -> Space -> Tab -> Tab -> Enter
+    const ok = await requestRedditKeyboardSequence([
+      { kind: 'dispatch', type: 'rawKeyDown', key: 'Shift', code: 'ShiftLeft', windowsVirtualKeyCode: 16, nativeVirtualKeyCode: 16, delayMs: 60 },
+      { kind: 'dispatch', type: 'keyDown', key: 'Tab', code: 'Tab', windowsVirtualKeyCode: 9, nativeVirtualKeyCode: 9, modifiers: 8, delayMs: 55 },
+      { kind: 'dispatch', type: 'keyUp', key: 'Tab', code: 'Tab', windowsVirtualKeyCode: 9, nativeVirtualKeyCode: 9, modifiers: 8, delayMs: 75 },
+      { kind: 'dispatch', type: 'keyUp', key: 'Shift', code: 'ShiftLeft', windowsVirtualKeyCode: 16, nativeVirtualKeyCode: 16, delayMs: 220 },
+      { kind: 'dispatch', type: 'keyDown', key: 'Tab', code: 'Tab', windowsVirtualKeyCode: 9, nativeVirtualKeyCode: 9, delayMs: 65 },
+      { kind: 'dispatch', type: 'keyUp', key: 'Tab', code: 'Tab', windowsVirtualKeyCode: 9, nativeVirtualKeyCode: 9, delayMs: 260 },
+      { kind: 'dispatch', type: 'keyDown', key: ' ', code: 'Space', windowsVirtualKeyCode: 32, nativeVirtualKeyCode: 32, delayMs: 80 },
+      { kind: 'dispatch', type: 'keyUp', key: ' ', code: 'Space', windowsVirtualKeyCode: 32, nativeVirtualKeyCode: 32, delayMs: 260 },
+      { kind: 'dispatch', type: 'keyDown', key: 'Tab', code: 'Tab', windowsVirtualKeyCode: 9, nativeVirtualKeyCode: 9, delayMs: 65 },
+      { kind: 'dispatch', type: 'keyUp', key: 'Tab', code: 'Tab', windowsVirtualKeyCode: 9, nativeVirtualKeyCode: 9, delayMs: 260 },
+      { kind: 'dispatch', type: 'keyDown', key: 'Tab', code: 'Tab', windowsVirtualKeyCode: 9, nativeVirtualKeyCode: 9, delayMs: 65 },
+      { kind: 'dispatch', type: 'keyUp', key: 'Tab', code: 'Tab', windowsVirtualKeyCode: 9, nativeVirtualKeyCode: 9, delayMs: 300 },
+      { kind: 'dispatch', type: 'keyDown', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13, delayMs: 90 },
+      { kind: 'dispatch', type: 'keyUp', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13, delayMs: 180 }
+    ], 9000);
+    if (ok) {
+      log('Scheduler: attempted community commit via Shift+Tab, Tab, Space, Tab, Tab, Enter');
+    }
+    return ok;
+  }
+
   async function clickElementHuman(el, timeoutMs) {
     if (!el || !(el instanceof HTMLElement)) return false;
     try {
@@ -817,6 +893,14 @@ export function buildRedditBotScript(config: Configuration): string {
 
     hardClickElement(el);
     return true;
+  }
+
+  async function clickButtonByTextHuman(buttonText, timeoutMs) {
+    const text = String(buttonText || '').trim();
+    if (!text) return false;
+    const pointerClicked = await requestRedditPointerClickByText(text, timeoutMs || 6000);
+    if (pointerClicked) return true;
+    return await clickButtonByText(text, timeoutMs || 3500);
   }
 
   async function typeCharacterByCharacter(inputEl, value) {
@@ -881,7 +965,7 @@ export function buildRedditBotScript(config: Configuration): string {
         const optionText = normalizeText(option.textContent || '');
         if (!optionText) continue;
         if (isCommunitySuggestionMatch(optionText, communityRaw)) {
-          hardClickElement(option);
+          await clickElementHuman(option, 4500);
           await sleep(280);
           return true;
         }
@@ -892,7 +976,7 @@ export function buildRedditBotScript(config: Configuration): string {
         return txt.startsWith('r/') || txt.startsWith('u/') || txt.includes(' members');
       });
       if (firstOption) {
-        hardClickElement(firstOption);
+        await clickElementHuman(firstOption, 4500);
         await sleep(280);
         return true;
       }
@@ -900,6 +984,68 @@ export function buildRedditBotScript(config: Configuration): string {
       await sleep(200);
     }
     return false;
+  }
+
+  async function clickSuggestionJustBelowInput(inputEl) {
+    if (!inputEl || !(inputEl instanceof HTMLElement)) return false;
+    try {
+      const rect = inputEl.getBoundingClientRect();
+      if (!rect || rect.width < 8 || rect.height < 8) return false;
+      const targetX = rect.left + Math.min(Math.max(26, rect.width * 0.28), rect.width - 10);
+      const targetY = rect.bottom + 3;
+      const clicked = await requestRedditPointerClickAt(targetX, targetY, 4500);
+      if (!clicked) return false;
+      await sleep(220);
+      await requestRedditKeyboardSequence([
+        { kind: 'dispatch', type: 'keyDown', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13, delayMs: 25 },
+        { kind: 'dispatch', type: 'keyUp', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13, delayMs: 65 }
+      ], 2200);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  async function clickNearestSuggestionRowBelowInput(inputEl, communityRaw) {
+    if (!inputEl || !(inputEl instanceof HTMLElement)) return false;
+    const inputRect = inputEl.getBoundingClientRect();
+    if (!inputRect || inputRect.width < 8 || inputRect.height < 8) return false;
+
+    const candidates = deepQueryAll('[role="option"], li[role="option"], [role="listbox"] [role="button"], [role="menu"] [role="menuitem"], faceplate-menu-item, button, a, div')
+      .filter(node => node instanceof HTMLElement && isVisibleElement(node));
+
+    let best = null;
+    let bestScore = -1;
+    for (const node of candidates) {
+      if (!(node instanceof HTMLElement)) continue;
+      if (node === inputEl || inputEl.contains(node) || node.contains(inputEl)) continue;
+
+      const rect = node.getBoundingClientRect();
+      if (!rect || rect.width < 6 || rect.height < 6) continue;
+      if (rect.top < (inputRect.bottom - 2)) continue;
+      if (rect.top > (inputRect.bottom + 280)) continue;
+      if (Math.abs(rect.left - inputRect.left) > 260 && Math.abs((rect.left + rect.width) - (inputRect.left + inputRect.width)) > 260) continue;
+
+      const txt = normalizeText(node.textContent || '');
+      if (!txt) continue;
+      const lowered = txt.toLowerCase();
+      if (lowered.includes('create') && lowered.includes('community')) continue;
+
+      let score = 1000 - Math.abs(rect.top - inputRect.bottom) - Math.abs(rect.left - inputRect.left) * 0.15;
+      if (isCommunitySuggestionMatch(txt, communityRaw)) score += 220;
+      if (lowered.startsWith('r/') || lowered.startsWith('u/')) score += 90;
+      if (lowered.includes(' members') || lowered.includes('member')) score += 35;
+
+      if (score > bestScore) {
+        best = node;
+        bestScore = score;
+      }
+    }
+
+    if (!best || !(best instanceof HTMLElement)) return false;
+    await clickElementHuman(best, 5000);
+    await sleep(260);
+    return true;
   }
 
   async function nudgeCommunitySearchInput(inputEl) {
@@ -1111,27 +1257,34 @@ export function buildRedditBotScript(config: Configuration): string {
   }
 
   async function openCreatePostComposer() {
-    const clickedCreate =
-      await clickButtonByText('create', 6000) ||
-      await clickButtonByText('create post', 4000);
+    for (let attempt = 0; attempt < 5; attempt++) {
+      const clickedCreate =
+        await clickButtonByTextHuman('create post', 5500) ||
+        await clickButtonByTextHuman('create', 5000);
 
-    if (!clickedCreate) {
-      log('Scheduler: could not find Create button in Reddit header');
-      return false;
+      if (!clickedCreate) {
+        await sleep(450);
+        continue;
+      }
+
+      const composerSurface = await waitForDeepSelector([
+        'input[name="title"]',
+        'textarea[name="title"]',
+        'input[aria-label*="title" i]',
+        '[data-testid*="post-composer" i]',
+        '[role="dialog"]',
+        'shreddit-post-composer',
+        'button[aria-label*="community" i]',
+        '[role="button"][aria-label*="community" i]'
+      ], 5500 + (attempt * 900));
+
+      if (composerSurface) return true;
+      log('Scheduler: create clicked but composer not ready (attempt ' + (attempt + 1) + '), retrying');
+      await sleep(550);
     }
 
-    const composerSurface = await waitForDeepSelector([
-      'input[name="title"]',
-      'textarea[name="title"]',
-      'input[aria-label*="title" i]',
-      '[data-testid*="post-composer" i]',
-      '[role="dialog"]',
-      'shreddit-post-composer',
-      'button[aria-label*="community" i]',
-      '[role="button"][aria-label*="community" i]'
-    ], 12000);
-
-    return !!composerSurface;
+    log('Scheduler: could not open Create Post composer');
+    return false;
   }
 
   async function waitForAnyComposerSurface(timeoutMs) {
@@ -1242,10 +1395,32 @@ export function buildRedditBotScript(config: Configuration): string {
       await sleep(480);
     }
 
+    const committedViaRefocusCycle = await tryCommitCommunityViaRefocusCycle();
+    if (!committedViaRefocusCycle) {
+      await tryCommitCommunityWithTabEnter();
+    }
+    await sleep(220);
+
     const clickedSuggestion = await clickCommunitySuggestion(community);
     if (clickedSuggestion) {
+      await requestRedditKeyboardSequence([
+        { kind: 'dispatch', type: 'keyDown', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13, delayMs: 30 },
+        { kind: 'dispatch', type: 'keyUp', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13, delayMs: 60 }
+      ], 2200);
       return true;
     }
+
+    const clickedByOffset = await clickSuggestionJustBelowInput(liveInput && liveInput instanceof HTMLElement ? liveInput : input);
+    if (clickedByOffset) {
+      await sleep(260);
+      const clickedAfterOffset = await clickCommunitySuggestion(community);
+      if (clickedAfterOffset) return true;
+      const clickedNearestAfterOffset = await clickNearestSuggestionRowBelowInput(liveInput && liveInput instanceof HTMLElement ? liveInput : input, community);
+      if (clickedNearestAfterOffset) return true;
+    }
+
+    const clickedNearest = await clickNearestSuggestionRowBelowInput(liveInput && liveInput instanceof HTMLElement ? liveInput : input, community);
+    if (clickedNearest) return true;
 
     const liveInputBeforeNudge = await waitForDeepSelector(inputSelectors, 2000);
     if (liveInputBeforeNudge && liveInputBeforeNudge instanceof HTMLElement) {
@@ -1260,12 +1435,13 @@ export function buildRedditBotScript(config: Configuration): string {
       return true;
     }
 
-    // Fallback: use keyboard selection if suggestion menu is present but not clickable by selector.
-    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', code: 'ArrowDown', bubbles: true }));
-    input.dispatchEvent(new KeyboardEvent('keyup', { key: 'ArrowDown', code: 'ArrowDown', bubbles: true }));
-    await sleep(150);
-    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', bubbles: true }));
-    input.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', bubbles: true }));
+    // Fallback: use trusted keyboard selection if suggestion menu is present but not clickable by selector.
+    await requestRedditKeyboardSequence([
+      { kind: 'dispatch', type: 'keyDown', key: 'ArrowDown', code: 'ArrowDown', windowsVirtualKeyCode: 40, nativeVirtualKeyCode: 40, delayMs: 35 },
+      { kind: 'dispatch', type: 'keyUp', key: 'ArrowDown', code: 'ArrowDown', windowsVirtualKeyCode: 40, nativeVirtualKeyCode: 40, delayMs: 50 },
+      { kind: 'dispatch', type: 'keyDown', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13, delayMs: 40 },
+      { kind: 'dispatch', type: 'keyUp', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13, delayMs: 75 }
+    ], 3200);
     await sleep(250);
     const pickedByKeyboard = await clickCommunitySuggestion(community);
     if (pickedByKeyboard) return true;
