@@ -333,6 +333,326 @@ export function buildRedditBotScript(config: Configuration): string {
     scheduleNextSubredditCheck();
   }
 
+  function hashString(value) {
+    const str = String(value || '');
+    let hash = 0;
+    for (let i = 0; i < str.length; i++) {
+      hash = ((hash << 5) - hash) + str.charCodeAt(i);
+      hash |= 0;
+    }
+    return Math.abs(hash);
+  }
+
+  function getDayKey(date) {
+    const map = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
+    return map[date.getDay()] || 'monday';
+  }
+
+  function normalizeTime(value) {
+    const match = String(value || '').trim().match(/^(\\d{1,2}):(\\d{2})$/);
+    if (!match) return null;
+    const hour = Math.max(0, Math.min(23, parseInt(match[1], 10)));
+    const minute = Math.max(0, Math.min(59, parseInt(match[2], 10)));
+    return {
+      hour,
+      minute,
+      text: String(hour).padStart(2, '0') + ':' + String(minute).padStart(2, '0')
+    };
+  }
+
+  function normalizeScheduledSubreddit(raw) {
+    return String(raw || '').trim().replace(/^r\\//i, '').replace(/^\\/+|\\/+$/g, '');
+  }
+
+  function getSchedulerConfig() {
+    return settings.postScheduler || {};
+  }
+
+  function getSchedulerPosts() {
+    const scheduler = getSchedulerConfig();
+    const posts = Array.isArray(scheduler.posts) ? scheduler.posts : [];
+    return posts.filter(post =>
+      post &&
+      typeof post.id === 'string' &&
+      typeof post.body === 'string' &&
+      (post.mediaPath === undefined || typeof post.mediaPath === 'string')
+    );
+  }
+
+  function getNextScheduledPost() {
+    const posts = getSchedulerPosts();
+    if (posts.length === 0) return null;
+    const key = '__snappy_reddit_scheduler_next_post_index__';
+    const currentIndex = parseInt(localStorage.getItem(key) || '0', 10) || 0;
+    const selected = posts[currentIndex % posts.length];
+    localStorage.setItem(key, String((currentIndex + 1) % posts.length));
+    return selected;
+  }
+
+  function splitRedditPostContent(rawText) {
+    const cleaned = String(rawText || '').replace(/\\r/g, '').trim();
+    if (!cleaned) return null;
+    const lines = cleaned.split('\\n').map(line => line.trim()).filter(Boolean);
+    if (!lines.length) return null;
+    let title = lines[0];
+    if (title.length > 300) {
+      title = title.substring(0, 300);
+    }
+    const body = lines.slice(1).join('\\n\\n').trim();
+    return { title, body };
+  }
+
+  async function requestRedditMediaAttach(filePath) {
+    if (!filePath) return true;
+    const requestId = 'reddit-upload-' + Date.now() + '-' + Math.random().toString(36).slice(2);
+    window.__SNAPPY_REDDIT_UPLOAD_RESPONSE__ = null;
+    window.__SNAPPY_REDDIT_UPLOAD_REQUEST__ = {
+      id: requestId,
+      filePaths: [filePath],
+      selector: 'input[type="file"]'
+    };
+
+    let waited = 0;
+    const timeoutMs = 30000;
+    while (waited < timeoutMs && isRunning) {
+      await sleep(250);
+      waited += 250;
+      const response = window.__SNAPPY_REDDIT_UPLOAD_RESPONSE__;
+      if (response && response.id === requestId) {
+        window.__SNAPPY_REDDIT_UPLOAD_RESPONSE__ = null;
+        return response.success === true;
+      }
+    }
+    return false;
+  }
+
+  async function waitForSelector(selectors, timeoutMs) {
+    const start = Date.now();
+    while ((Date.now() - start) < timeoutMs && isRunning) {
+      for (const selector of selectors) {
+        const found = document.querySelector(selector);
+        if (found) return found;
+      }
+      await sleep(220);
+    }
+    return null;
+  }
+
+  async function clickButtonByText(buttonText, timeoutMs) {
+    const matchText = String(buttonText || '').trim().toLowerCase();
+    const start = Date.now();
+    while ((Date.now() - start) < timeoutMs && isRunning) {
+      const buttons = deepQueryAll('button, [role="button"], faceplate-tracker, a');
+      for (const button of buttons) {
+        if (!(button instanceof HTMLElement)) continue;
+        const txt = normalizeText(button.textContent || '').toLowerCase();
+        const aria = normalizeText(button.getAttribute('aria-label') || '').toLowerCase();
+        if (txt === matchText || txt.includes(matchText) || aria === matchText || aria.includes(matchText)) {
+          button.click();
+          return true;
+        }
+      }
+      await sleep(220);
+    }
+    return false;
+  }
+
+  function setInputValue(inputEl, value) {
+    if (!inputEl || !(inputEl instanceof HTMLElement)) return;
+    if ('focus' in inputEl) inputEl.focus();
+    const text = String(value || '');
+
+    if (inputEl instanceof HTMLInputElement || inputEl instanceof HTMLTextAreaElement) {
+      inputEl.value = text;
+      inputEl.dispatchEvent(new Event('input', { bubbles: true }));
+      inputEl.dispatchEvent(new Event('change', { bubbles: true }));
+      return;
+    }
+
+    if (inputEl.getAttribute('contenteditable') === 'true' || inputEl.getAttribute('contenteditable') === 'plaintext-only') {
+      inputEl.textContent = text;
+      inputEl.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: text }));
+      inputEl.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+  }
+
+  async function navigateToRedditSubmit(subreddit) {
+    const cleanSubreddit = normalizeScheduledSubreddit(subreddit);
+    const targetUrl = cleanSubreddit
+      ? 'https://www.reddit.com/r/' + encodeURIComponent(cleanSubreddit) + '/submit'
+      : 'https://www.reddit.com/submit';
+
+    if (window.location.href !== targetUrl) {
+      window.location.assign(targetUrl);
+    }
+
+    const ready = await waitForSelector([
+      'input[name="title"]',
+      'textarea[name="title"]',
+      '[data-testid*="post-composer" i]',
+      '[role="textbox"][aria-label*="title" i]'
+    ], 15000);
+
+    if (!ready) {
+      log('Scheduler: Reddit submit composer not found');
+      return false;
+    }
+
+    return true;
+  }
+
+  async function publishScheduledRedditPost(post) {
+    if (!post || typeof post.body !== 'string') {
+      log('Scheduler: invalid scheduled Reddit post payload');
+      return false;
+    }
+
+    if (isPostingScheduledContent) {
+      return false;
+    }
+
+    const scheduler = getSchedulerConfig();
+    const parsed = splitRedditPostContent(post.body);
+    if (!parsed) {
+      log('Scheduler: text file is empty for item ' + String(post.id || 'unknown'));
+      return false;
+    }
+
+    isPostingScheduledContent = true;
+    try {
+      const targetSubreddit = normalizeScheduledSubreddit(scheduler.subreddit || '');
+      log('Scheduler: starting Reddit publish for item ' + String(post.id || 'unknown') + (targetSubreddit ? (' in r/' + targetSubreddit) : ' on profile'));
+
+      const ready = await navigateToRedditSubmit(targetSubreddit);
+      if (!ready) return false;
+
+      await sleep(900);
+      if (post.mediaPath) {
+        const mediaTabClicked = await clickButtonByText('images & video', 3000) || await clickButtonByText('image', 3000);
+        if (!mediaTabClicked) {
+          log('Scheduler: media tab not found, trying direct file input');
+        }
+        await sleep(300);
+        const attached = await requestRedditMediaAttach(post.mediaPath);
+        if (!attached) {
+          log('Scheduler: media attach failed');
+          return false;
+        }
+        await sleep(900);
+      } else {
+        await clickButtonByText('post', 2500);
+        await sleep(300);
+      }
+
+      const titleInput = await waitForSelector([
+        'input[name="title"]',
+        'textarea[name="title"]',
+        'textarea[aria-label*="title" i]',
+        '[role="textbox"][aria-label*="title" i]'
+      ], 10000);
+
+      if (!titleInput) {
+        log('Scheduler: title input not found');
+        return false;
+      }
+      setInputValue(titleInput, parsed.title);
+
+      if (parsed.body) {
+        const bodyInput = await waitForSelector([
+          'textarea[name="text"]',
+          'textarea[aria-label*="body" i]',
+          '[role="textbox"][aria-label*="body" i]',
+          '[contenteditable="true"][role="textbox"]'
+        ], 4000);
+        if (bodyInput) {
+          setInputValue(bodyInput, parsed.body);
+        }
+      }
+
+      await sleep(500);
+
+      const posted = await clickButtonByText('post', 10000) || await clickButtonByText('publish', 10000);
+      if (!posted) {
+        log('Scheduler: post submit button not found');
+        return false;
+      }
+
+      log('Scheduler: Reddit post submitted');
+      return true;
+    } catch (error) {
+      log('Scheduler publish error: ' + error);
+      return false;
+    } finally {
+      isPostingScheduledContent = false;
+    }
+  }
+
+  function getDueScheduleSlot() {
+    const scheduler = getSchedulerConfig();
+    if (scheduler.enabled !== true) return null;
+    const folderPath = typeof scheduler.folderPath === 'string' ? scheduler.folderPath.trim() : '';
+    if (!folderPath) return null;
+
+    const now = new Date();
+    const dayKey = getDayKey(now);
+    const dayConfig = scheduler.days?.[dayKey];
+    if (!dayConfig || dayConfig.enabled !== true || !Array.isArray(dayConfig.times) || dayConfig.times.length === 0) {
+      return null;
+    }
+
+    const year = now.getFullYear();
+    const month = now.getMonth();
+    const day = now.getDate();
+
+    for (const timeValue of dayConfig.times) {
+      const normalized = normalizeTime(timeValue);
+      if (!normalized) continue;
+
+      const baseTime = new Date(year, month, day, normalized.hour, normalized.minute, 0, 0);
+      const slotKeyBase = year + '-' + (month + 1) + '-' + day + '-' + dayKey + '-' + normalized.text;
+      const randomOffset = (hashString(slotKeyBase) % (SCHEDULER_JITTER_MINUTES * 2 + 1)) - SCHEDULER_JITTER_MINUTES;
+      const runAt = new Date(baseTime.getTime() + randomOffset * 60 * 1000);
+      const windowEnd = new Date(baseTime.getTime() + SCHEDULER_JITTER_MINUTES * 60 * 1000);
+      const slotKey = slotKeyBase + '-off-' + randomOffset;
+
+      if (processedScheduleSlots.has(slotKey)) continue;
+      if (now < runAt) continue;
+      if (now > windowEnd) continue;
+
+      return {
+        slotKey,
+        planned: normalized.text,
+        runAt,
+        offsetMinutes: randomOffset
+      };
+    }
+
+    return null;
+  }
+
+  async function processScheduledPosting() {
+    const scheduler = getSchedulerConfig();
+    if (scheduler.enabled !== true || !isRunning) return;
+    if (isPostingScheduledContent) return;
+
+    const dueSlot = getDueScheduleSlot();
+    if (!dueSlot) return;
+
+    const post = getNextScheduledPost();
+    if (!post) {
+      log('Scheduler: no .txt posts available to publish');
+      processedScheduleSlots.add(dueSlot.slotKey);
+      return;
+    }
+
+    log('Scheduler due at ' + dueSlot.planned + ' with random offset ' + dueSlot.offsetMinutes + ' min');
+    const posted = await publishScheduledRedditPost(post);
+    if (posted) {
+      processedScheduleSlots.add(dueSlot.slotKey);
+      threadsAnchored = false;
+    }
+  }
+
   function buildPmId(item) {
     return String(item?.data?.name || item?.data?.id || item?.data?.first_message_name || '');
   }
@@ -1427,6 +1747,7 @@ export function buildRedditBotScript(config: Configuration): string {
       await readUnreadPrivateMessages();
       await processUnreadPmConversations();
       await runSubredditCheck(false);
+      await processScheduledPosting();
     } catch (error) {
       log('Poll error: ' + error);
     } finally {
@@ -1454,6 +1775,7 @@ export function buildRedditBotScript(config: Configuration): string {
   log('Reddit bot started');
   log('Watch list size: ' + ((settings.watchSubreddits && settings.watchSubreddits.length) || 0));
   log('PM settings: watch=' + (settings.watchPrivateMessages !== false) + ', read=' + (settings.readPrivateMessages !== false) + ', autoReply=' + (settings.autoReplyToPMs !== false));
+  log('Scheduler: enabled=' + ((settings.postScheduler && settings.postScheduler.enabled) === true) + ', posts=' + getSchedulerPosts().length);
   log('Poll interval: random ' + MIN_POLL_MS + '-' + MAX_POLL_MS + 'ms');
   if (String(settings.authCookieString || '').trim() || String(settings.sessionCookie || '').trim()) {
     log('Manual Reddit auth cookies configured');

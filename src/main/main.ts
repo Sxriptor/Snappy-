@@ -365,38 +365,57 @@ export function setupIPCHandlers(): void {
         '.mkv'
       ]);
 
+      const videoExtensions = new Set(['.mp4', '.mov', '.webm', '.mkv']);
+
+      const getGroupKey = (baseName: string): string => {
+        const trimmed = (baseName || '').trim();
+        if (!trimmed) return trimmed;
+        const suffixMatch = trimmed.match(/^(.*?)-(\d+)$/);
+        if (suffixMatch && suffixMatch[1]) {
+          return suffixMatch[1];
+        }
+        return trimmed;
+      };
+
       const files = fs.readdirSync(folderPath, { withFileTypes: true }).filter(entry => entry.isFile());
-      const buckets = new Map<string, { media: string[]; text: string | null }>();
+      const buckets = new Map<string, { media: string[]; text: string[] }>();
 
       for (const file of files) {
         const ext = path.extname(file.name).toLowerCase();
         const base = path.basename(file.name, ext);
         if (!base) continue;
+        const groupKey = getGroupKey(base);
+        if (!groupKey) continue;
 
-        if (!buckets.has(base)) {
-          buckets.set(base, { media: [], text: null });
+        if (!buckets.has(groupKey)) {
+          buckets.set(groupKey, { media: [], text: [] });
         }
 
-        const bucket = buckets.get(base)!;
+        const bucket = buckets.get(groupKey)!;
         if (mediaExtensions.has(ext)) {
           bucket.media.push(file.name);
         } else if (ext === '.txt') {
-          bucket.text = file.name;
+          bucket.text.push(file.name);
         }
       }
 
       const posts = Array.from(buckets.entries())
-        .filter(([, bucket]) => bucket.media.length > 0 && bucket.text !== null)
+        .filter(([, bucket]) => bucket.media.length > 0 && bucket.text.length > 0)
         .sort((a, b) => a[0].localeCompare(b[0], undefined, { numeric: true, sensitivity: 'base' }))
         .map(([id, bucket]) => {
-          const mediaFile = bucket.media.sort((a, b) => a.localeCompare(b, undefined, { numeric: true }))[0];
-          const mediaPath = path.join(folderPath, mediaFile);
-          const textPath = path.join(folderPath, bucket.text!);
+          const mediaFiles = bucket.media.sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' }));
+          const preferredTextName = `${id}.txt`;
+          const textFile = bucket.text.find(name => name.toLowerCase() === preferredTextName.toLowerCase())
+            || bucket.text.sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' }))[0];
+
+          const mediaPaths = mediaFiles.map(file => path.join(folderPath, file));
+          const mediaPath = mediaPaths[0];
+          const textPath = path.join(folderPath, textFile);
           const caption = fs.readFileSync(textPath, 'utf-8').trim();
-          const mediaExt = path.extname(mediaFile).toLowerCase();
-          const mediaType = ['.mp4', '.mov', '.webm', '.mkv'].includes(mediaExt) ? 'video' : 'image';
+          const mediaType = mediaFiles.some(file => videoExtensions.has(path.extname(file).toLowerCase())) ? 'video' : 'image';
           return {
             id,
+            mediaPaths,
             mediaPath,
             textPath,
             caption,

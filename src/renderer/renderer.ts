@@ -2073,6 +2073,7 @@ interface InstagramDaySchedule {
 
 interface InstagramScheduledPost {
   id: string;
+  mediaPaths: string[];
   mediaPath: string;
   textPath: string;
   caption: string;
@@ -3630,15 +3631,30 @@ function normalizeInstagramSchedulerSettings(value: unknown): InstagramPostSched
   }
 
   const posts = Array.isArray(settings.posts)
-    ? settings.posts.filter((item): item is InstagramScheduledPost => {
-      if (typeof item !== 'object' || item === null) return false;
+    ? settings.posts.map((item): InstagramScheduledPost | null => {
+      if (typeof item !== 'object' || item === null) return null;
       const candidate = item as Partial<InstagramScheduledPost>;
-      return typeof candidate.id === 'string' &&
-        typeof candidate.mediaPath === 'string' &&
-        typeof candidate.textPath === 'string' &&
-        typeof candidate.caption === 'string' &&
-        (candidate.mediaType === 'image' || candidate.mediaType === 'video');
-    })
+      const mediaPaths = Array.isArray(candidate.mediaPaths)
+        ? candidate.mediaPaths.filter((p): p is string => typeof p === 'string' && p.trim().length > 0)
+        : (typeof candidate.mediaPath === 'string' && candidate.mediaPath.trim().length > 0 ? [candidate.mediaPath] : []);
+
+      if (typeof candidate.id !== 'string' ||
+          mediaPaths.length === 0 ||
+          typeof candidate.textPath !== 'string' ||
+          typeof candidate.caption !== 'string' ||
+          (candidate.mediaType !== 'image' && candidate.mediaType !== 'video')) {
+        return null;
+      }
+
+      return {
+        id: candidate.id,
+        mediaPaths,
+        mediaPath: mediaPaths[0],
+        textPath: candidate.textPath,
+        caption: candidate.caption,
+        mediaType: candidate.mediaType
+      };
+    }).filter((item): item is InstagramScheduledPost => item !== null)
     : [];
 
   return {
@@ -3923,7 +3939,7 @@ function renderSchedulerContentPreview(posts: InstagramScheduledPost[]): void {
     return;
   }
 
-  const previewLines = posts.slice(0, 8).map((post) => `${post.id} -> ${post.mediaType.toUpperCase()}`);
+  const previewLines = posts.slice(0, 8).map((post) => `${post.id} -> ${post.mediaPaths.length} file(s), ${post.mediaType.toUpperCase()}`);
   const suffix = posts.length > 8 ? `\n...and ${posts.length - 8} more` : '';
   instagramSchedulerPreview.textContent = `Found ${posts.length} post pair(s):\n${previewLines.join('\n')}${suffix}`;
 }

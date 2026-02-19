@@ -81,6 +81,7 @@ export interface InstagramSiteSettings {
 
 export interface InstagramScheduledPost {
   id: string;
+  mediaPaths: string[];
   mediaPath: string;
   textPath: string;
   caption: string;

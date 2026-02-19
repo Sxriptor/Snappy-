@@ -132,28 +132,85 @@ export function buildInstagramBotScript(config: Configuration): string {
       return posts.filter(post =>
         post &&
         typeof post.id === 'string' &&
-        typeof post.mediaPath === 'string' &&
+        ((Array.isArray(post.mediaPaths) && post.mediaPaths.length > 0) || typeof post.mediaPath === 'string') &&
         typeof post.caption === 'string'
       );
+    }
+
+    function getPostMediaPaths(post) {
+      if (!post) return [];
+      if (Array.isArray(post.mediaPaths)) {
+        return post.mediaPaths.filter(item => typeof item === 'string' && item.trim().length > 0);
+      }
+      if (typeof post.mediaPath === 'string' && post.mediaPath.trim().length > 0) {
+        return [post.mediaPath];
+      }
+      return [];
+    }
+
+    function getPostedState() {
+      try {
+        const raw = localStorage.getItem('__snappy_ig_scheduler_posted__');
+        if (!raw) return {};
+        const parsed = JSON.parse(raw);
+        if (parsed && typeof parsed === 'object') return parsed;
+      } catch {}
+      return {};
+    }
+
+    function savePostedState(state) {
+      try {
+        localStorage.setItem('__snappy_ig_scheduler_posted__', JSON.stringify(state || {}));
+      } catch {}
+    }
+
+    function getPostSignature(post) {
+      const mediaPaths = getPostMediaPaths(post).slice().sort();
+      return mediaPaths.join('|') + '::' + String(post?.textPath || post?.id || '');
+    }
+
+    function isPostAlreadyPublished(post, folderPath) {
+      const postedState = getPostedState();
+      const key = String(folderPath || '');
+      const signatures = Array.isArray(postedState[key]) ? postedState[key] : [];
+      return signatures.includes(getPostSignature(post));
+    }
+
+    function markPostPublished(post, folderPath) {
+      const postedState = getPostedState();
+      const key = String(folderPath || '');
+      const signatures = Array.isArray(postedState[key]) ? postedState[key] : [];
+      const signature = getPostSignature(post);
+      if (!signatures.includes(signature)) {
+        signatures.push(signature);
+      }
+      postedState[key] = signatures;
+      savePostedState(postedState);
     }
 
     function getNextScheduledPost() {
       const posts = getSchedulerPosts();
       if (posts.length === 0) return null;
-      const key = '__snappy_ig_scheduler_next_post_index__';
-      const currentIndex = parseInt(localStorage.getItem(key) || '0', 10) || 0;
-      const selected = posts[currentIndex % posts.length];
-      localStorage.setItem(key, String((currentIndex + 1) % posts.length));
-      return selected;
+      const folderPath = typeof schedulerConfig.folderPath === 'string' ? schedulerConfig.folderPath.trim() : '';
+      const sorted = posts.slice().sort((a, b) => String(a.id).localeCompare(String(b.id), undefined, { numeric: true, sensitivity: 'base' }));
+      for (const post of sorted) {
+        if (!isPostAlreadyPublished(post, folderPath)) {
+          return post;
+        }
+      }
+      return null;
     }
 
-    async function requestMediaAttach(filePath) {
-      if (!filePath) return false;
+    async function requestMediaAttach(filePaths) {
+      const normalizedPaths = Array.isArray(filePaths)
+        ? filePaths.filter(item => typeof item === 'string' && item.trim().length > 0)
+        : [];
+      if (normalizedPaths.length === 0) return false;
       const requestId = 'ig-upload-' + Date.now() + '-' + Math.random().toString(36).slice(2);
       window.__SNAPPY_IG_UPLOAD_RESPONSE__ = null;
       window.__SNAPPY_IG_UPLOAD_REQUEST__ = {
         id: requestId,
-        filePaths: [filePath],
+        filePaths: normalizedPaths,
         selector: 'input[type="file"]'
       };
 
@@ -236,7 +293,8 @@ export function buildInstagramBotScript(config: Configuration): string {
     }
 
     async function publishScheduledPost(post) {
-      if (!post || !post.mediaPath) {
+      const mediaPaths = getPostMediaPaths(post);
+      if (!post || mediaPaths.length === 0) {
         log('Scheduler: No scheduled media found');
         return false;
       }
@@ -258,7 +316,7 @@ export function buildInstagramBotScript(config: Configuration): string {
           return false;
         }
 
-        const attached = await requestMediaAttach(post.mediaPath);
+        const attached = await requestMediaAttach(mediaPaths);
         if (!attached) {
           log('Scheduler: media attach failed');
           return false;
@@ -346,7 +404,7 @@ export function buildInstagramBotScript(config: Configuration): string {
 
       const post = getNextScheduledPost();
       if (!post) {
-        log('Scheduler: no media/text pairs available to post');
+        log('Scheduler: no unposted media/text pairs available');
         processedScheduleSlots.add(dueSlot.slotKey);
         return;
       }
@@ -354,6 +412,8 @@ export function buildInstagramBotScript(config: Configuration): string {
       log('Scheduler due at ' + dueSlot.planned + ' with random offset ' + dueSlot.offsetMinutes + ' min');
       const posted = await publishScheduledPost(post);
       if (posted) {
+        const folderPath = typeof schedulerConfig.folderPath === 'string' ? schedulerConfig.folderPath.trim() : '';
+        markPostPublished(post, folderPath);
         processedScheduleSlots.add(dueSlot.slotKey);
       }
     }
