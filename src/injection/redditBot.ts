@@ -784,7 +784,7 @@ export function buildRedditBotScript(config: Configuration): string {
         const optionText = normalizeText(option.textContent || '');
         if (!optionText) continue;
         if (isCommunitySuggestionMatch(optionText, communityRaw)) {
-          option.click();
+          hardClickElement(option);
           await sleep(280);
           return true;
         }
@@ -795,7 +795,7 @@ export function buildRedditBotScript(config: Configuration): string {
         return txt.startsWith('r/') || txt.startsWith('u/') || txt.includes(' members');
       });
       if (firstOption) {
-        firstOption.click();
+        hardClickElement(firstOption);
         await sleep(280);
         return true;
       }
@@ -803,6 +803,86 @@ export function buildRedditBotScript(config: Configuration): string {
       await sleep(200);
     }
     return false;
+  }
+
+  async function nudgeCommunitySearchInput(inputEl) {
+    if (!inputEl || !(inputEl instanceof HTMLElement)) return;
+
+    let current = '';
+    if (inputEl instanceof HTMLInputElement || inputEl instanceof HTMLTextAreaElement) {
+      current = String(inputEl.value || '');
+    } else if (inputEl.getAttribute('contenteditable') === 'true' || inputEl.getAttribute('contenteditable') === 'plaintext-only') {
+      current = String(inputEl.textContent || '');
+    }
+    if (!current) return;
+
+    const trimmed = current.trim();
+    if (!trimmed) return;
+    const withoutLast = trimmed.slice(0, -1);
+    const lastChar = trimmed.slice(-1);
+
+    setInputValue(inputEl, withoutLast);
+    inputEl.dispatchEvent(new Event('input', { bubbles: true }));
+    await sleep(260);
+
+    setInputValue(inputEl, trimmed);
+    inputEl.dispatchEvent(new Event('input', { bubbles: true }));
+    inputEl.dispatchEvent(new Event('change', { bubbles: true }));
+    await sleep(320);
+
+    if (lastChar) {
+      inputEl.dispatchEvent(new KeyboardEvent('keydown', { key: lastChar, bubbles: true }));
+      inputEl.dispatchEvent(new KeyboardEvent('keyup', { key: lastChar, bubbles: true }));
+    }
+  }
+
+  function hardClickElement(el) {
+    if (!el || !(el instanceof HTMLElement)) return;
+    try { el.scrollIntoView({ block: 'center', inline: 'nearest' }); } catch {}
+    const events = [
+      ['pointerover', { bubbles: true }],
+      ['mouseover', { bubbles: true }],
+      ['pointerdown', { bubbles: true, cancelable: true }],
+      ['mousedown', { bubbles: true, cancelable: true }],
+      ['pointerup', { bubbles: true, cancelable: true }],
+      ['mouseup', { bubbles: true, cancelable: true }],
+      ['click', { bubbles: true, cancelable: true }]
+    ];
+    for (const [name, opts] of events) {
+      try {
+        const Evt = name.startsWith('pointer') ? PointerEvent : MouseEvent;
+        el.dispatchEvent(new Evt(name, opts));
+      } catch {}
+    }
+    try { el.click(); } catch {}
+  }
+
+  async function appendCharWithTypingEvents(inputEl, char) {
+    if (!inputEl || !(inputEl instanceof HTMLElement)) return;
+    const key = String(char || '');
+    if (!key) return;
+
+    try { inputEl.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true })); } catch {}
+    try { inputEl.dispatchEvent(new KeyboardEvent('keypress', { key, bubbles: true, cancelable: true })); } catch {}
+
+    if (inputEl instanceof HTMLInputElement || inputEl instanceof HTMLTextAreaElement) {
+      const current = String(inputEl.value || '');
+      inputEl.value = current + key;
+      try {
+        inputEl.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: key }));
+      } catch {
+        inputEl.dispatchEvent(new Event('input', { bubbles: true }));
+      }
+    } else if (inputEl.getAttribute('contenteditable') === 'true' || inputEl.getAttribute('contenteditable') === 'plaintext-only') {
+      inputEl.textContent = (inputEl.textContent || '') + key;
+      try {
+        inputEl.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: key }));
+      } catch {
+        inputEl.dispatchEvent(new Event('input', { bubbles: true }));
+      }
+    }
+
+    try { inputEl.dispatchEvent(new KeyboardEvent('keyup', { key, bubbles: true, cancelable: true })); } catch {}
   }
 
   async function clickButtonByText(buttonText, timeoutMs) {
@@ -1032,13 +1112,7 @@ export function buildRedditBotScript(config: Configuration): string {
     }
 
     for (const char of remainder) {
-      if (input instanceof HTMLInputElement || input instanceof HTMLTextAreaElement) {
-        input.value += char;
-        input.dispatchEvent(new Event('input', { bubbles: true }));
-      } else if (input.getAttribute('contenteditable') === 'true' || input.getAttribute('contenteditable') === 'plaintext-only') {
-        input.textContent = (input.textContent || '') + char;
-        input.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: char }));
-      }
+      await appendCharWithTypingEvents(input, char);
       await sleep(140 + randomRange(40, 140));
     }
     input.dispatchEvent(new Event('change', { bubbles: true }));
@@ -1046,6 +1120,12 @@ export function buildRedditBotScript(config: Configuration): string {
 
     const clickedSuggestion = await clickCommunitySuggestion(community);
     if (clickedSuggestion) {
+      return true;
+    }
+
+    await nudgeCommunitySearchInput(input);
+    const clickedAfterNudge = await clickCommunitySuggestion(community);
+    if (clickedAfterNudge) {
       return true;
     }
 
