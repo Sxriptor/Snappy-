@@ -8,6 +8,7 @@ import { autoUpdater } from 'electron-updater';
 import * as path from 'path';
 import * as fs from 'fs';
 import * as https from 'https';
+import * as os from 'os';
 import { Configuration, DEFAULT_CONFIG, DEFAULT_AI_CONFIG, SessionConfig, ProxyConfig, IncomingMessage, AIConfig } from '../types';
 import { SessionManager } from './sessionManager';
 import { ProxyManager } from './proxyManager';
@@ -37,11 +38,19 @@ const sessionManager = new SessionManager(
   proxyManager
 );
 
+function getRuntimeConfigPath(): string {
+  try {
+    return path.join(app.getPath('userData'), 'config.json');
+  } catch {
+    return path.join(os.homedir(), '.snappy', 'config.json');
+  }
+}
+
 /**
  * Load configuration from config.json or use defaults
  */
 export function loadConfiguration(): Configuration {
-  const configPath = path.join(process.cwd(), 'config.json');
+  const configPath = getRuntimeConfigPath();
   
   try {
     if (fs.existsSync(configPath)) {
@@ -55,7 +64,7 @@ export function loadConfiguration(): Configuration {
       } else {
         config.ai = DEFAULT_AI_CONFIG;
       }
-      console.log('[Shell] Configuration loaded from config.json');
+      console.log('[Shell] Configuration loaded from user config:', configPath);
     } else {
       config = { ...DEFAULT_CONFIG, ai: DEFAULT_AI_CONFIG };
       console.log('[Shell] Using default configuration');
@@ -240,12 +249,16 @@ export async function injectAutomationScript(): Promise<void> {
  * Save configuration to file
  */
 export function saveConfiguration(newConfig: Configuration): void {
-  const configPath = path.join(process.cwd(), 'config.json');
+  const configPath = getRuntimeConfigPath();
   
   try {
     config = { ...DEFAULT_CONFIG, ...newConfig };
+    const configDir = path.dirname(configPath);
+    if (!fs.existsSync(configDir)) {
+      fs.mkdirSync(configDir, { recursive: true });
+    }
     fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
-    console.log('[Shell] Configuration saved');
+    console.log('[Shell] Configuration saved to user config:', configPath);
   } catch (error) {
     console.error('[Shell] Error saving configuration:', error);
   }

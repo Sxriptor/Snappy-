@@ -7,9 +7,17 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
+import * as os from 'os';
 import { AIConfig, Configuration, DEFAULT_AI_CONFIG, DEFAULT_CONFIG } from '../types';
 
 const CONFIG_FILE = 'config.json';
+
+function getRuntimeConfigPath(): string {
+  const appDataDir = process.platform === 'win32'
+    ? (process.env.APPDATA || path.join(os.homedir(), 'AppData', 'Roaming'))
+    : path.join(os.homedir(), '.config');
+  return path.join(appDataDir, 'Snappy', CONFIG_FILE);
+}
 
 export interface ValidationResult {
   valid: boolean;
@@ -21,7 +29,7 @@ export interface ValidationResult {
  */
 export function loadConfiguration(): Configuration {
   try {
-    const configPath = path.join(process.cwd(), CONFIG_FILE);
+    const configPath = getRuntimeConfigPath();
     
     if (!fs.existsSync(configPath)) {
       console.log('[SettingsManager] Config file not found, using defaults');
@@ -54,7 +62,11 @@ export function loadConfiguration(): Configuration {
  */
 export function saveConfiguration(config: Configuration): boolean {
   try {
-    const configPath = path.join(process.cwd(), CONFIG_FILE);
+    const configPath = getRuntimeConfigPath();
+    const configDir = path.dirname(configPath);
+    if (!fs.existsSync(configDir)) {
+      fs.mkdirSync(configDir, { recursive: true });
+    }
     const fileContent = JSON.stringify(config, null, 2);
     
     fs.writeFileSync(configPath, fileContent, 'utf-8');

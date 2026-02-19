@@ -5,6 +5,7 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
+import * as os from 'os';
 import { Configuration, DEFAULT_CONFIG, ReplyRule } from '../types';
 
 /**
@@ -172,7 +173,10 @@ function isWithinActiveHours(activeHours?: { start: string; end: string }): bool
  * Get default config path
  */
 function getDefaultConfigPath(): string {
-  return path.join(process.cwd(), 'config.json');
+  const appDataDir = process.platform === 'win32'
+    ? (process.env.APPDATA || path.join(os.homedir(), 'AppData', 'Roaming'))
+    : path.join(os.homedir(), '.config');
+  return path.join(appDataDir, 'Snappy', 'config.json');
 }
 
 export {
