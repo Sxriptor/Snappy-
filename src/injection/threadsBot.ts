@@ -33,6 +33,8 @@ export function buildThreadsBotScript(config: Configuration): string {
   let isProcessing = false;
   let refreshInterval = null;
   let isPostingScheduledContent = false;
+  const STARTUP_REFRESH_KEY = '__snappy_threads_startup_refresh_done__';
+  const THREADS_POSTED_STATE_KEY = '__snappy_threads_scheduler_posted_v2__';
 
   const MIN_COMMENT_LENGTH = 3;
   const rawPollMs = Number(SITE_SETTINGS.pollIntervalMs ?? (CONFIG?.threads && CONFIG.threads.pollIntervalMs));
@@ -50,6 +52,13 @@ export function buildThreadsBotScript(config: Configuration): string {
   let activityColumnSetup = false;
 
   function scheduleNextRefresh() {
+    try {
+      if (sessionStorage.getItem(STARTUP_REFRESH_KEY) === '1') {
+        log('Startup refresh already completed for this run');
+        return;
+      }
+    } catch {}
+
     // Random interval between 2-8 seconds
     const refreshDelay = Math.floor(Math.random() * 6000) + 2000;
     refreshInterval = setTimeout(() => {
@@ -58,11 +67,14 @@ export function buildThreadsBotScript(config: Configuration): string {
         return;
       }
       if (!isProcessing && !isPostingScheduledContent) {
-        log('Refreshing page (no processing in progress)');
+        try {
+          sessionStorage.setItem(STARTUP_REFRESH_KEY, '1');
+        } catch {}
+        log('Refreshing page (startup refresh)');
         location.reload();
       } else {
-        log('Skipping refresh - processing in progress');
-        scheduleNextRefresh(); // Schedule next attempt
+        log('Delaying startup refresh - processing in progress');
+        scheduleNextRefresh();
       }
     }, refreshDelay);
   }
@@ -122,7 +134,7 @@ export function buildThreadsBotScript(config: Configuration): string {
 
   function getPostedState() {
     try {
-      const raw = localStorage.getItem('__snappy_threads_scheduler_posted__');
+      const raw = localStorage.getItem(THREADS_POSTED_STATE_KEY);
       if (!raw) return {};
       const parsed = JSON.parse(raw);
       if (parsed && typeof parsed === 'object') return parsed;
@@ -132,7 +144,7 @@ export function buildThreadsBotScript(config: Configuration): string {
 
   function savePostedState(state) {
     try {
-      localStorage.setItem('__snappy_threads_scheduler_posted__', JSON.stringify(state || {}));
+      localStorage.setItem(THREADS_POSTED_STATE_KEY, JSON.stringify(state || {}));
     } catch {}
   }
 
@@ -1143,6 +1155,9 @@ export function buildThreadsBotScript(config: Configuration): string {
     if (pollInterval) clearInterval(pollInterval);
     if (schedulerInterval) clearInterval(schedulerInterval);
     if (refreshInterval) clearTimeout(refreshInterval);
+    try {
+      sessionStorage.removeItem(STARTUP_REFRESH_KEY);
+    } catch {}
     window.__SNAPPY_RUNNING__ = false;
     window.__SNAPPY_THREADS_RUNNING__ = false;
     log('Threads bot stopped');

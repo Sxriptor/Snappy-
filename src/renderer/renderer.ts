@@ -8016,6 +8016,23 @@ function setupWebviewReadyHandler(wv: Electron.WebviewTag) {
         console.log('[Snappy] Compatibility fixes applied');
       } catch(e) { console.log('[Snappy] Compat fix skipped'); }
     `).catch(() => {});
+
+    // Reinject bot automatically after page reload/navigation for active bot sessions.
+    if (sessionId) {
+      setTimeout(async () => {
+        try {
+          const session = await (window as any).session.getSession(sessionId);
+          if (!session || session.botStatus !== 'active') return;
+
+          const injected = await injectBotIntoSpecificWebview(wv, sessionId);
+          if (injected) {
+            addLog('Bot re-injected after page load', 'info', sessionId);
+          }
+        } catch {
+          // Ignore reinjection errors on navigation.
+        }
+      }, 1200);
+    }
   });
 
   // Handle webview errors

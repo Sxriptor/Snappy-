@@ -416,11 +416,40 @@ export function buildInstagramBotScript(config: Configuration): string {
       return true;
     }
 
+    function focusPrevByShiftTab(steps) {
+      const list = getFocusableElements();
+      if (list.length === 0) return false;
+      const active = document.activeElement;
+      let index = list.findIndex(el => el === active);
+      if (index < 0) index = list.length - 1;
+      const prevIndex = Math.max(0, Math.min(list.length - 1, index - Math.max(1, steps)));
+      const target = list[prevIndex];
+      if (!(target instanceof HTMLElement)) return false;
+      target.focus();
+      return true;
+    }
+
     async function tabTwiceThenSpace() {
       const focused = focusNextByTab(2);
       await sleep(180);
       const active = document.activeElement;
       if (!focused || !(active instanceof HTMLElement)) return false;
+      try {
+        active.dispatchEvent(new KeyboardEvent('keydown', { key: ' ', code: 'Space', bubbles: true, cancelable: true }));
+        active.dispatchEvent(new KeyboardEvent('keyup', { key: ' ', code: 'Space', bubbles: true, cancelable: true }));
+      } catch {}
+      try { active.click(); } catch {}
+      await sleep(500);
+      return true;
+    }
+
+    async function shiftTabThreeThenTabThenSpace() {
+      const movedBack = focusPrevByShiftTab(3);
+      await sleep(180);
+      const movedForward = focusNextByTab(1);
+      await sleep(180);
+      const active = document.activeElement;
+      if (!movedBack || !movedForward || !(active instanceof HTMLElement)) return false;
       try {
         active.dispatchEvent(new KeyboardEvent('keydown', { key: ' ', code: 'Space', bubbles: true, cancelable: true }));
         active.dispatchEvent(new KeyboardEvent('keyup', { key: ' ', code: 'Space', bubbles: true, cancelable: true }));
@@ -534,10 +563,16 @@ export function buildInstagramBotScript(config: Configuration): string {
         const captionSet = await setPostCaption(post.caption || '');
         if (!captionSet) return false;
 
-        const shareClicked = await clickButtonByText('share', 12000);
-        if (!shareClicked) {
-          log('Scheduler: Share button not found');
-          return false;
+        const submittedViaKeyboard = await shiftTabThreeThenTabThenSpace();
+        if (submittedViaKeyboard) {
+          log('Scheduler: submit triggered via Shift+Tab+Tab+Tab, Tab, Space');
+        } else {
+          const shareClicked = await clickButtonByText('share', 12000);
+          if (!shareClicked) {
+            log('Scheduler: Share button not found');
+            return false;
+          }
+          log('Scheduler: submit triggered via Share click fallback');
         }
 
         log('Scheduler: post submitted for publishing');
