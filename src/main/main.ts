@@ -949,6 +949,31 @@ export function setupIPCHandlers(): void {
         attachedHere = true;
       }
 
+      // Ensure key events are routed into the target webContents/page, not host UI.
+      try {
+        targetWebContents.focus();
+      } catch {}
+      try {
+        await targetWebContents.debugger.sendCommand('Page.bringToFront');
+      } catch {}
+      try {
+        await targetWebContents.debugger.sendCommand('Runtime.evaluate', {
+          expression: `
+            (function() {
+              try {
+                window.focus();
+                const active = document.activeElement;
+                if (!active || active === document.body) {
+                  if (document.body && typeof document.body.focus === 'function') {
+                    document.body.focus();
+                  }
+                }
+              } catch (e) {}
+            })();
+          `
+        });
+      } catch {}
+
       for (const event of events) {
         const delay = Number(event?.delayMs || 0);
         if (delay > 0) {

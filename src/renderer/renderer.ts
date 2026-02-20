@@ -2187,6 +2187,8 @@ interface SessionData {
 // Track sessions and their webviews
 const sessionWebviews = new Map<string, Electron.WebviewTag>();
 let activeSessionId: string | null = null;
+const webviewReadyHandlerBound = new WeakSet<Electron.WebviewTag>();
+const webviewConsoleListenerBound = new WeakSet<Electron.WebviewTag>();
 
 // Per-tab configuration storage
 const sessionConfigs = new Map<string, Config>();
@@ -7266,6 +7268,9 @@ function getSessionIdForWebview(wv: Electron.WebviewTag): string | null {
 
 // Listen for console messages from webview
 function setupWebviewListeners(wv: Electron.WebviewTag) {
+  if (webviewConsoleListenerBound.has(wv)) return;
+  webviewConsoleListenerBound.add(wv);
+
   wv.addEventListener('console-message', (e) => {
     const msg = e.message;
     // Log ALL messages for debugging
@@ -8075,6 +8080,9 @@ setInterval(async () => {
 
 // Webview ready handler - set up for any webview
 function setupWebviewReadyHandler(wv: Electron.WebviewTag) {
+  if (webviewReadyHandlerBound.has(wv)) return;
+  webviewReadyHandlerBound.add(wv);
+
   wv.addEventListener('dom-ready', () => {
     const sessionId = getSessionIdForWebview(wv) || undefined;
     addLog('Page loaded: ' + wv.getURL(), 'info', sessionId);

@@ -468,6 +468,23 @@ export function buildThreadsBotScript(config: Configuration): string {
     return true;
   }
 
+  async function reinforceThreadsLogoFocusViaCdp() {
+    const threadsIcon = document.querySelector('svg[aria-label="Threads"]');
+    if (!(threadsIcon instanceof HTMLElement)) return false;
+
+    const rect = threadsIcon.getBoundingClientRect();
+    if (!rect || rect.width <= 0 || rect.height <= 0) return false;
+
+    // Keep focus context near the same nav item:
+    // click just below icon center (or center as fallback).
+    const x = rect.left + (rect.width / 2);
+    const y = rect.top + Math.min(rect.height + 8, rect.height * 0.85);
+    const focused = await requestThreadsPointerClickAt(x, y, 5000);
+    log('Scheduler: focus reinforcement near Threads logo ' + (focused ? 'succeeded' : 'failed'));
+    await sleep(220);
+    return focused;
+  }
+
   async function publishScheduledThreadPost(post) {
     if (!post || typeof post.body !== 'string') return false;
     if (isPostingScheduledContent) return false;
@@ -482,6 +499,7 @@ export function buildThreadsBotScript(config: Configuration): string {
 
       const createOpened = await openCreateFromThreadsLogo();
       if (!createOpened) return false;
+      await reinforceThreadsLogoFocusViaCdp();
 
       const mediaPaths = getPostMediaPaths(post);
       if (mediaPaths.length > 0) {
