@@ -373,12 +373,12 @@ export function buildThreadsBotScript(config: Configuration): string {
     const STEP_DELAY = 95;
     const TRANSITION_DELAY = 140;
     const pushTab = () => {
-      events.push({ kind: 'dispatch', type: 'keyDown', key: 'Tab', code: 'Tab', windowsVirtualKeyCode: 9, nativeVirtualKeyCode: 9, delayMs: STEP_DELAY });
+      events.push({ kind: 'dispatch', type: 'rawKeyDown', key: 'Tab', code: 'Tab', windowsVirtualKeyCode: 9, nativeVirtualKeyCode: 9, delayMs: STEP_DELAY });
       events.push({ kind: 'dispatch', type: 'keyUp', key: 'Tab', code: 'Tab', windowsVirtualKeyCode: 9, nativeVirtualKeyCode: 9, delayMs: TRANSITION_DELAY });
     };
     const pushShiftTab = () => {
       events.push({ kind: 'dispatch', type: 'rawKeyDown', key: 'Shift', code: 'ShiftLeft', windowsVirtualKeyCode: 16, nativeVirtualKeyCode: 16, delayMs: STEP_DELAY });
-      events.push({ kind: 'dispatch', type: 'keyDown', key: 'Tab', code: 'Tab', windowsVirtualKeyCode: 9, nativeVirtualKeyCode: 9, modifiers: 8, delayMs: STEP_DELAY });
+      events.push({ kind: 'dispatch', type: 'rawKeyDown', key: 'Tab', code: 'Tab', windowsVirtualKeyCode: 9, nativeVirtualKeyCode: 9, modifiers: 8, delayMs: STEP_DELAY });
       events.push({ kind: 'dispatch', type: 'keyUp', key: 'Tab', code: 'Tab', windowsVirtualKeyCode: 9, nativeVirtualKeyCode: 9, modifiers: 8, delayMs: STEP_DELAY });
       events.push({ kind: 'dispatch', type: 'keyUp', key: 'Shift', code: 'ShiftLeft', windowsVirtualKeyCode: 16, nativeVirtualKeyCode: 16, delayMs: TRANSITION_DELAY });
     };
@@ -434,55 +434,24 @@ export function buildThreadsBotScript(config: Configuration): string {
       return false;
     }
 
-    const rect = threadsIcon.getBoundingClientRect();
+    const clickable = threadsIcon.closest('a, div[role="button"], button, [tabindex]') || threadsIcon;
+    const rect = clickable.getBoundingClientRect();
     const cx = rect.left + (rect.width / 2);
     const cy = rect.top + (rect.height / 2);
     const clickedViaCdp = await requestThreadsPointerClickAt(cx, cy, 6000);
     if (!clickedViaCdp) {
       // Fallback to DOM click when CDP path fails.
       try {
-        threadsIcon.dispatchEvent(new MouseEvent('mouseover', { bubbles: true, cancelable: true }));
-        threadsIcon.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
-        if (typeof threadsIcon.click === 'function') threadsIcon.click();
-        threadsIcon.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true }));
+        clickable.dispatchEvent(new MouseEvent('mouseover', { bubbles: true, cancelable: true }));
+        clickable.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
+        if (typeof clickable.click === 'function') clickable.click();
+        clickable.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true }));
       } catch {}
-      const clickable = threadsIcon.closest('a, div[role="button"], button, span') || threadsIcon.parentElement;
-      if (clickable) {
-        try {
-          clickable.dispatchEvent(new MouseEvent('mouseover', { bubbles: true, cancelable: true }));
-          clickable.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
-          if (typeof clickable.click === 'function') clickable.click();
-          clickable.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true }));
-        } catch {}
-      }
-    }
-
-    // Anchor keyboard sequence to the same nav target the user clicks manually.
-    const focusTarget = threadsIcon.closest('a, button, [tabindex], div[role="button"]');
-    if (focusTarget && typeof focusTarget.focus === 'function') {
-      try { focusTarget.focus(); } catch {}
     }
 
     log('Scheduler: clicked Threads logo target' + (clickedViaCdp ? ' via CDP' : ' via fallback'));
     await sleep(700);
     return true;
-  }
-
-  async function reinforceThreadsLogoFocusViaCdp() {
-    const threadsIcon = document.querySelector('svg[aria-label="Threads"]');
-    if (!(threadsIcon instanceof HTMLElement)) return false;
-
-    const rect = threadsIcon.getBoundingClientRect();
-    if (!rect || rect.width <= 0 || rect.height <= 0) return false;
-
-    // Keep focus context near the same nav item:
-    // click just below icon center (or center as fallback).
-    const x = rect.left + (rect.width / 2);
-    const y = rect.top + Math.min(rect.height + 8, rect.height * 0.85);
-    const focused = await requestThreadsPointerClickAt(x, y, 5000);
-    log('Scheduler: focus reinforcement near Threads logo ' + (focused ? 'succeeded' : 'failed'));
-    await sleep(220);
-    return focused;
   }
 
   async function publishScheduledThreadPost(post) {
@@ -499,7 +468,6 @@ export function buildThreadsBotScript(config: Configuration): string {
 
       const createOpened = await openCreateFromThreadsLogo();
       if (!createOpened) return false;
-      await reinforceThreadsLogoFocusViaCdp();
 
       const mediaPaths = getPostMediaPaths(post);
       if (mediaPaths.length > 0) {
