@@ -289,7 +289,7 @@ export function buildThreadsBotScript(config: Configuration): string {
     window.__SNAPPY_THREADS_UPLOAD_REQUEST__ = {
       id: requestId,
       filePaths: normalizedPaths,
-      selector: 'input[type="file"]'
+      selector: 'main input[type="file"], input[type="file"]'
     };
 
     let waited = 0;
@@ -368,49 +368,67 @@ export function buildThreadsBotScript(config: Configuration): string {
     return await requestThreadsKeyboardSequence(events, 7000);
   }
 
-  async function runThreadsKeyboardPostFlow(title, topic) {
-    const events = [];
+  async function runThreadsKeyboardPostFlow(title, topic, mediaPaths) {
+    const uploadPaths = Array.isArray(mediaPaths)
+      ? mediaPaths.filter(item => typeof item === 'string' && item.trim().length > 0)
+      : [];
+
     const STEP_DELAY = 95;
     const TRANSITION_DELAY = 140;
-    const pushTab = () => {
-      events.push({ kind: 'dispatch', type: 'rawKeyDown', key: 'Tab', code: 'Tab', windowsVirtualKeyCode: 9, nativeVirtualKeyCode: 9, delayMs: STEP_DELAY });
-      events.push({ kind: 'dispatch', type: 'keyUp', key: 'Tab', code: 'Tab', windowsVirtualKeyCode: 9, nativeVirtualKeyCode: 9, delayMs: TRANSITION_DELAY });
+    const pushTab = (buffer) => {
+      buffer.push({ kind: 'dispatch', type: 'rawKeyDown', key: 'Tab', code: 'Tab', windowsVirtualKeyCode: 9, nativeVirtualKeyCode: 9, delayMs: STEP_DELAY });
+      buffer.push({ kind: 'dispatch', type: 'keyUp', key: 'Tab', code: 'Tab', windowsVirtualKeyCode: 9, nativeVirtualKeyCode: 9, delayMs: TRANSITION_DELAY });
     };
-    const pushShiftTab = () => {
-      events.push({ kind: 'dispatch', type: 'rawKeyDown', key: 'Shift', code: 'ShiftLeft', windowsVirtualKeyCode: 16, nativeVirtualKeyCode: 16, delayMs: STEP_DELAY });
-      events.push({ kind: 'dispatch', type: 'rawKeyDown', key: 'Tab', code: 'Tab', windowsVirtualKeyCode: 9, nativeVirtualKeyCode: 9, modifiers: 8, delayMs: STEP_DELAY });
-      events.push({ kind: 'dispatch', type: 'keyUp', key: 'Tab', code: 'Tab', windowsVirtualKeyCode: 9, nativeVirtualKeyCode: 9, modifiers: 8, delayMs: STEP_DELAY });
-      events.push({ kind: 'dispatch', type: 'keyUp', key: 'Shift', code: 'ShiftLeft', windowsVirtualKeyCode: 16, nativeVirtualKeyCode: 16, delayMs: TRANSITION_DELAY });
+    const pushShiftTab = (buffer) => {
+      buffer.push({ kind: 'dispatch', type: 'rawKeyDown', key: 'Shift', code: 'ShiftLeft', windowsVirtualKeyCode: 16, nativeVirtualKeyCode: 16, delayMs: STEP_DELAY });
+      buffer.push({ kind: 'dispatch', type: 'rawKeyDown', key: 'Tab', code: 'Tab', windowsVirtualKeyCode: 9, nativeVirtualKeyCode: 9, modifiers: 8, delayMs: STEP_DELAY });
+      buffer.push({ kind: 'dispatch', type: 'keyUp', key: 'Tab', code: 'Tab', windowsVirtualKeyCode: 9, nativeVirtualKeyCode: 9, modifiers: 8, delayMs: STEP_DELAY });
+      buffer.push({ kind: 'dispatch', type: 'keyUp', key: 'Shift', code: 'ShiftLeft', windowsVirtualKeyCode: 16, nativeVirtualKeyCode: 16, delayMs: TRANSITION_DELAY });
     };
-    const pushSpace = () => {
+    const pushSpace = (buffer) => {
       // Use full CDP space sequence (rawKeyDown + char + keyUp) so activation is not skipped.
-      events.push({ kind: 'dispatch', type: 'rawKeyDown', key: ' ', code: 'Space', windowsVirtualKeyCode: 32, nativeVirtualKeyCode: 32, delayMs: 120 });
-      events.push({ kind: 'dispatch', type: 'char', key: ' ', code: 'Space', text: ' ', windowsVirtualKeyCode: 32, nativeVirtualKeyCode: 32, delayMs: 130 });
-      events.push({ kind: 'dispatch', type: 'keyUp', key: ' ', code: 'Space', windowsVirtualKeyCode: 32, nativeVirtualKeyCode: 32, delayMs: 220 });
+      buffer.push({ kind: 'dispatch', type: 'rawKeyDown', key: ' ', code: 'Space', windowsVirtualKeyCode: 32, nativeVirtualKeyCode: 32, delayMs: 120 });
+      buffer.push({ kind: 'dispatch', type: 'char', key: ' ', code: 'Space', text: ' ', windowsVirtualKeyCode: 32, nativeVirtualKeyCode: 32, delayMs: 130 });
+      buffer.push({ kind: 'dispatch', type: 'keyUp', key: ' ', code: 'Space', windowsVirtualKeyCode: 32, nativeVirtualKeyCode: 32, delayMs: 220 });
     };
-    const pushArrowDown = () => {
-      events.push({ kind: 'dispatch', type: 'keyDown', key: 'ArrowDown', code: 'ArrowDown', windowsVirtualKeyCode: 40, nativeVirtualKeyCode: 40, delayMs: 110 });
-      events.push({ kind: 'dispatch', type: 'keyUp', key: 'ArrowDown', code: 'ArrowDown', windowsVirtualKeyCode: 40, nativeVirtualKeyCode: 40, delayMs: 160 });
+    const pushArrowDown = (buffer) => {
+      buffer.push({ kind: 'dispatch', type: 'keyDown', key: 'ArrowDown', code: 'ArrowDown', windowsVirtualKeyCode: 40, nativeVirtualKeyCode: 40, delayMs: 110 });
+      buffer.push({ kind: 'dispatch', type: 'keyUp', key: 'ArrowDown', code: 'ArrowDown', windowsVirtualKeyCode: 40, nativeVirtualKeyCode: 40, delayMs: 160 });
     };
-    const pushEnter = () => {
-      events.push({ kind: 'dispatch', type: 'keyDown', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13, delayMs: 110 });
-      events.push({ kind: 'dispatch', type: 'keyUp', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13, delayMs: 170 });
+    const pushEnter = (buffer) => {
+      buffer.push({ kind: 'dispatch', type: 'keyDown', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13, delayMs: 110 });
+      buffer.push({ kind: 'dispatch', type: 'keyUp', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13, delayMs: 170 });
     };
 
-    // Tab once, Shift+Tab x5, Space, title, Shift+Tab, topic, ArrowDown, Enter, Tab x9, Enter
-    pushTab();
-    for (let i = 0; i < 5; i++) pushShiftTab();
-    pushSpace();
-    events.push({ kind: 'insertText', text: String(title || ''), delayMs: 260 });
-    pushShiftTab();
-    events.push({ kind: 'insertText', text: String(topic || ''), delayMs: 260 });
-    pushArrowDown();
-    pushEnter();
-    for (let i = 0; i < 9; i++) pushTab();
-    pushEnter();
+    const phaseOne = [];
+    pushTab(phaseOne);
+    for (let i = 0; i < 5; i++) pushShiftTab(phaseOne);
+    pushSpace(phaseOne);
+    phaseOne.push({ kind: 'insertText', text: String(title || ''), delayMs: 260 });
+    log('Scheduler: starting key sequence phase 1 (Tab x1, Shift+Tab x5, Space, title)');
+    const phaseOneOk = await requestThreadsKeyboardSequence(phaseOne, 20000);
+    if (!phaseOneOk) return false;
 
-    log('Scheduler: starting key sequence (Tab x1, Shift+Tab x5, Space, title, Shift+Tab x1, topic, ArrowDown, Enter, Tab x9, Enter)');
-    return await requestThreadsKeyboardSequence(events, 30000);
+    if (uploadPaths.length > 0) {
+      log('Scheduler: attaching media after title text');
+      const attached = await requestThreadsMediaAttach(uploadPaths);
+      if (!attached) {
+        log('Scheduler: media attach failed after title text');
+        return false;
+      }
+      await sleep(700);
+    }
+
+    const phaseTwo = [];
+    const finalTabCount = uploadPaths.length > 0 ? 8 : 9;
+    pushShiftTab(phaseTwo);
+    phaseTwo.push({ kind: 'insertText', text: String(topic || ''), delayMs: 260 });
+    pushArrowDown(phaseTwo);
+    pushEnter(phaseTwo);
+    for (let i = 0; i < finalTabCount; i++) pushTab(phaseTwo);
+    pushEnter(phaseTwo);
+    log('Scheduler: continuing key sequence phase 2 (Shift+Tab, topic, ArrowDown, Enter, Tab x' + finalTabCount + ', Enter)');
+    return await requestThreadsKeyboardSequence(phaseTwo, 25000);
   }
 
   function isPostSubmissionLikelyConfirmed() {
@@ -470,16 +488,7 @@ export function buildThreadsBotScript(config: Configuration): string {
       if (!createOpened) return false;
 
       const mediaPaths = getPostMediaPaths(post);
-      if (mediaPaths.length > 0) {
-        const attached = await requestThreadsMediaAttach(mediaPaths);
-        if (!attached) {
-          log('Scheduler: media attach failed for post ' + String(post.id || 'unknown'));
-          return false;
-        }
-        await sleep(800);
-      }
-
-      const flowed = await runThreadsKeyboardPostFlow(parsed.title, parsed.topic || parsed.title);
+      const flowed = await runThreadsKeyboardPostFlow(parsed.title, parsed.topic || parsed.title, mediaPaths);
       if (!flowed) {
         log('Scheduler: keyboard posting flow failed');
         return false;
