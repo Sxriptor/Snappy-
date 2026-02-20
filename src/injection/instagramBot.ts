@@ -51,6 +51,7 @@ export function buildInstagramBotScript(config: Configuration): string {
     let isProcessing = false;
     let schedulerInterval = null;
     let isPostingScheduledContent = false;
+    let dmPauseUntil = 0;
 
     const MIN_MESSAGE_LENGTH = 2;
     const BASE_POLL_MS = (CONFIG?.instagram && CONFIG.instagram.pollIntervalMs) || 8000;
@@ -58,7 +59,9 @@ export function buildInstagramBotScript(config: Configuration): string {
     const REPROCESS_COOLDOWN_MS = 20000;
     const typingDelayRange = CONFIG?.typingDelayRangeMs || [50, 150];
     const preReplyDelayRange = CONFIG?.preReplyDelayRangeMs || [2000, 6000];
-    const SCHEDULER_JITTER_MINUTES = 15;
+    const SCHEDULER_JITTER_MINUTES = 0;
+    const SCHEDULER_DUE_WINDOW_MINUTES = 15;
+    const DM_PAUSE_AFTER_POST_MS = 2 * 60 * 1000;
     let lastQuietWindowLogAt = 0;
 
     function getRandomPollInterval() {
@@ -478,7 +481,7 @@ export function buildInstagramBotScript(config: Configuration): string {
         const slotKeyBase = year + '-' + (month + 1) + '-' + day + '-' + dayKey + '-' + normalized.text;
         const randomOffset = (hashString(slotKeyBase) % (SCHEDULER_JITTER_MINUTES * 2 + 1)) - SCHEDULER_JITTER_MINUTES;
         const runAt = new Date(baseTime.getTime() + randomOffset * 60 * 1000);
-        const windowEnd = new Date(baseTime.getTime() + SCHEDULER_JITTER_MINUTES * 60 * 1000);
+        const windowEnd = new Date(baseTime.getTime() + SCHEDULER_DUE_WINDOW_MINUTES * 60 * 1000);
         const slotKey = slotKeyBase + '-off-' + randomOffset;
 
         if (processedScheduleSlots.has(slotKey)) continue;
@@ -496,34 +499,9 @@ export function buildInstagramBotScript(config: Configuration): string {
       return null;
     }
 
-    function isWithinSchedulerQuietWindow(date) {
-      if (!schedulerEnabled) return false;
-      const dayKey = getDayKey(date);
-      const dayConfig = schedulerConfig.days?.[dayKey];
-      if (!dayConfig || dayConfig.enabled !== true || !Array.isArray(dayConfig.times) || dayConfig.times.length === 0) {
-        return false;
-      }
-
-      for (const timeValue of dayConfig.times) {
-        const normalized = normalizeTime(timeValue);
-        if (!normalized) continue;
-        const baseTime = new Date(
-          date.getFullYear(),
-          date.getMonth(),
-          date.getDate(),
-          normalized.hour,
-          normalized.minute,
-          0,
-          0
-        );
-        const quietStart = new Date(baseTime.getTime() - (SCHEDULER_JITTER_MINUTES * 60 * 1000));
-        const quietEnd = new Date(baseTime.getTime() + (SCHEDULER_JITTER_MINUTES * 60 * 1000));
-        if (date >= quietStart && date <= quietEnd) {
-          return true;
-        }
-      }
-
-      return false;
+    function isWithinSchedulerQuietWindow() {
+      if (isPostingScheduledContent) return true;
+      return Date.now() < dmPauseUntil;
     }
 
     async function processScheduledPosting() {
@@ -540,6 +518,8 @@ export function buildInstagramBotScript(config: Configuration): string {
         return;
       }
 
+      // Pause DM/request monitoring while posting and for a short cooldown after posting starts.
+      dmPauseUntil = Date.now() + DM_PAUSE_AFTER_POST_MS;
       log('Scheduler due at ' + dueSlot.planned + ' with random offset ' + dueSlot.offsetMinutes + ' min');
       const posted = await publishScheduledPost(post);
       if (posted) {
@@ -1341,7 +1321,7 @@ export function buildInstagramBotScript(config: Configuration): string {
       isProcessing = true;
 
       try {
-        if (isWithinSchedulerQuietWindow(new Date())) {
+        if (isWithinSchedulerQuietWindow()) {
           const now = Date.now();
           if (now - lastQuietWindowLogAt > 60000) {
             log('Scheduler quiet window active; pausing DM/request monitoring');
@@ -1454,7 +1434,7 @@ export function buildInstagramBotScript(config: Configuration): string {
     }
 
     if (schedulerEnabled) {
-      log('Post scheduler enabled (local machine time with random +/- 15 minute window)');
+      log('Post scheduler enabled (exact scheduled times)');
       processScheduledPosting();
       schedulerInterval = setInterval(() => {
         processScheduledPosting();

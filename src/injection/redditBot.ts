@@ -34,7 +34,7 @@ export function buildRedditBotScript(config: Configuration): string {
   const PM_CHECK_DEBOUNCE_MS = 3000;
   const PM_REPLY_DEBOUNCE_MS = 1500;
   const SCHEDULER_JITTER_MINUTES = 0;
-  const SCHEDULER_DUE_WINDOW_MINUTES = 15;
+  const SCHEDULER_DUE_WINDOW_MINUTES = 5;
   const MIN_POLL_MS = 1000;
   const MAX_POLL_MS = 15000;
 
@@ -1695,8 +1695,8 @@ export function buildRedditBotScript(config: Configuration): string {
         const slotKeyBase = year + '-' + (month + 1) + '-' + day + '-' + dayKey + '-' + normalized.text;
         const randomOffset = (hashString(slotKeyBase) % (SCHEDULER_JITTER_MINUTES * 2 + 1)) - SCHEDULER_JITTER_MINUTES;
         const runAt = new Date(baseTime.getTime() + randomOffset * 60 * 1000);
-        const pauseStart = new Date(runAt.getTime() - 15 * 60 * 1000);
-        const pauseEnd = new Date(runAt.getTime());
+        const pauseStart = new Date(runAt.getTime() - SCHEDULER_JITTER_MINUTES * 60 * 1000);
+        const pauseEnd = new Date(runAt.getTime() + SCHEDULER_JITTER_MINUTES * 60 * 1000);
 
         if (now >= pauseStart && now <= pauseEnd) {
           return {
