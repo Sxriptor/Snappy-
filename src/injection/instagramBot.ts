@@ -59,6 +59,7 @@ export function buildInstagramBotScript(config: Configuration): string {
     const REPROCESS_COOLDOWN_MS = 20000;
     const typingDelayRange = CONFIG?.typingDelayRangeMs || [50, 150];
     const preReplyDelayRange = CONFIG?.preReplyDelayRangeMs || [2000, 6000];
+    const captionTypingDelayRange = [120, 260];
     const SCHEDULER_JITTER_MINUTES = 0;
     const SCHEDULER_DUE_WINDOW_MINUTES = 15;
     const DM_PAUSE_AFTER_POST_MS = 2 * 60 * 1000;
@@ -478,16 +479,47 @@ export function buildInstagramBotScript(config: Configuration): string {
 
       captionInput.focus();
       if (captionInput.tagName === 'TEXTAREA') {
-        captionInput.value = text;
-        captionInput.dispatchEvent(new Event('input', { bubbles: true }));
+        captionInput.value = '';
+        captionInput.dispatchEvent(new Event('change', { bubbles: true }));
+        for (const char of text) {
+          captionInput.value += char;
+          captionInput.dispatchEvent(new Event('input', { bubbles: true }));
+          const delay = Math.floor(Math.random() * (captionTypingDelayRange[1] - captionTypingDelayRange[0] + 1)) + captionTypingDelayRange[0];
+          await sleep(delay);
+        }
         captionInput.dispatchEvent(new Event('change', { bubbles: true }));
       } else {
-        captionInput.textContent = text;
-        captionInput.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: text }));
+        captionInput.textContent = '';
+        for (const char of text) {
+          captionInput.textContent = (captionInput.textContent || '') + char;
+          captionInput.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: char }));
+          const delay = Math.floor(Math.random() * (captionTypingDelayRange[1] - captionTypingDelayRange[0] + 1)) + captionTypingDelayRange[0];
+          await sleep(delay);
+        }
       }
 
       await sleep(400);
       return true;
+    }
+
+    async function closeShareOverlayIfPresent() {
+      const closeCandidates = Array.from(document.querySelectorAll('button, div[role="button"]'));
+      for (const el of closeCandidates) {
+        const txt = (el.textContent || '').trim().toLowerCase();
+        const aria = (el.getAttribute('aria-label') || '').trim().toLowerCase();
+        if (
+          txt === 'done' ||
+          txt === 'close' ||
+          txt === 'not now' ||
+          aria.includes('close') ||
+          aria.includes('done')
+        ) {
+          await clickElementHuman(el, 4000);
+          await sleep(500);
+          return true;
+        }
+      }
+      return false;
     }
 
     async function publishScheduledPost(post) {
@@ -576,6 +608,9 @@ export function buildInstagramBotScript(config: Configuration): string {
         }
 
         log('Scheduler: post submitted for publishing');
+        await sleep(1800);
+        await closeShareOverlayIfPresent();
+        await navigateToDMs();
         return true;
       } catch (error) {
         log('Scheduler publish error: ' + error);

@@ -7350,6 +7350,7 @@ const processingRedditUploadRequests = new Map<string, string>();
 const processingThreadsUploadRequests = new Map<string, string>();
 const processingInstagramPointerRequests = new Map<string, string>();
 const processingRedditPointerRequests = new Map<string, string>();
+const processingThreadsPointerRequests = new Map<string, string>();
 const processingRedditKeyboardRequests = new Map<string, string>();
 const processingThreadsKeyboardRequests = new Map<string, string>();
 
@@ -7720,6 +7721,79 @@ setInterval(async () => {
       // Ignore per-webview polling errors.
     } finally {
       processingRedditPointerRequests.delete(sessionId);
+    }
+  }
+}, 350);
+
+// Poll for pending Threads scheduler pointer click requests and execute via CDP path
+setInterval(async () => {
+  if (!isBotActive) return;
+  if (!(window as any).electronAPI?.playMousePath) return;
+
+  for (const [sessionId, targetWebview] of sessionWebviews.entries()) {
+    const activeRequestId = processingThreadsPointerRequests.get(sessionId);
+    if (activeRequestId) continue;
+
+    try {
+      const request = await targetWebview.executeJavaScript(`
+        (function() {
+          if (window.__SNAPPY_THREADS_POINTER_REQUEST__) {
+            return window.__SNAPPY_THREADS_POINTER_REQUEST__;
+          }
+          return null;
+        })();
+      `);
+
+      if (!request || !request.id) {
+        continue;
+      }
+
+      processingThreadsPointerRequests.set(sessionId, request.id);
+      await targetWebview.executeJavaScript('window.__SNAPPY_THREADS_POINTER_REQUEST__ = null;');
+
+      let targetPoint: { x: number; y: number } | null = null;
+      const mode = typeof request.mode === 'string' ? request.mode : 'text';
+      if (mode === 'point') {
+        const px = Number(request.x);
+        const py = Number(request.y);
+        if (Number.isFinite(px) && Number.isFinite(py)) {
+          targetPoint = { x: px, y: py };
+        }
+      } else if (typeof request.text === 'string' && request.text.trim().length > 0) {
+        targetPoint = await resolveClickablePointByText(targetWebview, request.text);
+      }
+
+      if (!targetPoint) {
+        await targetWebview.executeJavaScript(`
+          window.__SNAPPY_THREADS_POINTER_RESPONSE__ = {
+            id: ${JSON.stringify(request.id)},
+            success: false,
+            error: 'Target not found'
+          };
+        `);
+        continue;
+      }
+
+      const lastPos = lastPointerPositionBySession.get(sessionId) || { x: Math.max(12, targetPoint.x - randomRangeInt(40, 120)), y: Math.max(12, targetPoint.y - randomRangeInt(30, 90)) };
+      const steps = buildHumanMousePathEvents(lastPos, targetPoint);
+      lastPointerPositionBySession.set(sessionId, { x: targetPoint.x, y: targetPoint.y });
+
+      const shouldShowCursor = shouldShowAutomationCursorForSession(sessionId);
+      const visualPromise = playAutomationCursorPath(targetWebview, steps, shouldShowCursor);
+      const cdpResult = await (window as any).electronAPI.playMousePath(targetWebview.getWebContentsId(), steps);
+      await visualPromise;
+
+      await targetWebview.executeJavaScript(`
+        window.__SNAPPY_THREADS_POINTER_RESPONSE__ = {
+          id: ${JSON.stringify(request.id)},
+          success: ${cdpResult?.success === true ? 'true' : 'false'},
+          error: ${JSON.stringify(cdpResult?.error || '')}
+        };
+      `);
+    } catch {
+      // Ignore per-webview polling errors.
+    } finally {
+      processingThreadsPointerRequests.delete(sessionId);
     }
   }
 }, 350);

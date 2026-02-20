@@ -33,6 +33,7 @@ export function buildThreadsBotScript(config: Configuration): string {
   let isProcessing = false;
   let refreshInterval = null;
   let isPostingScheduledContent = false;
+  let replyPauseUntil = 0;
   const STARTUP_REFRESH_KEY = '__snappy_threads_startup_refresh_done__';
   const THREADS_POSTED_STATE_KEY = '__snappy_threads_scheduler_posted_v2__';
 
@@ -48,6 +49,7 @@ export function buildThreadsBotScript(config: Configuration): string {
   const preReplyDelayRange = CONFIG?.preReplyDelayRangeMs || [2000, 6000];
   const SCHEDULER_JITTER_MINUTES = 0;
   const SCHEDULER_DUE_WINDOW_MINUTES = 15;
+  const REPLY_PAUSE_AFTER_POST_MS = 2 * 60 * 1000;
 
   let activityColumnSetup = false;
 
@@ -87,6 +89,14 @@ export function buildThreadsBotScript(config: Configuration): string {
 
   function sleep(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
+  }
+
+  function isVisibleElement(el) {
+    if (!el || !(el instanceof HTMLElement)) return false;
+    const style = window.getComputedStyle(el);
+    if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
+    const rect = el.getBoundingClientRect();
+    return rect.width > 0 && rect.height > 0;
   }
 
   function hashString(input) {
@@ -188,25 +198,26 @@ export function buildThreadsBotScript(config: Configuration): string {
   function parseThreadsScheduledText(rawText) {
     const text = String(rawText || '').replace(/^\\uFEFF/, '').replace(/\\r/g, '').trim();
     const lines = text.split('\\n').map(line => String(line || '').trim()).filter(Boolean);
-    let title = '';
+    let caption = '';
     let topic = '';
 
     for (const line of lines) {
-      const match = line.match(/^\\s*(title|topic)\\s*:\\s*(.+)$/i);
+      const match = line.match(/^\\s*(caption|title|topic)\\s*:\\s*(.+)$/i);
       if (!match) continue;
-      if (match[1].toLowerCase() === 'title') {
-        title = match[2].trim();
+      const key = match[1].toLowerCase();
+      if (key === 'caption' || key === 'title') {
+        caption = match[2].trim();
       } else if (match[1].toLowerCase() === 'topic') {
         topic = match[2].trim();
       }
     }
 
-    if (!title && lines.length > 0) title = lines[0];
+    if (!caption && lines.length > 0) caption = lines[0];
     if (!topic && lines.length > 1) topic = lines[1];
-    if (!topic) topic = title;
+    if (!topic) topic = caption;
 
     return {
-      title: title.substring(0, 500),
+      title: caption.substring(0, 500),
       topic: topic.substring(0, 200)
     };
   }
@@ -320,61 +331,140 @@ export function buildThreadsBotScript(config: Configuration): string {
     return false;
   }
 
+  async function requestThreadsPointerClickAt(x, y, timeoutMs) {
+    const px = Number(x);
+    const py = Number(y);
+    if (!Number.isFinite(px) || !Number.isFinite(py)) return false;
+
+    const requestId = 'threads-pointer-pt-' + Date.now() + '-' + Math.random().toString(36).slice(2);
+    window.__SNAPPY_THREADS_POINTER_RESPONSE__ = null;
+    window.__SNAPPY_THREADS_POINTER_REQUEST__ = {
+      id: requestId,
+      mode: 'point',
+      x: px,
+      y: py
+    };
+
+    let waited = 0;
+    const maxWait = Math.max(1000, Number(timeoutMs) || 6000);
+    while (waited < maxWait && isRunning) {
+      await sleep(140);
+      waited += 140;
+      const response = window.__SNAPPY_THREADS_POINTER_RESPONSE__;
+      if (response && response.id === requestId) {
+        window.__SNAPPY_THREADS_POINTER_RESPONSE__ = null;
+        return response.success === true;
+      }
+    }
+    return false;
+  }
+
   async function insertTrustedText(text) {
     const value = String(text || '');
     if (!value) return true;
 
-    const events = [
-      { kind: 'dispatch', type: 'rawKeyDown', key: 'Control', code: 'ControlLeft', windowsVirtualKeyCode: 17, nativeVirtualKeyCode: 17, delayMs: 20 },
-      { kind: 'dispatch', type: 'rawKeyDown', key: 'a', code: 'KeyA', windowsVirtualKeyCode: 65, nativeVirtualKeyCode: 65, modifiers: 2, delayMs: 25 },
-      { kind: 'dispatch', type: 'keyUp', key: 'a', code: 'KeyA', windowsVirtualKeyCode: 65, nativeVirtualKeyCode: 65, modifiers: 2, delayMs: 20 },
-      { kind: 'dispatch', type: 'keyUp', key: 'Control', code: 'ControlLeft', windowsVirtualKeyCode: 17, nativeVirtualKeyCode: 17, delayMs: 30 },
-      { kind: 'dispatch', type: 'keyDown', key: 'Backspace', code: 'Backspace', windowsVirtualKeyCode: 8, nativeVirtualKeyCode: 8, delayMs: 30 },
-      { kind: 'dispatch', type: 'keyUp', key: 'Backspace', code: 'Backspace', windowsVirtualKeyCode: 8, nativeVirtualKeyCode: 8, delayMs: 35 },
-      { kind: 'insertText', text: value, delayMs: 80 }
-    ];
+    const events = [{ kind: 'insertText', text: value, delayMs: 80 }];
 
     return await requestThreadsKeyboardSequence(events, 7000);
   }
 
   async function runThreadsKeyboardPostFlow(title, topic) {
-    const pressTab = () => ([
-      { kind: 'dispatch', type: 'keyDown', key: 'Tab', code: 'Tab', windowsVirtualKeyCode: 9, nativeVirtualKeyCode: 9, delayMs: 35 },
-      { kind: 'dispatch', type: 'keyUp', key: 'Tab', code: 'Tab', windowsVirtualKeyCode: 9, nativeVirtualKeyCode: 9, delayMs: 60 }
-    ]);
-    const pressShiftTab = () => ([
-      { kind: 'dispatch', type: 'rawKeyDown', key: 'Shift', code: 'ShiftLeft', windowsVirtualKeyCode: 16, nativeVirtualKeyCode: 16, delayMs: 25 },
-      { kind: 'dispatch', type: 'keyDown', key: 'Tab', code: 'Tab', windowsVirtualKeyCode: 9, nativeVirtualKeyCode: 9, modifiers: 8, delayMs: 35 },
-      { kind: 'dispatch', type: 'keyUp', key: 'Tab', code: 'Tab', windowsVirtualKeyCode: 9, nativeVirtualKeyCode: 9, modifiers: 8, delayMs: 35 },
-      { kind: 'dispatch', type: 'keyUp', key: 'Shift', code: 'ShiftLeft', windowsVirtualKeyCode: 16, nativeVirtualKeyCode: 16, delayMs: 65 }
-    ]);
-    const pressSpace = () => ([
-      { kind: 'dispatch', type: 'keyDown', key: ' ', code: 'Space', windowsVirtualKeyCode: 32, nativeVirtualKeyCode: 32, delayMs: 45 },
-      { kind: 'dispatch', type: 'keyUp', key: ' ', code: 'Space', windowsVirtualKeyCode: 32, nativeVirtualKeyCode: 32, delayMs: 65 }
-    ]);
-    const pressArrowDown = () => ([
-      { kind: 'dispatch', type: 'keyDown', key: 'ArrowDown', code: 'ArrowDown', windowsVirtualKeyCode: 40, nativeVirtualKeyCode: 40, delayMs: 45 },
-      { kind: 'dispatch', type: 'keyUp', key: 'ArrowDown', code: 'ArrowDown', windowsVirtualKeyCode: 40, nativeVirtualKeyCode: 40, delayMs: 75 }
-    ]);
-    const pressEnter = () => ([
-      { kind: 'dispatch', type: 'keyDown', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13, delayMs: 45 },
-      { kind: 'dispatch', type: 'keyUp', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13, delayMs: 75 }
-    ]);
+    const events = [];
+    const STEP_DELAY = 95;
+    const TRANSITION_DELAY = 140;
+    const pushTab = () => {
+      events.push({ kind: 'dispatch', type: 'keyDown', key: 'Tab', code: 'Tab', windowsVirtualKeyCode: 9, nativeVirtualKeyCode: 9, delayMs: STEP_DELAY });
+      events.push({ kind: 'dispatch', type: 'keyUp', key: 'Tab', code: 'Tab', windowsVirtualKeyCode: 9, nativeVirtualKeyCode: 9, delayMs: TRANSITION_DELAY });
+    };
+    const pushShiftTab = () => {
+      events.push({ kind: 'dispatch', type: 'rawKeyDown', key: 'Shift', code: 'ShiftLeft', windowsVirtualKeyCode: 16, nativeVirtualKeyCode: 16, delayMs: STEP_DELAY });
+      events.push({ kind: 'dispatch', type: 'keyDown', key: 'Tab', code: 'Tab', windowsVirtualKeyCode: 9, nativeVirtualKeyCode: 9, modifiers: 8, delayMs: STEP_DELAY });
+      events.push({ kind: 'dispatch', type: 'keyUp', key: 'Tab', code: 'Tab', windowsVirtualKeyCode: 9, nativeVirtualKeyCode: 9, modifiers: 8, delayMs: STEP_DELAY });
+      events.push({ kind: 'dispatch', type: 'keyUp', key: 'Shift', code: 'ShiftLeft', windowsVirtualKeyCode: 16, nativeVirtualKeyCode: 16, delayMs: TRANSITION_DELAY });
+    };
+    const pushSpace = () => {
+      // Use full CDP space sequence (rawKeyDown + char + keyUp) so activation is not skipped.
+      events.push({ kind: 'dispatch', type: 'rawKeyDown', key: ' ', code: 'Space', windowsVirtualKeyCode: 32, nativeVirtualKeyCode: 32, delayMs: 120 });
+      events.push({ kind: 'dispatch', type: 'char', key: ' ', code: 'Space', text: ' ', windowsVirtualKeyCode: 32, nativeVirtualKeyCode: 32, delayMs: 130 });
+      events.push({ kind: 'dispatch', type: 'keyUp', key: ' ', code: 'Space', windowsVirtualKeyCode: 32, nativeVirtualKeyCode: 32, delayMs: 220 });
+    };
+    const pushArrowDown = () => {
+      events.push({ kind: 'dispatch', type: 'keyDown', key: 'ArrowDown', code: 'ArrowDown', windowsVirtualKeyCode: 40, nativeVirtualKeyCode: 40, delayMs: 110 });
+      events.push({ kind: 'dispatch', type: 'keyUp', key: 'ArrowDown', code: 'ArrowDown', windowsVirtualKeyCode: 40, nativeVirtualKeyCode: 40, delayMs: 160 });
+    };
+    const pushEnter = () => {
+      events.push({ kind: 'dispatch', type: 'keyDown', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13, delayMs: 110 });
+      events.push({ kind: 'dispatch', type: 'keyUp', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13, delayMs: 170 });
+    };
 
-    if (!(await requestThreadsKeyboardSequence(pressTab(), 2500))) return false;
-    for (let i = 0; i < 4; i++) {
-      if (!(await requestThreadsKeyboardSequence(pressShiftTab(), 3000))) return false;
+    // Tab once, Shift+Tab x5, Space, title, Shift+Tab, topic, ArrowDown, Enter, Tab x9, Enter
+    pushTab();
+    for (let i = 0; i < 5; i++) pushShiftTab();
+    pushSpace();
+    events.push({ kind: 'insertText', text: String(title || ''), delayMs: 260 });
+    pushShiftTab();
+    events.push({ kind: 'insertText', text: String(topic || ''), delayMs: 260 });
+    pushArrowDown();
+    pushEnter();
+    for (let i = 0; i < 9; i++) pushTab();
+    pushEnter();
+
+    log('Scheduler: starting key sequence (Tab x1, Shift+Tab x5, Space, title, Shift+Tab x1, topic, ArrowDown, Enter, Tab x9, Enter)');
+    return await requestThreadsKeyboardSequence(events, 30000);
+  }
+
+  function isPostSubmissionLikelyConfirmed() {
+    // If a prominent "Post" action is still visible/enabled, assume submit did not complete.
+    const buttons = Array.from(document.querySelectorAll('button, div[role="button"], a, span'));
+    const visiblePostButtons = buttons.filter(node => {
+      if (!(node instanceof HTMLElement)) return false;
+      if (!isVisibleElement(node)) return false;
+      const text = String(node.textContent || '').trim().toLowerCase();
+      const aria = String(node.getAttribute('aria-label') || '').trim().toLowerCase();
+      const looksLikePost = text === 'post' || aria === 'post' || text.startsWith('post ') || aria.startsWith('post ');
+      return looksLikePost;
+    });
+    return visiblePostButtons.length === 0;
+  }
+
+  async function openCreateFromThreadsLogo() {
+    const threadsIcon = document.querySelector('svg[aria-label="Threads"]');
+    if (!threadsIcon) {
+      log('Scheduler: Threads nav icon not found');
+      return false;
     }
-    if (!(await requestThreadsKeyboardSequence(pressSpace(), 2500))) return false;
-    if (!(await insertTrustedText(title))) return false;
-    if (!(await requestThreadsKeyboardSequence(pressShiftTab(), 3000))) return false;
-    if (!(await insertTrustedText(topic))) return false;
-    if (!(await requestThreadsKeyboardSequence(pressArrowDown(), 2500))) return false;
-    if (!(await requestThreadsKeyboardSequence(pressEnter(), 2500))) return false;
-    const tabSeries = [];
-    for (let i = 0; i < 9; i++) tabSeries.push(...pressTab());
-    if (!(await requestThreadsKeyboardSequence(tabSeries, 8000))) return false;
-    if (!(await requestThreadsKeyboardSequence(pressEnter(), 3000))) return false;
+
+    const rect = threadsIcon.getBoundingClientRect();
+    const cx = rect.left + (rect.width / 2);
+    const cy = rect.top + (rect.height / 2);
+    const clickedViaCdp = await requestThreadsPointerClickAt(cx, cy, 6000);
+    if (!clickedViaCdp) {
+      // Fallback to DOM click when CDP path fails.
+      try {
+        threadsIcon.dispatchEvent(new MouseEvent('mouseover', { bubbles: true, cancelable: true }));
+        threadsIcon.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
+        if (typeof threadsIcon.click === 'function') threadsIcon.click();
+        threadsIcon.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true }));
+      } catch {}
+      const clickable = threadsIcon.closest('a, div[role="button"], button, span') || threadsIcon.parentElement;
+      if (clickable) {
+        try {
+          clickable.dispatchEvent(new MouseEvent('mouseover', { bubbles: true, cancelable: true }));
+          clickable.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
+          if (typeof clickable.click === 'function') clickable.click();
+          clickable.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true }));
+        } catch {}
+      }
+    }
+
+    // Anchor keyboard sequence to the same nav target the user clicks manually.
+    const focusTarget = threadsIcon.closest('a, button, [tabindex], div[role="button"]');
+    if (focusTarget && typeof focusTarget.focus === 'function') {
+      try { focusTarget.focus(); } catch {}
+    }
+
+    log('Scheduler: clicked Threads logo target' + (clickedViaCdp ? ' via CDP' : ' via fallback'));
+    await sleep(700);
     return true;
   }
 
@@ -390,17 +480,8 @@ export function buildThreadsBotScript(config: Configuration): string {
         return false;
       }
 
-      const threadsIcon = document.querySelector('svg[aria-label="Threads"]');
-      const clickable = threadsIcon?.closest('a, div[role="button"], button, span') || threadsIcon?.parentElement;
-      if (!clickable) {
-        log('Scheduler: Threads nav icon not found');
-        return false;
-      }
-
-      clickable.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
-      clickable.click();
-      clickable.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true }));
-      await sleep(600);
+      const createOpened = await openCreateFromThreadsLogo();
+      if (!createOpened) return false;
 
       const mediaPaths = getPostMediaPaths(post);
       if (mediaPaths.length > 0) {
@@ -415,6 +496,12 @@ export function buildThreadsBotScript(config: Configuration): string {
       const flowed = await runThreadsKeyboardPostFlow(parsed.title, parsed.topic || parsed.title);
       if (!flowed) {
         log('Scheduler: keyboard posting flow failed');
+        return false;
+      }
+      await sleep(1400);
+      const confirmed = isPostSubmissionLikelyConfirmed();
+      if (!confirmed) {
+        log('Scheduler: submit not confirmed (Post control still visible)');
         return false;
       }
 
@@ -444,10 +531,15 @@ export function buildThreadsBotScript(config: Configuration): string {
 
     log('Scheduler due at ' + dueSlot.planned + ' with random offset ' + dueSlot.offsetMinutes + ' min');
     const posted = await publishScheduledThreadPost(post);
+    // Prevent repeated retries/glitching on the same scheduled slot.
+    processedScheduleSlots.add(dueSlot.slotKey);
     if (posted) {
       const folderPath = typeof schedulerConfig.folderPath === 'string' ? schedulerConfig.folderPath.trim() : '';
       markPostPublished(post, folderPath);
-      processedScheduleSlots.add(dueSlot.slotKey);
+      replyPauseUntil = Date.now() + REPLY_PAUSE_AFTER_POST_MS;
+      log('Scheduler: pausing replies for ' + Math.round(REPLY_PAUSE_AFTER_POST_MS / 60000) + ' minute(s)');
+    } else {
+      log('Scheduler: attempt failed for slot ' + dueSlot.planned + ', skipping retries for this slot');
     }
   }
 
@@ -1071,6 +1163,10 @@ export function buildThreadsBotScript(config: Configuration): string {
     isProcessing = true;
     try {
       await processScheduledPosting();
+
+      if (Date.now() < replyPauseUntil) {
+        return;
+      }
 
       // First, ensure Activity column is set up (if enabled)
       if (ACTIVITY_ENABLED) {
