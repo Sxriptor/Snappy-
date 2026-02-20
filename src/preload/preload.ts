@@ -110,6 +110,13 @@ const botAPI = {
    */
   getRedditBotScript: async (config: unknown): Promise<string> => {
     return await ipcRenderer.invoke('bot:getRedditScript', config);
+  },
+
+  /**
+   * Get Threads bot script generated in main process.
+   */
+  getThreadsBotScript: async (config: unknown): Promise<string> => {
+    return await ipcRenderer.invoke('bot:getThreadsScript', config);
   }
 };
 
@@ -438,6 +445,26 @@ const electronAPI = {
     selector: string = 'input[type="file"]'
   ): Promise<{ success: boolean; error?: string }> => {
     return await ipcRenderer.invoke('reddit:scheduler:setFileInputFiles', {
+      webContentsId,
+      filePaths,
+      selector
+    });
+  },
+
+  pickThreadsSchedulerFolder: async (): Promise<{ canceled: boolean; folderPath?: string }> => {
+    return await ipcRenderer.invoke('threads:scheduler:pickFolder');
+  },
+
+  scanThreadsSchedulerFolder: async (folderPath: string): Promise<{ success: boolean; error?: string; posts: unknown[] }> => {
+    return await ipcRenderer.invoke('threads:scheduler:scanFolder', folderPath);
+  },
+
+  setThreadsSchedulerFileInput: async (
+    webContentsId: number,
+    filePaths: string[],
+    selector: string = 'input[type="file"]'
+  ): Promise<{ success: boolean; error?: string }> => {
+    return await ipcRenderer.invoke('threads:scheduler:setFileInputFiles', {
       webContentsId,
       filePaths,
       selector

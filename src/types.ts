@@ -33,6 +33,27 @@ export interface Configuration {
     maxCommentsPerPoll?: number;
     activityColumnEnabled?: boolean;
     activityPriority?: boolean;
+    postScheduler?: {
+      enabled?: boolean;
+      folderPath?: string;
+      days?: {
+        monday?: { enabled?: boolean; times?: string[] };
+        tuesday?: { enabled?: boolean; times?: string[] };
+        wednesday?: { enabled?: boolean; times?: string[] };
+        thursday?: { enabled?: boolean; times?: string[] };
+        friday?: { enabled?: boolean; times?: string[] };
+        saturday?: { enabled?: boolean; times?: string[] };
+        sunday?: { enabled?: boolean; times?: string[] };
+      };
+      posts?: Array<{
+        id?: string;
+        textPath?: string;
+        body?: string;
+        mediaPath?: string;
+        mediaPaths?: string[];
+        mediaType?: 'image' | 'video';
+      }>;
+    };
   };
   reddit?: {
     pollIntervalMs?: number;

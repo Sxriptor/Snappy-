@@ -149,6 +149,7 @@ export interface SnapchatSiteSettings {
 }
 
 export interface ThreadsSiteSettings {
+  postScheduler?: ThreadsPostSchedulerSettings;
   // Activity settings
   watchActivityColumn: boolean;
   activityPriority: boolean;
@@ -164,6 +165,35 @@ export interface ThreadsSiteSettings {
   // Filtering settings
   skipVerifiedAccounts: boolean;
   minFollowerCount: number;
+}
+
+export interface ThreadsScheduledPost {
+  id: string;
+  mediaPaths?: string[];
+  textPath: string;
+  body: string;
+  mediaPath?: string;
+  mediaType?: 'image' | 'video';
+}
+
+export interface ThreadsDaySchedule {
+  enabled: boolean;
+  times: string[];
+}
+
+export interface ThreadsPostSchedulerSettings {
+  enabled: boolean;
+  folderPath: string;
+  days: {
+    monday: ThreadsDaySchedule;
+    tuesday: ThreadsDaySchedule;
+    wednesday: ThreadsDaySchedule;
+    thursday: ThreadsDaySchedule;
+    friday: ThreadsDaySchedule;
+    saturday: ThreadsDaySchedule;
+    sunday: ThreadsDaySchedule;
+  };
+  posts: ThreadsScheduledPost[];
 }
 
 export interface SiteSettingsConfig {
@@ -262,6 +292,20 @@ export const DEFAULT_SITE_SETTINGS: SiteSettingsConfig = {
   },
   
   threads: {
+    postScheduler: {
+      enabled: false,
+      folderPath: '',
+      days: {
+        monday: { enabled: false, times: ['09:00'] },
+        tuesday: { enabled: false, times: ['09:00'] },
+        wednesday: { enabled: false, times: ['09:00'] },
+        thursday: { enabled: false, times: ['09:00'] },
+        friday: { enabled: false, times: ['09:00'] },
+        saturday: { enabled: false, times: ['09:00'] },
+        sunday: { enabled: false, times: ['09:00'] }
+      },
+      posts: []
+    },
     watchActivityColumn: true,
     activityPriority: true,
     watchPostComments: true,

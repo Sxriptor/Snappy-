@@ -434,6 +434,11 @@
                 <input type="number" id="threads-max-comments" value="5" class="input-sm">
               </div>
             </section>
+
+            <section class="section">
+              <div class="section-header">POST SCHEDULER</div>
+              <button id="threads-open-scheduler" class="btn btn-full">Open Scheduler</button>
+            </section>
           </div>
 
           <button id="save-site-settings-btn" class="btn btn-full site-save-btn">Save Site Settings</button>
@@ -828,6 +833,33 @@
         </div>
         <div class="scheduler-days" id="reddit-scheduler-days"></div>
         <div id="reddit-scheduler-content-preview" class="scheduler-preview">No scheduled text posts found yet.</div>
+      </div>
+    </div>
+  </div>
+
+  <div id="threads-scheduler-overlay" class="scheduler-overlay hidden">
+    <div class="scheduler-modal">
+      <div class="scheduler-header">
+        <h3>Threads Post Scheduler</h3>
+        <button id="threads-scheduler-close" class="scheduler-close-btn">&times;</button>
+      </div>
+      <div class="scheduler-body">
+        <div class="setting-row">
+          <span>Enable Scheduler</span>
+          <label class="checkbox">
+            <input type="checkbox" id="threads-scheduler-enabled">
+            <span class="checkmark"></span>
+          </label>
+        </div>
+        <div class="scheduler-folder-row">
+          <label for="threads-scheduler-folder">Content Folder</label>
+          <div class="scheduler-folder-input">
+            <input type="text" id="threads-scheduler-folder" placeholder="Select folder with .txt posts and optional matching media">
+            <button id="threads-scheduler-browse" class="btn">Browse</button>
+          </div>
+        </div>
+        <div class="scheduler-days" id="threads-scheduler-days"></div>
+        <div id="threads-scheduler-content-preview" class="scheduler-preview">No scheduled text posts found yet.</div>
       </div>
     </div>
   </div>

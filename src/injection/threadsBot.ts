@@ -1,4 +1,4 @@
-import { Configuration } from '../types';
+﻿import { Configuration } from '../types';
 
 /**
  * Build an injection script for Threads that:
@@ -22,20 +22,30 @@ export function buildThreadsBotScript(config: Configuration): string {
   window.__SNAPPY_THREADS_RUNNING__ = true;
 
   const CONFIG = ${serializedConfig};
+  const SITE_SETTINGS = CONFIG?.siteSettings?.threads || {};
+  const schedulerConfig = SITE_SETTINGS.postScheduler || CONFIG?.threads?.postScheduler || {};
   const seenComments = new Set();
   const seenNotifications = new Set();
+  const processedScheduleSlots = new Set();
   let isRunning = true;
   let pollInterval = null;
+  let schedulerInterval = null;
   let isProcessing = false;
   let refreshInterval = null;
+  let isPostingScheduledContent = false;
 
   const MIN_COMMENT_LENGTH = 3;
-  const POLL_MS = (CONFIG?.threads && CONFIG.threads.pollIntervalMs) || 60000;
-  const MAX_PER_POLL = (CONFIG?.threads && CONFIG.threads.maxCommentsPerPoll) || 5;
-  const ACTIVITY_ENABLED = (CONFIG?.threads && CONFIG.threads.activityColumnEnabled) !== false;
-  const ACTIVITY_PRIORITY = (CONFIG?.threads && CONFIG.threads.activityPriority) !== false;
+  const rawPollMs = Number(SITE_SETTINGS.pollIntervalMs ?? (CONFIG?.threads && CONFIG.threads.pollIntervalMs));
+  const POLL_MS = Number.isFinite(rawPollMs) && rawPollMs >= 3000 ? rawPollMs : 60000;
+  const MAX_PER_POLL = (SITE_SETTINGS.maxCommentsPerPoll || (CONFIG?.threads && CONFIG.threads.maxCommentsPerPoll)) || 5;
+  const ACTIVITY_ENABLED = SITE_SETTINGS.watchActivityColumn !== false && (CONFIG?.threads?.activityColumnEnabled !== false);
+  const ACTIVITY_PRIORITY = SITE_SETTINGS.activityPriority !== false && (CONFIG?.threads?.activityPriority !== false);
+  const AUTO_REPLY_ENABLED = SITE_SETTINGS.autoReplyToComments !== false;
+  const SCHEDULER_ENABLED = schedulerConfig?.enabled === true;
   const typingDelayRange = CONFIG?.typingDelayRangeMs || [50, 150];
   const preReplyDelayRange = CONFIG?.preReplyDelayRangeMs || [2000, 6000];
+  const SCHEDULER_JITTER_MINUTES = 0;
+  const SCHEDULER_DUE_WINDOW_MINUTES = 15;
 
   let activityColumnSetup = false;
 
@@ -47,7 +57,7 @@ export function buildThreadsBotScript(config: Configuration): string {
         log('Skipping refresh - bot stopped');
         return;
       }
-      if (!isProcessing) {
+      if (!isProcessing && !isPostingScheduledContent) {
         log('Refreshing page (no processing in progress)');
         location.reload();
       } else {
@@ -65,6 +75,368 @@ export function buildThreadsBotScript(config: Configuration): string {
 
   function sleep(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
+  }
+
+  function hashString(input) {
+    let hash = 0;
+    const str = String(input || '');
+    for (let i = 0; i < str.length; i++) {
+      hash = ((hash << 5) - hash + str.charCodeAt(i)) | 0;
+    }
+    return Math.abs(hash);
+  }
+
+  function normalizeTime(timeValue) {
+    const match = String(timeValue || '').trim().match(/^(\\d{1,2}):(\\d{2})$/);
+    if (!match) return null;
+    const hour = Math.max(0, Math.min(23, parseInt(match[1], 10)));
+    const minute = Math.max(0, Math.min(59, parseInt(match[2], 10)));
+    return { hour, minute, text: hour.toString().padStart(2, '0') + ':' + minute.toString().padStart(2, '0') };
+  }
+
+  function getDayKey(date) {
+    const map = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
+    return map[date.getDay()];
+  }
+
+  function getSchedulerPosts() {
+    const posts = Array.isArray(schedulerConfig.posts) ? schedulerConfig.posts : [];
+    return posts.filter(post =>
+      post &&
+      typeof post.id === 'string' &&
+      typeof post.textPath === 'string' &&
+      typeof post.body === 'string'
+    );
+  }
+
+  function getPostMediaPaths(post) {
+    if (!post) return [];
+    if (Array.isArray(post.mediaPaths)) {
+      return post.mediaPaths.filter(item => typeof item === 'string' && item.trim().length > 0);
+    }
+    if (typeof post.mediaPath === 'string' && post.mediaPath.trim().length > 0) {
+      return [post.mediaPath];
+    }
+    return [];
+  }
+
+  function getPostedState() {
+    try {
+      const raw = localStorage.getItem('__snappy_threads_scheduler_posted__');
+      if (!raw) return {};
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed === 'object') return parsed;
+    } catch {}
+    return {};
+  }
+
+  function savePostedState(state) {
+    try {
+      localStorage.setItem('__snappy_threads_scheduler_posted__', JSON.stringify(state || {}));
+    } catch {}
+  }
+
+  function getPostSignature(post) {
+    const mediaPaths = getPostMediaPaths(post).slice().sort();
+    return mediaPaths.join('|') + '::' + String(post?.textPath || post?.id || '');
+  }
+
+  function isPostAlreadyPublished(post, folderPath) {
+    const postedState = getPostedState();
+    const key = String(folderPath || '');
+    const signatures = Array.isArray(postedState[key]) ? postedState[key] : [];
+    return signatures.includes(getPostSignature(post));
+  }
+
+  function markPostPublished(post, folderPath) {
+    const postedState = getPostedState();
+    const key = String(folderPath || '');
+    const signatures = Array.isArray(postedState[key]) ? postedState[key] : [];
+    const signature = getPostSignature(post);
+    if (!signatures.includes(signature)) {
+      signatures.push(signature);
+    }
+    postedState[key] = signatures;
+    savePostedState(postedState);
+  }
+
+  function getNextScheduledPost() {
+    const posts = getSchedulerPosts();
+    if (posts.length === 0) return null;
+    const folderPath = typeof schedulerConfig.folderPath === 'string' ? schedulerConfig.folderPath.trim() : '';
+    const sorted = posts.slice().sort((a, b) => String(a.id).localeCompare(String(b.id), undefined, { numeric: true, sensitivity: 'base' }));
+    for (const post of sorted) {
+      if (!isPostAlreadyPublished(post, folderPath)) {
+        return post;
+      }
+    }
+    return null;
+  }
+
+  function parseThreadsScheduledText(rawText) {
+    const text = String(rawText || '').replace(/^\\uFEFF/, '').replace(/\\r/g, '').trim();
+    const lines = text.split('\\n').map(line => String(line || '').trim()).filter(Boolean);
+    let title = '';
+    let topic = '';
+
+    for (const line of lines) {
+      const match = line.match(/^\\s*(title|topic)\\s*:\\s*(.+)$/i);
+      if (!match) continue;
+      if (match[1].toLowerCase() === 'title') {
+        title = match[2].trim();
+      } else if (match[1].toLowerCase() === 'topic') {
+        topic = match[2].trim();
+      }
+    }
+
+    if (!title && lines.length > 0) title = lines[0];
+    if (!topic && lines.length > 1) topic = lines[1];
+    if (!topic) topic = title;
+
+    return {
+      title: title.substring(0, 500),
+      topic: topic.substring(0, 200)
+    };
+  }
+
+  function getDueScheduleSlot() {
+    if (!SCHEDULER_ENABLED) return null;
+    const folderPath = typeof schedulerConfig.folderPath === 'string' ? schedulerConfig.folderPath.trim() : '';
+    if (!folderPath) return null;
+
+    const now = new Date();
+    const dayKey = getDayKey(now);
+    const dayConfig = schedulerConfig.days?.[dayKey];
+    if (!dayConfig || dayConfig.enabled !== true || !Array.isArray(dayConfig.times) || dayConfig.times.length === 0) {
+      return null;
+    }
+
+    const year = now.getFullYear();
+    const month = now.getMonth();
+    const day = now.getDate();
+
+    for (const timeValue of dayConfig.times) {
+      const normalized = normalizeTime(timeValue);
+      if (!normalized) continue;
+
+      const baseTime = new Date(year, month, day, normalized.hour, normalized.minute, 0, 0);
+      const slotKeyBase = year + '-' + (month + 1) + '-' + day + '-' + dayKey + '-' + normalized.text;
+      const randomOffset = (hashString(slotKeyBase) % (SCHEDULER_JITTER_MINUTES * 2 + 1)) - SCHEDULER_JITTER_MINUTES;
+      const runAt = new Date(baseTime.getTime() + randomOffset * 60 * 1000);
+      const windowEnd = new Date(baseTime.getTime() + SCHEDULER_DUE_WINDOW_MINUTES * 60 * 1000);
+      const slotKey = slotKeyBase + '-off-' + randomOffset;
+
+      if (processedScheduleSlots.has(slotKey)) continue;
+      if (now < runAt) continue;
+      if (now > windowEnd) continue;
+
+      return {
+        slotKey,
+        planned: normalized.text,
+        offsetMinutes: randomOffset
+      };
+    }
+
+    return null;
+  }
+
+  function describeTodaySchedule() {
+    if (!SCHEDULER_ENABLED) return 'disabled';
+    const now = new Date();
+    const dayKey = getDayKey(now);
+    const dayConfig = schedulerConfig.days?.[dayKey];
+    if (!dayConfig || dayConfig.enabled !== true || !Array.isArray(dayConfig.times) || dayConfig.times.length === 0) {
+      return dayKey + ': off';
+    }
+    const times = dayConfig.times
+      .map(item => normalizeTime(item))
+      .filter(item => !!item)
+      .map(item => item.text);
+    return dayKey + ': ' + (times.length > 0 ? times.join(', ') : 'off');
+  }
+
+  async function requestThreadsMediaAttach(filePaths) {
+    const normalizedPaths = Array.isArray(filePaths)
+      ? filePaths.filter(item => typeof item === 'string' && item.trim().length > 0)
+      : [];
+    if (normalizedPaths.length === 0) return true;
+
+    const requestId = 'threads-upload-' + Date.now() + '-' + Math.random().toString(36).slice(2);
+    window.__SNAPPY_THREADS_UPLOAD_RESPONSE__ = null;
+    window.__SNAPPY_THREADS_UPLOAD_REQUEST__ = {
+      id: requestId,
+      filePaths: normalizedPaths,
+      selector: 'input[type="file"]'
+    };
+
+    let waited = 0;
+    const timeoutMs = 30000;
+    while (waited < timeoutMs && isRunning) {
+      await sleep(250);
+      waited += 250;
+      const response = window.__SNAPPY_THREADS_UPLOAD_RESPONSE__;
+      if (response && response.id === requestId) {
+        window.__SNAPPY_THREADS_UPLOAD_RESPONSE__ = null;
+        return response.success === true;
+      }
+    }
+    return false;
+  }
+
+  async function requestThreadsKeyboardSequence(events, timeoutMs) {
+    const normalizedEvents = Array.isArray(events) ? events : [];
+    if (!normalizedEvents.length) return false;
+
+    const requestId = 'threads-kb-' + Date.now() + '-' + Math.random().toString(36).slice(2);
+    window.__SNAPPY_THREADS_KEYBOARD_RESPONSE__ = null;
+    window.__SNAPPY_THREADS_KEYBOARD_REQUEST__ = {
+      id: requestId,
+      events: normalizedEvents
+    };
+
+    let waited = 0;
+    const maxWait = Math.max(1200, Number(timeoutMs) || 8000);
+    while (waited < maxWait && isRunning) {
+      await sleep(140);
+      waited += 140;
+      const response = window.__SNAPPY_THREADS_KEYBOARD_RESPONSE__;
+      if (response && response.id === requestId) {
+        window.__SNAPPY_THREADS_KEYBOARD_RESPONSE__ = null;
+        return response.success === true;
+      }
+    }
+    return false;
+  }
+
+  async function insertTrustedText(text) {
+    const value = String(text || '');
+    if (!value) return true;
+
+    const events = [
+      { kind: 'dispatch', type: 'rawKeyDown', key: 'Control', code: 'ControlLeft', windowsVirtualKeyCode: 17, nativeVirtualKeyCode: 17, delayMs: 20 },
+      { kind: 'dispatch', type: 'rawKeyDown', key: 'a', code: 'KeyA', windowsVirtualKeyCode: 65, nativeVirtualKeyCode: 65, modifiers: 2, delayMs: 25 },
+      { kind: 'dispatch', type: 'keyUp', key: 'a', code: 'KeyA', windowsVirtualKeyCode: 65, nativeVirtualKeyCode: 65, modifiers: 2, delayMs: 20 },
+      { kind: 'dispatch', type: 'keyUp', key: 'Control', code: 'ControlLeft', windowsVirtualKeyCode: 17, nativeVirtualKeyCode: 17, delayMs: 30 },
+      { kind: 'dispatch', type: 'keyDown', key: 'Backspace', code: 'Backspace', windowsVirtualKeyCode: 8, nativeVirtualKeyCode: 8, delayMs: 30 },
+      { kind: 'dispatch', type: 'keyUp', key: 'Backspace', code: 'Backspace', windowsVirtualKeyCode: 8, nativeVirtualKeyCode: 8, delayMs: 35 },
+      { kind: 'insertText', text: value, delayMs: 80 }
+    ];
+
+    return await requestThreadsKeyboardSequence(events, 7000);
+  }
+
+  async function runThreadsKeyboardPostFlow(title, topic) {
+    const pressTab = () => ([
+      { kind: 'dispatch', type: 'keyDown', key: 'Tab', code: 'Tab', windowsVirtualKeyCode: 9, nativeVirtualKeyCode: 9, delayMs: 35 },
+      { kind: 'dispatch', type: 'keyUp', key: 'Tab', code: 'Tab', windowsVirtualKeyCode: 9, nativeVirtualKeyCode: 9, delayMs: 60 }
+    ]);
+    const pressShiftTab = () => ([
+      { kind: 'dispatch', type: 'rawKeyDown', key: 'Shift', code: 'ShiftLeft', windowsVirtualKeyCode: 16, nativeVirtualKeyCode: 16, delayMs: 25 },
+      { kind: 'dispatch', type: 'keyDown', key: 'Tab', code: 'Tab', windowsVirtualKeyCode: 9, nativeVirtualKeyCode: 9, modifiers: 8, delayMs: 35 },
+      { kind: 'dispatch', type: 'keyUp', key: 'Tab', code: 'Tab', windowsVirtualKeyCode: 9, nativeVirtualKeyCode: 9, modifiers: 8, delayMs: 35 },
+      { kind: 'dispatch', type: 'keyUp', key: 'Shift', code: 'ShiftLeft', windowsVirtualKeyCode: 16, nativeVirtualKeyCode: 16, delayMs: 65 }
+    ]);
+    const pressSpace = () => ([
+      { kind: 'dispatch', type: 'keyDown', key: ' ', code: 'Space', windowsVirtualKeyCode: 32, nativeVirtualKeyCode: 32, delayMs: 45 },
+      { kind: 'dispatch', type: 'keyUp', key: ' ', code: 'Space', windowsVirtualKeyCode: 32, nativeVirtualKeyCode: 32, delayMs: 65 }
+    ]);
+    const pressArrowDown = () => ([
+      { kind: 'dispatch', type: 'keyDown', key: 'ArrowDown', code: 'ArrowDown', windowsVirtualKeyCode: 40, nativeVirtualKeyCode: 40, delayMs: 45 },
+      { kind: 'dispatch', type: 'keyUp', key: 'ArrowDown', code: 'ArrowDown', windowsVirtualKeyCode: 40, nativeVirtualKeyCode: 40, delayMs: 75 }
+    ]);
+    const pressEnter = () => ([
+      { kind: 'dispatch', type: 'keyDown', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13, delayMs: 45 },
+      { kind: 'dispatch', type: 'keyUp', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13, delayMs: 75 }
+    ]);
+
+    if (!(await requestThreadsKeyboardSequence(pressTab(), 2500))) return false;
+    for (let i = 0; i < 4; i++) {
+      if (!(await requestThreadsKeyboardSequence(pressShiftTab(), 3000))) return false;
+    }
+    if (!(await requestThreadsKeyboardSequence(pressSpace(), 2500))) return false;
+    if (!(await insertTrustedText(title))) return false;
+    if (!(await requestThreadsKeyboardSequence(pressShiftTab(), 3000))) return false;
+    if (!(await insertTrustedText(topic))) return false;
+    if (!(await requestThreadsKeyboardSequence(pressArrowDown(), 2500))) return false;
+    if (!(await requestThreadsKeyboardSequence(pressEnter(), 2500))) return false;
+    const tabSeries = [];
+    for (let i = 0; i < 9; i++) tabSeries.push(...pressTab());
+    if (!(await requestThreadsKeyboardSequence(tabSeries, 8000))) return false;
+    if (!(await requestThreadsKeyboardSequence(pressEnter(), 3000))) return false;
+    return true;
+  }
+
+  async function publishScheduledThreadPost(post) {
+    if (!post || typeof post.body !== 'string') return false;
+    if (isPostingScheduledContent) return false;
+
+    isPostingScheduledContent = true;
+    try {
+      const parsed = parseThreadsScheduledText(post.body);
+      if (!parsed.title) {
+        log('Scheduler: missing title for post ' + String(post.id || 'unknown'));
+        return false;
+      }
+
+      const threadsIcon = document.querySelector('svg[aria-label="Threads"]');
+      const clickable = threadsIcon?.closest('a, div[role="button"], button, span') || threadsIcon?.parentElement;
+      if (!clickable) {
+        log('Scheduler: Threads nav icon not found');
+        return false;
+      }
+
+      clickable.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
+      clickable.click();
+      clickable.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true }));
+      await sleep(600);
+
+      const mediaPaths = getPostMediaPaths(post);
+      if (mediaPaths.length > 0) {
+        const attached = await requestThreadsMediaAttach(mediaPaths);
+        if (!attached) {
+          log('Scheduler: media attach failed for post ' + String(post.id || 'unknown'));
+          return false;
+        }
+        await sleep(800);
+      }
+
+      const flowed = await runThreadsKeyboardPostFlow(parsed.title, parsed.topic || parsed.title);
+      if (!flowed) {
+        log('Scheduler: keyboard posting flow failed');
+        return false;
+      }
+
+      log('Scheduler: Threads post submitted');
+      return true;
+    } catch (error) {
+      log('Scheduler publish error: ' + error);
+      return false;
+    } finally {
+      isPostingScheduledContent = false;
+    }
+  }
+
+  async function processScheduledPosting() {
+    if (!SCHEDULER_ENABLED || !isRunning) return;
+    if (isPostingScheduledContent) return;
+
+    const dueSlot = getDueScheduleSlot();
+    if (!dueSlot) return;
+
+    const post = getNextScheduledPost();
+    if (!post) {
+      log('Scheduler: no unposted .txt posts available');
+      processedScheduleSlots.add(dueSlot.slotKey);
+      return;
+    }
+
+    log('Scheduler due at ' + dueSlot.planned + ' with random offset ' + dueSlot.offsetMinutes + ' min');
+    const posted = await publishScheduledThreadPost(post);
+    if (posted) {
+      const folderPath = typeof schedulerConfig.folderPath === 'string' ? schedulerConfig.folderPath.trim() : '';
+      markPostPublished(post, folderPath);
+      processedScheduleSlots.add(dueSlot.slotKey);
+    }
   }
 
   function detectLoggedInHandle() {
@@ -281,10 +653,10 @@ export function buildThreadsBotScript(config: Configuration): string {
       if (!activityColumnSetup) {
         log('Activity column already open, setting filter...');
       } else {
-        log('Activity column open, ensuring filter is set...');
+        return true;
       }
 
-      // Always set filter to Replies (in case page was refreshed)
+      // Set filter to Replies once per page load.
       const filterDropdown = findActivityFilterDropdown();
       if (filterDropdown) {
         log('Setting filter to Replies...');
@@ -572,7 +944,7 @@ export function buildThreadsBotScript(config: Configuration): string {
 
     const sent = await sendReply(comment.element, reply, comment.author);
     if (sent) {
-      log('✓ Replied to @' + comment.author + ': ' + reply.substring(0, 60));
+      log('âœ“ Replied to @' + comment.author + ': ' + reply.substring(0, 60));
     } else {
       log('Failed to send reply to @' + comment.author);
     }
@@ -666,14 +1038,14 @@ export function buildThreadsBotScript(config: Configuration): string {
       if (postBtn) {
         postBtn.click();
         await sleep(800);
-        log('✓ Replied to activity from @' + author + ': ' + reply.substring(0, 60));
+        log('âœ“ Replied to activity from @' + author + ': ' + reply.substring(0, 60));
         return true;
       } else {
         // Fallback: Enter key
         composer.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', keyCode: 13, bubbles: true }));
         composer.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', keyCode: 13, bubbles: true }));
         await sleep(800);
-        log('✓ Replied to activity from @' + author + ' (Enter key): ' + reply.substring(0, 60));
+        log('âœ“ Replied to activity from @' + author + ' (Enter key): ' + reply.substring(0, 60));
         return true;
       }
     } catch (err) {
@@ -683,10 +1055,11 @@ export function buildThreadsBotScript(config: Configuration): string {
   }
 
   async function poll() {
-    if (!isRunning) return;
-    if (isProcessing) return;
+    if (!isRunning || isProcessing || isPostingScheduledContent) return;
     isProcessing = true;
     try {
+      await processScheduledPosting();
+
       // First, ensure Activity column is set up (if enabled)
       if (ACTIVITY_ENABLED) {
         const activityReady = await setupActivityColumn();
@@ -702,7 +1075,9 @@ export function buildThreadsBotScript(config: Configuration): string {
             const toProcess = activityItems.slice(0, MAX_PER_POLL);
             for (const item of toProcess) {
               if (!isRunning) break;
-              await processActivityItem(item, currentUser);
+              if (AUTO_REPLY_ENABLED) {
+                await processActivityItem(item, currentUser);
+              }
               await sleep(1200);
             }
             
@@ -727,6 +1102,10 @@ export function buildThreadsBotScript(config: Configuration): string {
           log('No new notifications or activity items');
         }
         isProcessing = false;
+        return;
+      }
+
+      if (!AUTO_REPLY_ENABLED) {
         return;
       }
 
@@ -762,6 +1141,7 @@ export function buildThreadsBotScript(config: Configuration): string {
   function stop() {
     isRunning = false;
     if (pollInterval) clearInterval(pollInterval);
+    if (schedulerInterval) clearInterval(schedulerInterval);
     if (refreshInterval) clearTimeout(refreshInterval);
     window.__SNAPPY_RUNNING__ = false;
     window.__SNAPPY_THREADS_RUNNING__ = false;
@@ -769,13 +1149,24 @@ export function buildThreadsBotScript(config: Configuration): string {
   }
 
   // Start polling and refresh scheduler
-  log('🚀 Threads bot started');
+  log('Threads bot started');
+  log('Scheduler status: enabled=' + SCHEDULER_ENABLED + ', posts=' + getSchedulerPosts().length + ', now=' + new Date().toLocaleTimeString());
+  log('Scheduler today: ' + describeTodaySchedule());
   poll();
   pollInterval = setInterval(poll, POLL_MS);
+  if (SCHEDULER_ENABLED) {
+    log('Scheduler enabled, posts=' + getSchedulerPosts().length);
+    processScheduledPosting();
+    schedulerInterval = setInterval(() => {
+      processScheduledPosting();
+    }, 30000);
+  }
   scheduleNextRefresh();
 
   window.__SNAPPY_STOP__ = stop;
 })();
 `;
 }
+
+
 

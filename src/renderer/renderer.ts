@@ -2109,6 +2109,27 @@ interface RedditPostSchedulerSettings {
   posts: RedditScheduledPost[];
 }
 
+interface ThreadsDaySchedule {
+  enabled: boolean;
+  times: string[];
+}
+
+interface ThreadsScheduledPost {
+  id: string;
+  mediaPaths?: string[];
+  textPath: string;
+  body: string;
+  mediaPath?: string;
+  mediaType?: 'image' | 'video';
+}
+
+interface ThreadsPostSchedulerSettings {
+  enabled: boolean;
+  folderPath: string;
+  days: Record<SchedulerDayKey, ThreadsDaySchedule>;
+  posts: ThreadsScheduledPost[];
+}
+
 let isPanelOpen = false;
 let isBotActive = false;
 let isLogCollapsed = false;
@@ -3551,6 +3572,14 @@ const instagramSchedulerFolderInput = document.getElementById('instagram-schedul
 const instagramSchedulerBrowseBtn = document.getElementById('instagram-scheduler-browse') as HTMLButtonElement | null;
 const instagramSchedulerDaysContainer = document.getElementById('instagram-scheduler-days') as HTMLDivElement | null;
 const instagramSchedulerPreview = document.getElementById('instagram-scheduler-content-preview') as HTMLDivElement | null;
+const threadsSchedulerOpenBtn = document.getElementById('threads-open-scheduler') as HTMLButtonElement | null;
+const threadsSchedulerOverlay = document.getElementById('threads-scheduler-overlay') as HTMLDivElement | null;
+const threadsSchedulerCloseBtn = document.getElementById('threads-scheduler-close') as HTMLButtonElement | null;
+const threadsSchedulerEnabledInput = document.getElementById('threads-scheduler-enabled') as HTMLInputElement | null;
+const threadsSchedulerFolderInput = document.getElementById('threads-scheduler-folder') as HTMLInputElement | null;
+const threadsSchedulerBrowseBtn = document.getElementById('threads-scheduler-browse') as HTMLButtonElement | null;
+const threadsSchedulerDaysContainer = document.getElementById('threads-scheduler-days') as HTMLDivElement | null;
+const threadsSchedulerPreview = document.getElementById('threads-scheduler-content-preview') as HTMLDivElement | null;
 
 const schedulerDayKeys: SchedulerDayKey[] = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday'];
 const schedulerDayLabels: Record<SchedulerDayKey, string> = {
@@ -3567,6 +3596,7 @@ const schedulerDayLabels: Record<SchedulerDayKey, string> = {
 let currentSiteSettings: any = {};
 let redditSchedulerState: RedditPostSchedulerSettings = createDefaultRedditSchedulerSettings();
 let instagramSchedulerState: InstagramPostSchedulerSettings = createDefaultInstagramSchedulerSettings();
+let threadsSchedulerState: ThreadsPostSchedulerSettings = createDefaultThreadsSchedulerSettings();
 let siteSettingsAutoSaveTimer: number | null = null;
 
 function createDefaultRedditSchedulerSettings(): RedditPostSchedulerSettings {
@@ -3588,6 +3618,23 @@ function createDefaultRedditSchedulerSettings(): RedditPostSchedulerSettings {
 }
 
 function createDefaultInstagramSchedulerSettings(): InstagramPostSchedulerSettings {
+  return {
+    enabled: false,
+    folderPath: '',
+    days: {
+      monday: { enabled: false, times: ['09:00'] },
+      tuesday: { enabled: false, times: ['09:00'] },
+      wednesday: { enabled: false, times: ['09:00'] },
+      thursday: { enabled: false, times: ['09:00'] },
+      friday: { enabled: false, times: ['09:00'] },
+      saturday: { enabled: false, times: ['09:00'] },
+      sunday: { enabled: false, times: ['09:00'] }
+    },
+    posts: []
+  };
+}
+
+function createDefaultThreadsSchedulerSettings(): ThreadsPostSchedulerSettings {
   return {
     enabled: false,
     folderPath: '',
@@ -3717,6 +3764,56 @@ function normalizeRedditSchedulerSettings(value: unknown): RedditPostSchedulerSe
   };
 }
 
+function normalizeThreadsSchedulerSettings(value: unknown): ThreadsPostSchedulerSettings {
+  const defaults = createDefaultThreadsSchedulerSettings();
+  const settings = typeof value === 'object' && value !== null ? value as Partial<ThreadsPostSchedulerSettings> : {};
+  const normalizedDays = { ...defaults.days };
+
+  for (const day of schedulerDayKeys) {
+    normalizedDays[day] = normalizeSchedulerDay(settings.days?.[day]);
+  }
+
+  const posts = Array.isArray(settings.posts)
+    ? settings.posts.map((item): ThreadsScheduledPost | null => {
+      if (typeof item !== 'object' || item === null) return null;
+      const candidate = item as Partial<ThreadsScheduledPost>;
+      const mediaPaths = Array.isArray(candidate.mediaPaths)
+        ? candidate.mediaPaths.filter((p): p is string => typeof p === 'string' && p.trim().length > 0)
+        : (typeof candidate.mediaPath === 'string' && candidate.mediaPath.trim().length > 0 ? [candidate.mediaPath] : []);
+
+      if (typeof candidate.id !== 'string' ||
+          typeof candidate.textPath !== 'string' ||
+          typeof candidate.body !== 'string' ||
+          (candidate.mediaType !== undefined && candidate.mediaType !== 'image' && candidate.mediaType !== 'video')) {
+        return null;
+      }
+
+      const normalized: ThreadsScheduledPost = {
+        id: candidate.id,
+        textPath: candidate.textPath,
+        body: candidate.body
+      };
+
+      if (mediaPaths.length > 0) {
+        normalized.mediaPaths = mediaPaths;
+        normalized.mediaPath = mediaPaths[0];
+        normalized.mediaType = candidate.mediaType;
+      } else if (candidate.mediaType) {
+        normalized.mediaType = candidate.mediaType;
+      }
+
+      return normalized;
+    }).filter((item): item is ThreadsScheduledPost => item !== null)
+    : [];
+
+  return {
+    enabled: settings.enabled === true,
+    folderPath: typeof settings.folderPath === 'string' ? settings.folderPath : '',
+    days: normalizedDays,
+    posts
+  };
+}
+
 function queueSiteSettingsAutoSave(): void {
   if (siteSettingsAutoSaveTimer !== null) {
     window.clearTimeout(siteSettingsAutoSaveTimer);
@@ -3794,7 +3891,7 @@ function detectPlatformFromUrl(url: string): string {
   if (lowerUrl.includes('instagram.com')) return 'instagram';
   if (lowerUrl.includes('twitter.com') || lowerUrl.includes('x.com')) return 'twitter';
   if (lowerUrl.includes('snapchat.com')) return 'snapchat';
-  if (lowerUrl.includes('threads.net')) return 'threads';
+  if (lowerUrl.includes('threads.net') || lowerUrl.includes('threads.com')) return 'threads';
   
   return 'unknown';
 }
@@ -3806,7 +3903,7 @@ function detectPlatformFromHostname(hostname: string): string {
   if (lowerHostname.includes('instagram.com')) return 'instagram';
   if (lowerHostname.includes('twitter.com') || lowerHostname.includes('x.com')) return 'twitter';
   if (lowerHostname.includes('snapchat.com')) return 'snapchat';
-  if (lowerHostname.includes('threads.net')) return 'threads';
+  if (lowerHostname.includes('threads.net') || lowerHostname.includes('threads.com')) return 'threads';
   
   return 'unknown';
 }
@@ -3951,6 +4048,8 @@ function populateSettingsUI(platform: string, settings: any) {
     setCheckboxValue('threads-auto-reply', settings.autoReplyToComments ?? true);
     setNumberValue('threads-poll-interval', settings.pollIntervalMs ?? 60000);
     setNumberValue('threads-max-comments', settings.maxCommentsPerPoll ?? 5);
+    threadsSchedulerState = normalizeThreadsSchedulerSettings(settings.postScheduler);
+    renderThreadsSchedulerOverlay();
   }
 }
 
@@ -4245,6 +4344,133 @@ function closeRedditSchedulerOverlay(): void {
   redditSchedulerOverlay.classList.add('hidden');
 }
 
+function renderThreadsSchedulerContentPreview(posts: ThreadsScheduledPost[]): void {
+  if (!threadsSchedulerPreview) return;
+  if (posts.length === 0) {
+    threadsSchedulerPreview.textContent = 'No scheduled text posts found yet.';
+    return;
+  }
+
+  const previewLines = posts.slice(0, 8).map((post) => {
+    const mediaCount = Array.isArray(post.mediaPaths) && post.mediaPaths.length > 0 ? post.mediaPaths.length : (post.mediaPath ? 1 : 0);
+    if (mediaCount > 0) {
+      return `${post.id} -> ${mediaCount} file(s), ${post.mediaType ? post.mediaType.toUpperCase() : 'MEDIA'}`;
+    }
+    return `${post.id} -> TEXT`;
+  });
+  const suffix = posts.length > 8 ? `\n...and ${posts.length - 8} more` : '';
+  threadsSchedulerPreview.textContent = `Found ${posts.length} scheduled post(s):\n${previewLines.join('\n')}${suffix}`;
+}
+
+function renderThreadsSchedulerOverlay(): void {
+  if (!threadsSchedulerEnabledInput || !threadsSchedulerFolderInput || !threadsSchedulerDaysContainer) return;
+
+  threadsSchedulerEnabledInput.checked = threadsSchedulerState.enabled;
+  threadsSchedulerFolderInput.value = threadsSchedulerState.folderPath;
+  renderThreadsSchedulerContentPreview(threadsSchedulerState.posts);
+
+  threadsSchedulerDaysContainer.innerHTML = '';
+
+  for (const day of schedulerDayKeys) {
+    const dayState = threadsSchedulerState.days[day];
+    const dayCard = document.createElement('div');
+    dayCard.className = 'scheduler-day';
+    dayCard.dataset.day = day;
+
+    const header = document.createElement('div');
+    header.className = 'scheduler-day-header';
+    const title = document.createElement('div');
+    title.className = 'scheduler-day-title';
+    title.textContent = schedulerDayLabels[day];
+
+    const toggleWrap = document.createElement('label');
+    toggleWrap.className = 'checkbox';
+    const toggle = document.createElement('input');
+    toggle.type = 'checkbox';
+    toggle.checked = dayState.enabled;
+    toggle.dataset.threadsSchedulerAction = 'toggle-day';
+    toggle.dataset.day = day;
+    const checkmark = document.createElement('span');
+    checkmark.className = 'checkmark';
+    toggleWrap.append(toggle, checkmark);
+    header.append(title, toggleWrap);
+    dayCard.appendChild(header);
+
+    const timesContainer = document.createElement('div');
+    timesContainer.className = 'scheduler-times';
+
+    dayState.times.forEach((timeValue, index) => {
+      const row = document.createElement('div');
+      row.className = 'scheduler-time-row';
+      row.dataset.day = day;
+      row.dataset.index = index.toString();
+
+      const timeInput = document.createElement('input');
+      timeInput.type = 'time';
+      timeInput.value = normalizeTimeValue(timeValue) || '09:00';
+      timeInput.dataset.threadsSchedulerAction = 'time';
+      timeInput.dataset.day = day;
+      timeInput.dataset.index = index.toString();
+      row.appendChild(timeInput);
+
+      const removeBtn = document.createElement('button');
+      removeBtn.className = 'btn scheduler-time-remove';
+      removeBtn.type = 'button';
+      removeBtn.textContent = '-';
+      removeBtn.dataset.threadsSchedulerAction = 'remove-time';
+      removeBtn.dataset.day = day;
+      removeBtn.dataset.index = index.toString();
+      removeBtn.disabled = dayState.times.length <= 1;
+      row.appendChild(removeBtn);
+
+      if (index === dayState.times.length - 1) {
+        const addBtn = document.createElement('button');
+        addBtn.className = 'btn scheduler-time-add';
+        addBtn.type = 'button';
+        addBtn.textContent = '+';
+        addBtn.dataset.threadsSchedulerAction = 'add-time';
+        addBtn.dataset.day = day;
+        row.appendChild(addBtn);
+      }
+
+      timesContainer.appendChild(row);
+    });
+
+    dayCard.appendChild(timesContainer);
+    threadsSchedulerDaysContainer.appendChild(dayCard);
+  }
+}
+
+async function refreshThreadsSchedulerFolder(folderPath: string): Promise<void> {
+  if (!folderPath || !(window as any).electronAPI?.scanThreadsSchedulerFolder) {
+    threadsSchedulerState.posts = [];
+    renderThreadsSchedulerContentPreview(threadsSchedulerState.posts);
+    return;
+  }
+
+  const result = await (window as any).electronAPI.scanThreadsSchedulerFolder(folderPath);
+  if (result?.success) {
+    threadsSchedulerState.posts = Array.isArray(result.posts) ? result.posts as ThreadsScheduledPost[] : [];
+    renderThreadsSchedulerContentPreview(threadsSchedulerState.posts);
+    queueSiteSettingsAutoSave();
+  } else {
+    threadsSchedulerState.posts = [];
+    renderThreadsSchedulerContentPreview(threadsSchedulerState.posts);
+    addLog(`Threads scheduler folder scan failed: ${result?.error || 'Unknown error'}`, 'error');
+  }
+}
+
+function openThreadsSchedulerOverlay(): void {
+  if (!threadsSchedulerOverlay) return;
+  threadsSchedulerOverlay.classList.remove('hidden');
+  renderThreadsSchedulerOverlay();
+}
+
+function closeThreadsSchedulerOverlay(): void {
+  if (!threadsSchedulerOverlay) return;
+  threadsSchedulerOverlay.classList.add('hidden');
+}
+
 
 function setCheckboxValue(id: string, value: boolean) {
   const checkbox = document.getElementById(id) as HTMLInputElement;
@@ -4328,6 +4554,7 @@ function collectCurrentSettings(platform: string): any {
     settings.autoReplyToComments = getCheckboxValue('threads-auto-reply');
     settings.pollIntervalMs = getNumberValue('threads-poll-interval');
     settings.maxCommentsPerPoll = getNumberValue('threads-max-comments');
+    settings.postScheduler = normalizeThreadsSchedulerSettings(threadsSchedulerState);
   }
   
   return settings;
@@ -4398,6 +4625,42 @@ async function refreshRedditSchedulerPostsBeforeInject(): Promise<void> {
     localStorage.setItem('siteSettings', JSON.stringify(allSettings));
     api.updateSiteSettings(allSettings);
     addLog(`Reddit scheduler cache refreshed: ${scannedPosts.length} post(s)`, 'info');
+  } catch {
+    // Ignore refresh errors; injection can still proceed with stored settings.
+  }
+}
+
+async function refreshThreadsSchedulerPostsBeforeInject(): Promise<void> {
+  const api = (window as any).electronAPI;
+  if (!api?.scanThreadsSchedulerFolder) return;
+
+  const allSettings = getAllSiteSettingsFromStorage();
+  const threadsSettings = (allSettings.threads || {}) as any;
+  const scheduler = (threadsSettings.postScheduler || {}) as any;
+  const folderPath = typeof scheduler.folderPath === 'string' ? scheduler.folderPath.trim() : '';
+  if (!folderPath) return;
+
+  try {
+    const scanResult = await api.scanThreadsSchedulerFolder(folderPath);
+    if (!scanResult?.success) return;
+
+    const scannedPosts = Array.isArray(scanResult.posts) ? scanResult.posts : [];
+    const currentPosts = Array.isArray(scheduler.posts) ? scheduler.posts : [];
+
+    const currentSignature = currentPosts.map((p: any) => `${String(p?.id || '')}|${String(p?.textPath || '')}`).join('||');
+    const scannedSignature = scannedPosts.map((p: any) => `${String(p?.id || '')}|${String(p?.textPath || '')}`).join('||');
+    if (currentSignature === scannedSignature && currentPosts.length === scannedPosts.length) {
+      return;
+    }
+
+    threadsSettings.postScheduler = {
+      ...scheduler,
+      posts: scannedPosts
+    };
+    allSettings.threads = threadsSettings;
+    localStorage.setItem('siteSettings', JSON.stringify(allSettings));
+    api.updateSiteSettings(allSettings);
+    addLog(`Threads scheduler cache refreshed: ${scannedPosts.length} post(s)`, 'info');
   } catch {
     // Ignore refresh errors; injection can still proceed with stored settings.
   }
@@ -4506,6 +4769,16 @@ if (redditSchedulerOpenBtn) {
   redditSchedulerOpenBtn.addEventListener('click', () => {
     redditSchedulerState = normalizeRedditSchedulerSettings(getStoredPlatformSiteSettings('reddit').postScheduler);
     openRedditSchedulerOverlay();
+  });
+}
+
+if (threadsSchedulerOpenBtn) {
+  threadsSchedulerOpenBtn.addEventListener('click', async () => {
+    threadsSchedulerState = normalizeThreadsSchedulerSettings(getStoredPlatformSiteSettings('threads').postScheduler);
+    if (threadsSchedulerState.folderPath) {
+      await refreshThreadsSchedulerFolder(threadsSchedulerState.folderPath);
+    }
+    openThreadsSchedulerOverlay();
   });
 }
 
@@ -4697,6 +4970,96 @@ if (instagramSchedulerDaysContainer) {
   });
 }
 
+if (threadsSchedulerCloseBtn) {
+  threadsSchedulerCloseBtn.addEventListener('click', closeThreadsSchedulerOverlay);
+}
+
+if (threadsSchedulerOverlay) {
+  threadsSchedulerOverlay.addEventListener('click', (e) => {
+    if (e.target === threadsSchedulerOverlay) {
+      closeThreadsSchedulerOverlay();
+    }
+  });
+}
+
+if (threadsSchedulerEnabledInput) {
+  threadsSchedulerEnabledInput.addEventListener('change', () => {
+    threadsSchedulerState.enabled = threadsSchedulerEnabledInput.checked;
+    queueSiteSettingsAutoSave();
+  });
+}
+
+if (threadsSchedulerFolderInput) {
+  threadsSchedulerFolderInput.addEventListener('change', async () => {
+    threadsSchedulerState.folderPath = threadsSchedulerFolderInput.value.trim();
+    await refreshThreadsSchedulerFolder(threadsSchedulerState.folderPath);
+    queueSiteSettingsAutoSave();
+  });
+}
+
+if (threadsSchedulerBrowseBtn) {
+  threadsSchedulerBrowseBtn.addEventListener('click', async () => {
+    const picker = await (window as any).electronAPI?.pickThreadsSchedulerFolder?.();
+    if (!picker || picker.canceled || !picker.folderPath) return;
+    threadsSchedulerState.folderPath = picker.folderPath;
+    if (threadsSchedulerFolderInput) {
+      threadsSchedulerFolderInput.value = picker.folderPath;
+    }
+    await refreshThreadsSchedulerFolder(picker.folderPath);
+    queueSiteSettingsAutoSave();
+  });
+}
+
+if (threadsSchedulerDaysContainer) {
+  threadsSchedulerDaysContainer.addEventListener('click', (e) => {
+    const target = e.target as HTMLElement | null;
+    if (!target) return;
+    const action = target.dataset.threadsSchedulerAction;
+    const day = target.dataset.day as SchedulerDayKey | undefined;
+    if (!action || !day || !threadsSchedulerState.days[day]) return;
+
+    if (action === 'add-time') {
+      threadsSchedulerState.days[day].times.push('09:00');
+      renderThreadsSchedulerOverlay();
+      queueSiteSettingsAutoSave();
+      return;
+    }
+
+    if (action === 'remove-time') {
+      const index = Number(target.dataset.index);
+      if (Number.isFinite(index) && threadsSchedulerState.days[day].times.length > 1) {
+        threadsSchedulerState.days[day].times.splice(index, 1);
+        renderThreadsSchedulerOverlay();
+        queueSiteSettingsAutoSave();
+      }
+    }
+  });
+
+  threadsSchedulerDaysContainer.addEventListener('change', (e) => {
+    const target = e.target as HTMLInputElement | null;
+    if (!target) return;
+    const action = target.dataset.threadsSchedulerAction;
+    const day = target.dataset.day as SchedulerDayKey | undefined;
+    if (!action || !day || !threadsSchedulerState.days[day]) return;
+
+    if (action === 'toggle-day') {
+      threadsSchedulerState.days[day].enabled = target.checked;
+      queueSiteSettingsAutoSave();
+      return;
+    }
+
+    if (action === 'time') {
+      const index = Number(target.dataset.index);
+      if (Number.isFinite(index)) {
+        const normalized = normalizeTimeValue(target.value) || '09:00';
+        threadsSchedulerState.days[day].times[index] = normalized;
+        target.value = normalized;
+        queueSiteSettingsAutoSave();
+      }
+    }
+  });
+}
+
 
 // Keyboard shortcut: Arrow Up to collapse site settings
 document.addEventListener('keydown', (e) => {
@@ -4781,6 +5144,9 @@ async function injectBotIntoWebview() {
     }
     if (detectSiteFromHost(hostname) === 'reddit') {
       await refreshRedditSchedulerPostsBeforeInject();
+    }
+    if (detectSiteFromHost(hostname) === 'threads') {
+      await refreshThreadsSchedulerPostsBeforeInject();
     }
 
     const resolvedConfig = applySiteSettingsToConfig(config as Config, hostname);
@@ -6864,11 +7230,20 @@ async function getRedditBotScript(config: Config): Promise<string> {
   throw new Error('Reddit bot script unavailable from preload bridge');
 }
 
+// Generate the Threads bot script via main/preload source-of-truth module
+async function getThreadsBotScript(config: Config): Promise<string> {
+  const bridgedScript = await (window as any).bot?.getThreadsBotScript?.(config);
+  if (typeof bridgedScript === 'string' && bridgedScript.length > 0) {
+    return bridgedScript;
+  }
+  throw new Error('Threads bot script unavailable from preload bridge');
+}
+
 async function getBotScript(config: Config, hostname: string): Promise<string> {
   const site = detectSiteFromHost(hostname);
   switch (site) {
     case 'threads':
-      return buildThreadsBotScript(config as any);
+      return await getThreadsBotScript(config);
     case 'reddit':
       return await getRedditBotScript(config);
     case 'instagram':
@@ -6972,9 +7347,11 @@ setInterval(async () => {
 // Track upload requests per session to avoid duplicate handling
 const processingInstagramUploadRequests = new Map<string, string>();
 const processingRedditUploadRequests = new Map<string, string>();
+const processingThreadsUploadRequests = new Map<string, string>();
 const processingInstagramPointerRequests = new Map<string, string>();
 const processingRedditPointerRequests = new Map<string, string>();
 const processingRedditKeyboardRequests = new Map<string, string>();
+const processingThreadsKeyboardRequests = new Map<string, string>();
 
 let automationCursorEl: HTMLDivElement | null = null;
 const lastPointerPositionBySession = new Map<string, { x: number; y: number }>();
@@ -7393,6 +7770,52 @@ setInterval(async () => {
   }
 }, 300);
 
+// Poll for pending Threads scheduler keyboard requests and execute via CDP key events
+setInterval(async () => {
+  if (!isBotActive) return;
+  if (!(window as any).electronAPI?.playKeyboardSequence) return;
+
+  for (const [sessionId, targetWebview] of sessionWebviews.entries()) {
+    const activeRequestId = processingThreadsKeyboardRequests.get(sessionId);
+    if (activeRequestId) continue;
+
+    try {
+      const request = await targetWebview.executeJavaScript(`
+        (function() {
+          if (window.__SNAPPY_THREADS_KEYBOARD_REQUEST__) {
+            return window.__SNAPPY_THREADS_KEYBOARD_REQUEST__;
+          }
+          return null;
+        })();
+      `);
+
+      if (!request || !request.id || !Array.isArray(request.events) || request.events.length === 0) {
+        continue;
+      }
+
+      processingThreadsKeyboardRequests.set(sessionId, request.id);
+      await targetWebview.executeJavaScript('window.__SNAPPY_THREADS_KEYBOARD_REQUEST__ = null;');
+
+      const result = await (window as any).electronAPI.playKeyboardSequence(
+        targetWebview.getWebContentsId(),
+        request.events
+      );
+
+      await targetWebview.executeJavaScript(`
+        window.__SNAPPY_THREADS_KEYBOARD_RESPONSE__ = {
+          id: ${JSON.stringify(request.id)},
+          success: ${result?.success === true ? 'true' : 'false'},
+          error: ${JSON.stringify(result?.error || '')}
+        };
+      `);
+    } catch {
+      // Ignore per-webview polling errors.
+    } finally {
+      processingThreadsKeyboardRequests.delete(sessionId);
+    }
+  }
+}, 300);
+
 // Poll for pending Reddit scheduler upload requests and set file input via main process
 setInterval(async () => {
   if (!isBotActive) return;
@@ -7443,6 +7866,60 @@ setInterval(async () => {
       // Ignore per-webview polling errors.
     } finally {
       processingRedditUploadRequests.delete(sessionId);
+    }
+  }
+}, 500);
+
+// Poll for pending Threads scheduler upload requests and set file input via main process
+setInterval(async () => {
+  if (!isBotActive) return;
+  if (!(window as any).electronAPI?.setThreadsSchedulerFileInput) return;
+
+  for (const [sessionId, targetWebview] of sessionWebviews.entries()) {
+    const activeRequestId = processingThreadsUploadRequests.get(sessionId);
+    if (activeRequestId) continue;
+
+    try {
+      const request = await targetWebview.executeJavaScript(`
+        (function() {
+          if (window.__SNAPPY_THREADS_UPLOAD_REQUEST__) {
+            return window.__SNAPPY_THREADS_UPLOAD_REQUEST__;
+          }
+          return null;
+        })();
+      `);
+
+      if (!request || !request.id || !Array.isArray(request.filePaths) || request.filePaths.length === 0) {
+        continue;
+      }
+
+      processingThreadsUploadRequests.set(sessionId, request.id);
+      await targetWebview.executeJavaScript('window.__SNAPPY_THREADS_UPLOAD_REQUEST__ = null;');
+
+      const targetContentsId = targetWebview.getWebContentsId();
+      const result = await (window as any).electronAPI.setThreadsSchedulerFileInput(
+        targetContentsId,
+        request.filePaths,
+        typeof request.selector === 'string' ? request.selector : 'input[type="file"]'
+      );
+
+      await targetWebview.executeJavaScript(`
+        window.__SNAPPY_THREADS_UPLOAD_RESPONSE__ = {
+          id: ${JSON.stringify(request.id)},
+          success: ${result?.success === true ? 'true' : 'false'},
+          error: ${JSON.stringify(result?.error || '')}
+        };
+      `);
+
+      if (result?.success) {
+        addLog(`Threads scheduler media attached for ${getSessionName(sessionId)}`, 'success', sessionId);
+      } else {
+        addLog(`Threads scheduler upload failed: ${result?.error || 'Unknown error'}`, 'error', sessionId);
+      }
+    } catch {
+      // Ignore per-webview polling errors.
+    } finally {
+      processingThreadsUploadRequests.delete(sessionId);
     }
   }
 }, 500);
@@ -8540,7 +9017,7 @@ async function injectBotIntoSpecificWebview(webview: Electron.WebviewTag, sessio
     if (site === 'snapchat') {
       botScript = await getSnapchatBotScript(resolvedConfig);
     } else if (site === 'threads') {
-      botScript = buildThreadsBotScript(resolvedConfig);
+      botScript = await getThreadsBotScript(resolvedConfig as Config);
     } else if (site === 'reddit') {
       botScript = await getRedditBotScript(resolvedConfig as Config);
     } else if (site === 'instagram') {

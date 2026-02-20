@@ -363,6 +363,73 @@ export function buildInstagramBotScript(config: Configuration): string {
       return false;
     }
 
+    async function clickHeadingByText(headingText, timeoutMs = 5000) {
+      const target = String(headingText || '').trim().toLowerCase();
+      if (!target) return false;
+
+      const start = Date.now();
+      while (Date.now() - start < timeoutMs && !isStopped()) {
+        const candidates = Array.from(document.querySelectorAll('h1, h2, h3, [role="heading"], div, span'));
+        for (const el of candidates) {
+          if (!(el instanceof HTMLElement)) continue;
+          const style = window.getComputedStyle(el);
+          if (style.display === 'none' || style.visibility === 'hidden') continue;
+          const text = (el.textContent || '').trim().toLowerCase();
+          if (!text) continue;
+          if (text === target) {
+            try {
+              el.click();
+              return true;
+            } catch {}
+          }
+        }
+        await sleep(180);
+      }
+      return false;
+    }
+
+    function getFocusableElements() {
+      const candidates = Array.from(document.querySelectorAll(
+        'button, [role="button"], a[href], input, textarea, select, [tabindex]:not([tabindex="-1"])'
+      ));
+      return candidates.filter((el) => {
+        if (!(el instanceof HTMLElement)) return false;
+        if (el.hasAttribute('disabled')) return false;
+        if (el.getAttribute('aria-hidden') === 'true') return false;
+        const style = window.getComputedStyle(el);
+        if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
+        const rect = el.getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0;
+      });
+    }
+
+    function focusNextByTab(steps) {
+      const list = getFocusableElements();
+      if (list.length === 0) return false;
+      const active = document.activeElement;
+      let index = list.findIndex(el => el === active);
+      if (index < 0) index = 0;
+      const nextIndex = Math.max(0, Math.min(list.length - 1, index + Math.max(1, steps)));
+      const target = list[nextIndex];
+      if (!(target instanceof HTMLElement)) return false;
+      target.focus();
+      return true;
+    }
+
+    async function tabTwiceThenSpace() {
+      const focused = focusNextByTab(2);
+      await sleep(180);
+      const active = document.activeElement;
+      if (!focused || !(active instanceof HTMLElement)) return false;
+      try {
+        active.dispatchEvent(new KeyboardEvent('keydown', { key: ' ', code: 'Space', bubbles: true, cancelable: true }));
+        active.dispatchEvent(new KeyboardEvent('keyup', { key: ' ', code: 'Space', bubbles: true, cancelable: true }));
+      } catch {}
+      try { active.click(); } catch {}
+      await sleep(500);
+      return true;
+    }
+
     async function setPostCaption(caption) {
       const captionInput = await waitForSelector([
         'textarea[aria-label*="caption" i]',
@@ -412,12 +479,15 @@ export function buildInstagramBotScript(config: Configuration): string {
         const openedCreate = await clickCreatePostFlow();
         if (!openedCreate) return false;
 
-        await clickSelectFromComputerStep();
-
-        const input = await waitForSelector(['input[type="file"]'], 12000);
+        // Prefer direct file input attach to avoid triggering the native file picker.
+        let input = await waitForSelector(['input[type="file"]'], 3000);
         if (!input) {
-          log('Scheduler: file input not found');
-          return false;
+          await clickSelectFromComputerStep();
+          input = await waitForSelector(['input[type="file"]'], 12000);
+          if (!input) {
+            log('Scheduler: file input not found');
+            return false;
+          }
         }
 
         const attached = await requestMediaAttach(mediaPaths);
@@ -428,14 +498,37 @@ export function buildInstagramBotScript(config: Configuration): string {
 
         await sleep(2000);
 
-        const next1 = await clickButtonByText('next', 12000);
-        if (!next1) {
-          log('Scheduler: first Next button not found');
-          return false;
+        await clickHeadingByText('crop', 3000);
+        await sleep(250);
+
+        // Primary stage advance strategy for IG composer: Tab, Tab, Space
+        const advanced1 = await tabTwiceThenSpace();
+        if (advanced1) {
+          log('Scheduler: stage 1 advanced via Tab+Tab+Space');
+        } else {
+          const next1 = await clickButtonByText('next', 12000);
+          if (!next1) {
+            log('Scheduler: first stage advance failed (tab sequence + Next click)');
+            return false;
+          }
+          log('Scheduler: stage 1 advanced via Next click fallback');
         }
 
         await sleep(1200);
-        await clickButtonByText('next', 5000);
+        await clickHeadingByText('edit', 3000);
+        await sleep(250);
+
+        const advanced2 = await tabTwiceThenSpace();
+        if (advanced2) {
+          log('Scheduler: stage 2 advanced via Tab+Tab+Space');
+        } else {
+          const next2 = await clickButtonByText('next', 8000);
+          if (!next2) {
+            log('Scheduler: second stage advance failed (tab sequence + Next click)');
+            return false;
+          }
+          log('Scheduler: stage 2 advanced via Next click fallback');
+        }
         await sleep(900);
 
         const captionSet = await setPostCaption(post.caption || '');
