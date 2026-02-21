@@ -8798,11 +8798,25 @@ function extractLlamaPort(startCommand?: string): number | null {
   return port;
 }
 
+function cloneLlamaConfig(config?: Partial<LlamaServerConfig> | null): LlamaServerConfig | null {
+  if (!config) return null;
+  return {
+    buildPath: config.buildPath || '',
+    startCommand: config.startCommand || '',
+    enabled: Boolean(config.enabled)
+  };
+}
+
+function getSessionConfiguredLlama(sessionId: string): LlamaServerConfig | null {
+  return cloneLlamaConfig(sessionConfigs.get(sessionId)?.llama);
+}
+
 function getEffectiveSessionAIConfig(sessionId: string | null, requestAIConfig?: Partial<AIConfig>): AIConfig | null {
   if (!sessionId) return null;
   const sessionConfig = sessionConfigs.get(sessionId);
   const sessionAI = sessionConfig?.ai || ({} as Partial<AIConfig>);
   const sessionLlama = sessionConfig?.llama;
+  const runtimeLlama = sessionRuntimeLlamaConfig.get(sessionId);
   const fallbackLlama = llamaServerConfig;
 
   const merged = {
@@ -8811,7 +8825,7 @@ function getEffectiveSessionAIConfig(sessionId: string | null, requestAIConfig?:
   } as Partial<AIConfig>;
 
   const provider = merged.provider || 'local';
-  const effectiveLlamaCommand = sessionLlama?.startCommand || fallbackLlama?.startCommand || '';
+  const effectiveLlamaCommand = runtimeLlama?.startCommand || sessionLlama?.startCommand || fallbackLlama?.startCommand || '';
   const parsedPort = extractLlamaPort(effectiveLlamaCommand);
 
   return {
@@ -8834,15 +8848,65 @@ function getEffectiveSessionAIConfig(sessionId: string | null, requestAIConfig?:
   };
 }
 
+function applyRuntimeLlamaOverrideToConfig(sessionId: string, config: Config): Config {
+  const runtimeLlama = sessionRuntimeLlamaConfig.get(sessionId);
+  if (!runtimeLlama) {
+    return config;
+  }
+
+  const aiProvider = config.ai?.provider || 'local';
+  if (aiProvider !== 'local') {
+    return config;
+  }
+
+  const overridePort = extractLlamaPort(runtimeLlama.startCommand);
+
+  return {
+    ...config,
+    llama: {
+      ...(config.llama || { buildPath: '', startCommand: '', enabled: false }),
+      ...runtimeLlama
+    },
+    ai: config.ai
+      ? {
+          ...config.ai,
+          llmPort: overridePort || config.ai.llmPort || 8080
+        }
+      : config.ai
+  };
+}
+
 type LlamaServerChoice = 'use-existing' | 'start-new' | 'cancel';
+type LlamaServerInfo = {
+  pid: number;
+  startTime: number;
+  sourceSessionId?: string;
+  sourceLlamaConfig?: LlamaServerConfig;
+};
 
 // Per-session server PID tracking
 const sessionServerPids = new Map<string, { pid: number; startTime: number }>();
 const serverSessionRefs = new Map<number, Set<string>>();
+const sessionRuntimeLlamaConfig = new Map<string, LlamaServerConfig>();
+const serverLlamaConfigByPid = new Map<number, LlamaServerConfig>();
+const serverOriginSessionByPid = new Map<number, string>();
 
-function assignServerToSession(sessionId: string, serverInfo: { pid: number; startTime: number }): void {
+function assignServerToSession(
+  sessionId: string,
+  serverInfo: { pid: number; startTime: number },
+  runtimeLlamaConfig?: LlamaServerConfig | null,
+  originSessionId?: string
+): void {
   const existing = sessionServerPids.get(sessionId);
   if (existing?.pid === serverInfo.pid) {
+    const normalized = cloneLlamaConfig(runtimeLlamaConfig) || cloneLlamaConfig(serverLlamaConfigByPid.get(serverInfo.pid));
+    if (normalized) {
+      sessionRuntimeLlamaConfig.set(sessionId, normalized);
+      serverLlamaConfigByPid.set(serverInfo.pid, normalized);
+    }
+    if (originSessionId && !serverOriginSessionByPid.has(serverInfo.pid)) {
+      serverOriginSessionByPid.set(serverInfo.pid, originSessionId);
+    }
     return;
   }
 
@@ -8854,6 +8918,21 @@ function assignServerToSession(sessionId: string, serverInfo: { pid: number; sta
   const refs = serverSessionRefs.get(serverInfo.pid) || new Set<string>();
   refs.add(sessionId);
   serverSessionRefs.set(serverInfo.pid, refs);
+
+  const normalized = cloneLlamaConfig(runtimeLlamaConfig) || cloneLlamaConfig(serverLlamaConfigByPid.get(serverInfo.pid));
+  if (normalized) {
+    sessionRuntimeLlamaConfig.set(sessionId, normalized);
+    serverLlamaConfigByPid.set(serverInfo.pid, normalized);
+  } else {
+    sessionRuntimeLlamaConfig.delete(sessionId);
+  }
+
+  if (originSessionId && !serverOriginSessionByPid.has(serverInfo.pid)) {
+    serverOriginSessionByPid.set(serverInfo.pid, originSessionId);
+  } else if (!serverOriginSessionByPid.has(serverInfo.pid)) {
+    serverOriginSessionByPid.set(serverInfo.pid, sessionId);
+  }
+
   updateDiscordControlsForActiveLogSession();
 }
 
@@ -8862,11 +8941,14 @@ function releaseServerTrackingForSession(sessionId: string): { pid: number; rema
   if (!existing) return null;
 
   sessionServerPids.delete(sessionId);
+  sessionRuntimeLlamaConfig.delete(sessionId);
   const refs = serverSessionRefs.get(existing.pid);
   if (refs) {
     refs.delete(sessionId);
     if (refs.size === 0) {
       serverSessionRefs.delete(existing.pid);
+      serverLlamaConfigByPid.delete(existing.pid);
+      serverOriginSessionByPid.delete(existing.pid);
     }
   }
 
@@ -8894,18 +8976,39 @@ async function syncSessionServerTracking(): Promise<void> {
   }
 }
 
-async function getReusableServerInfo(): Promise<{ pid: number; startTime: number } | null> {
+async function getReusableServerInfo(): Promise<LlamaServerInfo | null> {
   await syncSessionServerTracking();
 
-  const fromSession = sessionServerPids.values().next().value;
-  if (fromSession?.pid) {
-    return fromSession;
+  const mapped = Array.from(sessionServerPids.entries()).find(([, info]) => Boolean(info?.pid));
+  if (mapped) {
+    const [sourceSessionId, sourceServerInfo] = mapped;
+    const sourceLlamaConfig =
+      cloneLlamaConfig(sessionRuntimeLlamaConfig.get(sourceSessionId)) ||
+      getSessionConfiguredLlama(sourceSessionId) ||
+      cloneLlamaConfig(serverLlamaConfigByPid.get(sourceServerInfo.pid));
+    return {
+      pid: sourceServerInfo.pid,
+      startTime: sourceServerInfo.startTime,
+      sourceSessionId,
+      sourceLlamaConfig: sourceLlamaConfig || undefined
+    };
   }
 
   try {
     const trackedPids: number[] = await (window as any).llama.getTrackedPids();
     if (Array.isArray(trackedPids) && trackedPids.length > 0) {
-      return { pid: trackedPids[0], startTime: Date.now() };
+      const pid = trackedPids[0];
+      const sourceSessionId = serverOriginSessionByPid.get(pid);
+      const sourceLlamaConfig =
+        cloneLlamaConfig(serverLlamaConfigByPid.get(pid)) ||
+        (sourceSessionId ? getSessionConfiguredLlama(sourceSessionId) : null);
+
+      return {
+        pid,
+        startTime: Date.now(),
+        sourceSessionId,
+        sourceLlamaConfig: sourceLlamaConfig || undefined
+      };
     }
   } catch (e) {
     console.log('[Renderer] Could not load tracked llama PIDs:', e);
@@ -8961,7 +9064,7 @@ function resolveLlamaServerChoice(choice: LlamaServerChoice): void {
   }
 }
 
-async function askLlamaServerChoice(existingPid: number, sessionName: string): Promise<LlamaServerChoice> {
+async function askLlamaServerChoice(existingPid: number, sessionName: string, sourceSessionName?: string): Promise<LlamaServerChoice> {
   if (llamaServerChoiceResolver) {
     return 'cancel';
   }
@@ -8976,7 +9079,11 @@ async function askLlamaServerChoice(existingPid: number, sessionName: string): P
     return 'use-existing';
   }
 
-  llamaServerChoiceMessage.textContent = `A local Llama server is already running (PID: ${existingPid}). Use it for "${sessionName}" or start a new server?`;
+  if (sourceSessionName) {
+    llamaServerChoiceMessage.textContent = `A local Llama server is already running (PID: ${existingPid}) from "${sourceSessionName}". Use that existing server for "${sessionName}" or start a new server?`;
+  } else {
+    llamaServerChoiceMessage.textContent = `A local Llama server is already running (PID: ${existingPid}). Use it for "${sessionName}" or start a new server?`;
+  }
 
   llamaServerChoiceModal.classList.remove('hidden');
   llamaServerChoiceExistingBtn.focus();
@@ -9002,8 +9109,10 @@ async function ensureLlamaServerForSession(
   let shouldStartNew = true;
 
   if (reusableServer?.pid) {
+    const sourceSessionName = reusableServer.sourceSessionId ? getSessionName(reusableServer.sourceSessionId) : undefined;
+
     if (promptOnExistingServer) {
-      const choice = await askLlamaServerChoice(reusableServer.pid, sessionName);
+      const choice = await askLlamaServerChoice(reusableServer.pid, sessionName, sourceSessionName);
       if (choice === 'cancel') {
         return { success: false, canceled: true };
       }
@@ -9013,7 +9122,27 @@ async function ensureLlamaServerForSession(
     }
 
     if (!shouldStartNew) {
-      assignServerToSession(sessionId, reusableServer);
+      const sourceLlamaConfig =
+        cloneLlamaConfig(reusableServer.sourceLlamaConfig) ||
+        (reusableServer.sourceSessionId ? getSessionConfiguredLlama(reusableServer.sourceSessionId) : null) ||
+        cloneLlamaConfig(serverLlamaConfigByPid.get(reusableServer.pid));
+
+      assignServerToSession(
+        sessionId,
+        reusableServer,
+        sourceLlamaConfig || undefined,
+        reusableServer.sourceSessionId
+      );
+
+      if (sourceLlamaConfig && reusableServer.sourceSessionId && reusableServer.sourceSessionId !== sessionId) {
+        const port = extractLlamaPort(sourceLlamaConfig.startCommand);
+        addLog(
+          `Temporarily using ${getSessionName(reusableServer.sourceSessionId)} Llama config${port ? ` (port ${port})` : ''}`,
+          'info',
+          sessionId
+        );
+      }
+
       addLog(`Using existing Llama.cpp server (PID: ${reusableServer.pid})`, 'info', sessionId);
       updateLlamaUI();
       return { success: true };
@@ -9024,10 +9153,12 @@ async function ensureLlamaServerForSession(
   const startResult = await (window as any).llama.start();
 
   if (startResult.running && startResult.pid) {
+    const normalizedLlamaConfig = cloneLlamaConfig(llamaConfig);
     assignServerToSession(sessionId, {
       pid: startResult.pid,
       startTime: startResult.startTime || Date.now()
-    });
+    }, normalizedLlamaConfig || undefined, sessionId);
+
     addLog(`Llama.cpp server started (PID: ${startResult.pid})`, 'success', sessionId);
     updateLlamaUI();
     return { success: true };
@@ -9569,7 +9700,8 @@ async function injectBotIntoSpecificWebview(webview: Electron.WebviewTag, sessio
   try {
     const hostname = new URL(webview.getURL()).hostname;
     const site = detectSiteFromHost(hostname);
-    const resolvedConfig = applySiteSettingsToConfig(config, hostname);
+    const siteResolvedConfig = applySiteSettingsToConfig(config, hostname);
+    const resolvedConfig = applyRuntimeLlamaOverrideToConfig(sessionId, siteResolvedConfig as Config);
     
     let botScript = '';
     if (site === 'snapchat') {
