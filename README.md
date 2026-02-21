@@ -188,7 +188,7 @@ Edit `config.json` to customize behavior:
 | `preReplyDelayRangeMs` | Delay before starting to type (ms) |
 | `maxRepliesPerMinute` | Rate limiting |
 | `randomSkipProbability` | Chance to skip a reply (0-1) |
-| `activeHours` | Operating hours (24h format) |
+| `activeHours` | Opeating hours (24h format) |
 
 ## Commands
 
