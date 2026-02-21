@@ -27,6 +27,7 @@ export interface Configuration {
   };
   randomSkipProbability: number;
   ai?: AIConfig;  // New AI configuration
+  discordAlerts?: DiscordAlertConfig;
   siteSettings?: Partial<SiteSettingsConfig>;  // Site-specific settings
   threads?: {
     pollIntervalMs?: number;
@@ -139,6 +140,10 @@ export interface AIConfig {
   chatgptBaseUrl?: string; // Optional for custom endpoints
 }
 
+export interface DiscordAlertConfig {
+  webhookUrl: string;
+}
+
 /**
  * Chat message format for LLM requests (OpenAI-compatible)
  */
@@ -243,6 +248,9 @@ export const DEFAULT_CONFIG: Configuration = {
   maxReplyLength: 500,
   siteMode: 'universal',
   randomSkipProbability: 0.15,
+  discordAlerts: {
+    webhookUrl: ''
+  },
   threads: {
     pollIntervalMs: 60000,
     maxCommentsPerPoll: 5,

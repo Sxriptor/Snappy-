@@ -2038,6 +2038,9 @@ interface Config {
   randomSkipProbability: number;
   ai?: AIConfig;
   llama?: LlamaConfig;
+  discordAlerts?: {
+    webhookUrl?: string;
+  };
   siteSettings?: any; // Site-specific settings
   threads?: {
     pollIntervalMs?: number;
@@ -2186,6 +2189,7 @@ interface SessionData {
 
 // Track sessions and their webviews
 const sessionWebviews = new Map<string, Electron.WebviewTag>();
+const sessionProcessPids = new Map<string, number>();
 let activeSessionId: string | null = null;
 const webviewReadyHandlerBound = new WeakSet<Electron.WebviewTag>();
 const webviewConsoleListenerBound = new WeakSet<Electron.WebviewTag>();
@@ -2329,6 +2333,7 @@ async function deleteSession(sessionId: string) {
     
     // Remove session configuration
     sessionConfigs.delete(sessionId);
+    sessionProcessPids.delete(sessionId);
     
     // Remove tab
     const tab = document.getElementById(`tab-${sessionId}`);
@@ -2391,6 +2396,7 @@ async function detachSession(sessionId: string) {
     
     // Remove session configuration
     sessionConfigs.delete(sessionId);
+    sessionProcessPids.delete(sessionId);
     
     // If this was the active session, activate another one
     if (activeSessionId === sessionId) {
@@ -2770,6 +2776,7 @@ function setupDetachedWindowMode(sessionId: string, sessionName: string) {
   // Clear existing sessions and only load the detached one
   sessionWebviews.clear();
   sessionConfigs.clear();
+  sessionProcessPids.clear();
   
   // Clear tabs container
   const tabsContainer = document.getElementById('tabs-container');
@@ -3100,6 +3107,7 @@ function setupMultiSessionUI() {
   
   // Initialize log tabs container
   initializeLogTabs();
+  updateDiscordControlsForActiveLogSession();
   
   // Set up cross-session bot status synchronization
   setupBotStatusSync();
@@ -3289,6 +3297,12 @@ const saveBtn = document.getElementById('save-btn')!;
 const logContent = document.getElementById('log-content')!;
 const logToggle = document.getElementById('log-toggle')!;
 const logHeader = document.getElementById('log-header')!;
+const logTabsContainerEl = document.getElementById('log-tabs-container') as HTMLDivElement | null;
+const logControls = document.getElementById('log-controls') as HTMLDivElement | null;
+const discordWebhookInput = document.getElementById('discord-webhook-input') as HTMLInputElement | null;
+const discordSaveWebhookBtn = document.getElementById('discord-save-webhook') as HTMLButtonElement | null;
+const logListenBtn = document.getElementById('log-listen-btn') as HTMLButtonElement | null;
+const logListenPid = document.getElementById('log-listen-pid') as HTMLSpanElement | null;
 
 // Memories elements
 const memoriesContainer = document.getElementById('memories-container')!;
@@ -3371,6 +3385,204 @@ interface LogEntry {
 // Store logs per session
 const sessionLogs = new Map<string, LogEntry[]>();
 let activeLogSessionId: string | null = null;
+let discordWebhookUrl = '';
+
+type DiscordAlertKind = 'message-sent' | 'scheduled-post' | 'error';
+
+interface SessionDiscordListener {
+  pid: number;
+}
+
+const discordListenersBySession = new Map<string, SessionDiscordListener>();
+const discordAlertDedupTimestamps = new Map<string, number>();
+const DISCORD_ALERT_DEDUP_MS = 5000;
+
+function getSessionPidForAlerts(sessionId: string): number | null {
+  const pid = sessionProcessPids.get(sessionId);
+  return typeof pid === 'number' ? pid : null;
+}
+
+function classifyDiscordAlert(message: string, type: 'info' | 'success' | 'error' | 'highlight'): DiscordAlertKind | null {
+  const lower = String(message || '').toLowerCase();
+
+  if (
+    type === 'error' ||
+    /\berror\b/.test(lower) ||
+    /\bfailed\b/.test(lower) ||
+    /\bexception\b/.test(lower)
+  ) {
+    return 'error';
+  }
+
+  if (
+    lower.includes('scheduler:') &&
+    (
+      lower.includes('post submitted') ||
+      lower.includes('submitted for publishing') ||
+      lower.includes('threads post submitted') ||
+      lower.includes('reddit post submitted')
+    )
+  ) {
+    return 'scheduled-post';
+  }
+
+  if (
+    lower.includes('message sent') ||
+    lower.includes('sent reply') ||
+    lower.includes('reply sent') ||
+    (lower.includes('replied to') && !lower.includes('already replied to'))
+  ) {
+    return 'message-sent';
+  }
+
+  return null;
+}
+
+function getDiscordAlertLabel(kind: DiscordAlertKind): string {
+  if (kind === 'message-sent') return 'Message sent';
+  if (kind === 'scheduled-post') return 'Scheduled post posted';
+  return 'Error';
+}
+
+function formatDiscordAlertContent(sessionId: string, kind: DiscordAlertKind, message: string, pid: number | null): string {
+  const sessionName = getSessionName(sessionId);
+  const timeText = new Date().toLocaleString();
+  const pidText = pid ?? '-';
+  return `[Snappy Alert]\nSession: ${sessionName}\nPID: ${pidText}\nEvent: ${getDiscordAlertLabel(kind)}\nMessage: ${message}\nTime: ${timeText}`;
+}
+
+async function maybeSendDiscordAlert(sessionId: string, logEntry: LogEntry): Promise<void> {
+  if (!sessionId || sessionId === 'global') return;
+  if (!discordWebhookUrl) return;
+
+  const listener = discordListenersBySession.get(sessionId);
+  if (!listener) return;
+
+  const currentPid = getSessionPidForAlerts(sessionId);
+  if (!currentPid || currentPid !== listener.pid) return;
+
+  const kind = classifyDiscordAlert(logEntry.message, logEntry.type);
+  if (!kind) return;
+
+  const dedupKey = `${sessionId}|${listener.pid}|${kind}|${logEntry.message}`;
+  const now = Date.now();
+  const previous = discordAlertDedupTimestamps.get(dedupKey);
+  if (typeof previous === 'number' && now - previous < DISCORD_ALERT_DEDUP_MS) {
+    return;
+  }
+  discordAlertDedupTimestamps.set(dedupKey, now);
+
+  try {
+    const response = await (window as any).discord?.sendAlert?.(
+      formatDiscordAlertContent(sessionId, kind, logEntry.message, listener.pid)
+    );
+    if (!response?.success) {
+      const errorMessage = String(response?.error || 'Unknown Discord webhook error');
+      addLog(`Discord alert failed: ${errorMessage}`, 'error', 'global');
+    }
+  } catch (error) {
+    addLog(`Discord alert error: ${String(error)}`, 'error', 'global');
+  }
+}
+
+function updateDiscordControlsForActiveLogSession(): void {
+  if (!logListenBtn || !logListenPid) return;
+
+  const sessionId = activeLogSessionId;
+  if (!sessionId || sessionId === 'global') {
+    logListenBtn.disabled = true;
+    logListenBtn.classList.remove('active');
+    logListenBtn.textContent = 'Listen';
+    logListenPid.textContent = 'PID: -';
+    return;
+  }
+
+  const currentPid = getSessionPidForAlerts(sessionId);
+  const listener = discordListenersBySession.get(sessionId);
+  const isListening = !!listener;
+
+  logListenBtn.disabled = !currentPid && !isListening;
+  logListenBtn.classList.toggle('active', isListening);
+  logListenBtn.textContent = isListening ? 'Listening' : 'Listen';
+
+  if (isListening) {
+    const watchPidText = listener?.pid ?? '-';
+    if (currentPid && listener && currentPid !== listener.pid) {
+      logListenPid.textContent = `PID: ${currentPid} (watch ${watchPidText})`;
+    } else {
+      logListenPid.textContent = `PID: ${watchPidText}`;
+    }
+  } else {
+    logListenPid.textContent = `PID: ${currentPid ?? '-'}`;
+  }
+}
+
+async function loadDiscordWebhook(): Promise<void> {
+  if (!discordWebhookInput) return;
+  try {
+    const result = await (window as any).discord?.getWebhook?.();
+    const saved = typeof result?.webhookUrl === 'string' ? result.webhookUrl : '';
+    discordWebhookUrl = saved;
+    discordWebhookInput.value = saved;
+  } catch (error) {
+    addLog(`Could not load Discord webhook: ${String(error)}`, 'error', 'global');
+  }
+}
+
+async function saveDiscordWebhookFromInput(): Promise<void> {
+  if (!discordWebhookInput) return;
+  const raw = discordWebhookInput.value.trim();
+
+  try {
+    const result = await (window as any).discord?.saveWebhook?.(raw);
+    if (!result?.success) {
+      addLog(`Discord webhook not saved: ${String(result?.error || 'Unknown error')}`, 'error', 'global');
+      return;
+    }
+
+    discordWebhookUrl = typeof result.webhookUrl === 'string' ? result.webhookUrl : raw;
+    if (discordWebhookInput) {
+      discordWebhookInput.value = discordWebhookUrl;
+    }
+
+    if (discordWebhookUrl) {
+      addLog('Discord webhook saved', 'success', 'global');
+    } else {
+      addLog('Discord webhook cleared', 'info', 'global');
+    }
+  } catch (error) {
+    addLog(`Discord webhook save failed: ${String(error)}`, 'error', 'global');
+  }
+}
+
+function toggleDiscordListenForActiveSession(): void {
+  const sessionId = activeLogSessionId;
+  if (!sessionId || sessionId === 'global') return;
+
+  if (!discordWebhookUrl) {
+    addLog('Set a Discord webhook before enabling listen mode', 'error', sessionId);
+    return;
+  }
+
+  const existing = discordListenersBySession.get(sessionId);
+  if (existing) {
+    discordListenersBySession.delete(sessionId);
+    addLog(`Discord listen disabled for ${getSessionName(sessionId)}`, 'info', sessionId);
+    updateDiscordControlsForActiveLogSession();
+    return;
+  }
+
+  const pid = getSessionPidForAlerts(sessionId);
+  if (!pid) {
+    addLog('No PID found for this session. Start the session server first.', 'error', sessionId);
+    updateDiscordControlsForActiveLogSession();
+    return;
+  }
+
+  discordListenersBySession.set(sessionId, { pid });
+  addLog(`Discord listen enabled for ${getSessionName(sessionId)} (PID: ${pid})`, 'success', sessionId);
+  updateDiscordControlsForActiveLogSession();
+}
 
 // Log functions
 function addLog(message: string, type: 'info' | 'success' | 'error' | 'highlight' = 'info', targetSessionId?: string) {
@@ -3403,6 +3615,8 @@ function addLog(message: string, type: 'info' | 'success' | 'error' | 'highlight
   
   // Update log tab indicator
   updateLogTabIndicator(sessionId);
+
+  void maybeSendDiscordAlert(sessionId, logEntry);
 }
 
 function renderLogEntry(logEntry: LogEntry) {
@@ -3428,6 +3642,7 @@ function switchToLogSession(sessionId: string) {
   
   // Update active log tab
   updateActiveLogTab(sessionId);
+  updateDiscordControlsForActiveLogSession();
 }
 
 function updateLogTabIndicator(sessionId: string) {
@@ -3467,7 +3682,8 @@ function createLogTab(sessionId: string, sessionName: string, autoActivate: bool
   logTab.textContent = sessionName;
   logTab.title = `Activity log for ${sessionName}`;
   
-  logTab.addEventListener('click', () => {
+  logTab.addEventListener('click', (event) => {
+    event.stopPropagation();
     switchToLogSession(sessionId);
   });
   
@@ -3487,6 +3703,8 @@ function removeLogTab(sessionId: string) {
   
   // Remove session logs
   sessionLogs.delete(sessionId);
+  discordListenersBySession.delete(sessionId);
+  sessionProcessPids.delete(sessionId);
   
   // Switch to another tab if this was active
   if (activeLogSessionId === sessionId) {
@@ -3500,6 +3718,8 @@ function removeLogTab(sessionId: string) {
       logContent.innerHTML = '';
     }
   }
+
+  updateDiscordControlsForActiveLogSession();
 }
 
 function renameLogTab(sessionId: string, newName: string) {
@@ -3514,6 +3734,38 @@ function escapeHtml(text: string): string {
   const div = document.createElement('div');
   div.textContent = text;
   return div.innerHTML;
+}
+
+if (logTabsContainerEl) {
+  logTabsContainerEl.addEventListener('mousedown', (event) => event.stopPropagation());
+  logTabsContainerEl.addEventListener('click', (event) => event.stopPropagation());
+}
+
+if (logControls) {
+  logControls.addEventListener('mousedown', (event) => event.stopPropagation());
+  logControls.addEventListener('click', (event) => event.stopPropagation());
+}
+
+if (discordSaveWebhookBtn) {
+  discordSaveWebhookBtn.addEventListener('click', () => {
+    void saveDiscordWebhookFromInput();
+  });
+}
+
+if (discordWebhookInput) {
+  discordWebhookInput.addEventListener('keydown', (event) => {
+    event.stopPropagation();
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      void saveDiscordWebhookFromInput();
+    }
+  });
+}
+
+if (logListenBtn) {
+  logListenBtn.addEventListener('click', () => {
+    toggleDiscordListenForActiveSession();
+  });
 }
 
 // Log panel toggle
@@ -5233,26 +5485,7 @@ botBtn.addEventListener('click', async () => {
     
     // Stop llama server if this session had one running
     if (activeSessionId) {
-      const serverInfo = sessionServerPids.get(activeSessionId);
-      console.log(`[Bot Stop] Session ${activeSessionId}, serverInfo:`, serverInfo);
-      if (serverInfo) {
-        addLog(`Stopping Llama.cpp server (PID: ${serverInfo.pid})...`, 'info');
-        try {
-          const stopResult = await (window as any).llama.stopByPid(serverInfo.pid);
-          console.log(`[Bot Stop] stopByPid result:`, stopResult);
-          if (!stopResult.error) {
-            sessionServerPids.delete(activeSessionId);
-            addLog('Llama.cpp server stopped', 'success');
-          } else {
-            addLog(`Warning: ${stopResult.error}`, 'error');
-          }
-          updateLlamaUI();
-        } catch (e) {
-          addLog(`Error stopping Llama server: ${e}`, 'error');
-        }
-      } else {
-        addLog('No Llama server tracked for this session', 'info');
-      }
+      await stopLlamaServerForSession(activeSessionId, getSessionName(activeSessionId));
     }
     
     // Update session bot status across all windows
@@ -5263,20 +5496,20 @@ botBtn.addEventListener('click', async () => {
     // Start llama server only if using local AI provider and server is enabled
     const currentAIProvider = aiProvider?.value || 'local';
     if (currentAIProvider === 'local' && llamaServerConfig.enabled && activeSessionId) {
-      addLog('Starting Llama.cpp server...', 'info');
-      console.log(`[Bot Start] Starting llama for session ${activeSessionId}`);
-      await (window as any).llama.saveConfig(llamaServerConfig);
-      const startResult = await (window as any).llama.start();
-      console.log(`[Bot Start] Result:`, startResult);
-      if (startResult.running && startResult.pid) {
-        // Track PID for this session
-        sessionServerPids.set(activeSessionId, { pid: startResult.pid, startTime: startResult.startTime || Date.now() });
-        console.log(`[Bot Start] Tracked PID ${startResult.pid} for session ${activeSessionId}`);
-        addLog(`Llama.cpp server started (PID: ${startResult.pid})`, 'success');
-        updateLlamaUI();
-      } else {
-        addLog(`Warning: Failed to start Llama.cpp server: ${startResult.error}`, 'error');
-        // Continue with bot startup anyway
+      const currentSessionConfig = sessionConfigs.get(activeSessionId);
+      const sessionLlamaConfig = currentSessionConfig?.llama || llamaServerConfig;
+
+      addLog('Preparing local Llama.cpp server...', 'info');
+      const serverResult = await ensureLlamaServerForSession(
+        activeSessionId,
+        getSessionName(activeSessionId),
+        sessionLlamaConfig,
+        true
+      );
+
+      if (!serverResult.success && serverResult.canceled) {
+        addLog('Bot start canceled', 'info');
+        return;
       }
     } else if (currentAIProvider === 'chatgpt') {
       addLog('Using ChatGPT API (no local server needed)', 'info');
@@ -8078,13 +8311,43 @@ setInterval(async () => {
   }
 }, 200); // Poll every 200ms for quick response
 
+async function refreshSessionProcessPid(sessionId: string, wv: Electron.WebviewTag): Promise<void> {
+  if (!sessionId || !wv) return;
+
+  const fallbackPid = Number(wv.getWebContentsId());
+  if (Number.isFinite(fallbackPid) && fallbackPid > 0) {
+    sessionProcessPids.set(sessionId, fallbackPid);
+  } else {
+    sessionProcessPids.delete(sessionId);
+  }
+
+  try {
+    const resolved = await (window as any).electronAPI?.getWebviewProcessId?.(wv.getWebContentsId());
+    const pid = typeof resolved?.pid === 'number' ? resolved.pid : null;
+    if (pid && pid > 0) {
+      sessionProcessPids.set(sessionId, pid);
+    } else if (Number.isFinite(fallbackPid) && fallbackPid > 0) {
+      sessionProcessPids.set(sessionId, fallbackPid);
+    } else {
+      sessionProcessPids.delete(sessionId);
+    }
+  } catch {
+    // Keep fallback value when process lookup is unavailable.
+  }
+
+  updateDiscordControlsForActiveLogSession();
+}
+
 // Webview ready handler - set up for any webview
 function setupWebviewReadyHandler(wv: Electron.WebviewTag) {
   if (webviewReadyHandlerBound.has(wv)) return;
   webviewReadyHandlerBound.add(wv);
 
-  wv.addEventListener('dom-ready', () => {
+  wv.addEventListener('dom-ready', async () => {
     const sessionId = getSessionIdForWebview(wv) || undefined;
+    if (sessionId) {
+      await refreshSessionProcessPid(sessionId, wv);
+    }
     addLog('Page loaded: ' + wv.getURL(), 'info', sessionId);
   
     // Inject compatibility fixes (wrapped in try-catch to avoid errors)
@@ -8427,6 +8690,8 @@ function setupSettingsPanelResize() {
 
 document.addEventListener('DOMContentLoaded', async () => {
   loadConfig();
+  await loadDiscordWebhook();
+  updateDiscordControlsForActiveLogSession();
   addLog('Snappy initialized', 'highlight');
   
   // Set up resize handles for panels
@@ -8569,8 +8834,85 @@ function getEffectiveSessionAIConfig(sessionId: string | null, requestAIConfig?:
   };
 }
 
+type LlamaServerChoice = 'use-existing' | 'start-new' | 'cancel';
+
 // Per-session server PID tracking
 const sessionServerPids = new Map<string, { pid: number; startTime: number }>();
+const serverSessionRefs = new Map<number, Set<string>>();
+
+function assignServerToSession(sessionId: string, serverInfo: { pid: number; startTime: number }): void {
+  const existing = sessionServerPids.get(sessionId);
+  if (existing?.pid === serverInfo.pid) {
+    return;
+  }
+
+  if (existing) {
+    releaseServerTrackingForSession(sessionId);
+  }
+
+  sessionServerPids.set(sessionId, serverInfo);
+  const refs = serverSessionRefs.get(serverInfo.pid) || new Set<string>();
+  refs.add(sessionId);
+  serverSessionRefs.set(serverInfo.pid, refs);
+  updateDiscordControlsForActiveLogSession();
+}
+
+function releaseServerTrackingForSession(sessionId: string): { pid: number; remainingUsers: number } | null {
+  const existing = sessionServerPids.get(sessionId);
+  if (!existing) return null;
+
+  sessionServerPids.delete(sessionId);
+  const refs = serverSessionRefs.get(existing.pid);
+  if (refs) {
+    refs.delete(sessionId);
+    if (refs.size === 0) {
+      serverSessionRefs.delete(existing.pid);
+    }
+  }
+
+  updateDiscordControlsForActiveLogSession();
+
+  return {
+    pid: existing.pid,
+    remainingUsers: refs?.size || 0
+  };
+}
+
+async function syncSessionServerTracking(): Promise<void> {
+  try {
+    const trackedPids: number[] = await (window as any).llama.getTrackedPids();
+    const trackedSet = new Set(Array.isArray(trackedPids) ? trackedPids : []);
+
+    for (const [sessionId, serverInfo] of Array.from(sessionServerPids.entries())) {
+      if (!trackedSet.has(serverInfo.pid)) {
+        releaseServerTrackingForSession(sessionId);
+      }
+    }
+    updateDiscordControlsForActiveLogSession();
+  } catch (e) {
+    console.log('[Renderer] Could not sync llama tracking with backend:', e);
+  }
+}
+
+async function getReusableServerInfo(): Promise<{ pid: number; startTime: number } | null> {
+  await syncSessionServerTracking();
+
+  const fromSession = sessionServerPids.values().next().value;
+  if (fromSession?.pid) {
+    return fromSession;
+  }
+
+  try {
+    const trackedPids: number[] = await (window as any).llama.getTrackedPids();
+    if (Array.isArray(trackedPids) && trackedPids.length > 0) {
+      return { pid: trackedPids[0], startTime: Date.now() };
+    }
+  } catch (e) {
+    console.log('[Renderer] Could not load tracked llama PIDs:', e);
+  }
+
+  return null;
+}
 
 // Get the current session's server status
 function getSessionServerStatus(): LlamaServerStatus {
@@ -8601,6 +8943,135 @@ const llamaServerPid = document.getElementById('llama-server-pid')!;
 const llamaServerUptime = document.getElementById('llama-server-uptime')!;
 const modalCloseBtn = llamaConfigModal.querySelector('.modal-close')!;
 const modalCancelBtn = llamaConfigModal.querySelector('.modal-cancel')!;
+const llamaServerChoiceModal = document.getElementById('llama-server-choice-modal') as HTMLDivElement | null;
+const llamaServerChoiceMessage = document.getElementById('llama-server-choice-message') as HTMLParagraphElement | null;
+const llamaServerChoiceExistingBtn = document.getElementById('llama-server-choice-existing') as HTMLButtonElement | null;
+const llamaServerChoiceNewBtn = document.getElementById('llama-server-choice-new') as HTMLButtonElement | null;
+const llamaServerChoiceCancelBtn = document.getElementById('llama-server-choice-cancel') as HTMLButtonElement | null;
+let llamaServerChoiceResolver: ((choice: LlamaServerChoice) => void) | null = null;
+
+function resolveLlamaServerChoice(choice: LlamaServerChoice): void {
+  if (llamaServerChoiceModal) {
+    llamaServerChoiceModal.classList.add('hidden');
+  }
+  if (llamaServerChoiceResolver) {
+    const resolver = llamaServerChoiceResolver;
+    llamaServerChoiceResolver = null;
+    resolver(choice);
+  }
+}
+
+async function askLlamaServerChoice(existingPid: number, sessionName: string): Promise<LlamaServerChoice> {
+  if (llamaServerChoiceResolver) {
+    return 'cancel';
+  }
+
+  if (
+    !llamaServerChoiceModal ||
+    !llamaServerChoiceMessage ||
+    !llamaServerChoiceExistingBtn ||
+    !llamaServerChoiceNewBtn ||
+    !llamaServerChoiceCancelBtn
+  ) {
+    return 'use-existing';
+  }
+
+  llamaServerChoiceMessage.textContent = `A local Llama server is already running (PID: ${existingPid}). Use it for "${sessionName}" or start a new server?`;
+
+  llamaServerChoiceModal.classList.remove('hidden');
+  llamaServerChoiceExistingBtn.focus();
+
+  return new Promise<LlamaServerChoice>((resolve) => {
+    llamaServerChoiceResolver = resolve;
+  });
+}
+
+async function ensureLlamaServerForSession(
+  sessionId: string,
+  sessionName: string,
+  llamaConfig: LlamaServerConfig,
+  promptOnExistingServer: boolean
+): Promise<{ success: boolean; canceled?: boolean }> {
+  await syncSessionServerTracking();
+
+  if (sessionServerPids.has(sessionId)) {
+    return { success: true };
+  }
+
+  const reusableServer = await getReusableServerInfo();
+  let shouldStartNew = true;
+
+  if (reusableServer?.pid) {
+    if (promptOnExistingServer) {
+      const choice = await askLlamaServerChoice(reusableServer.pid, sessionName);
+      if (choice === 'cancel') {
+        return { success: false, canceled: true };
+      }
+      shouldStartNew = choice === 'start-new';
+    } else {
+      shouldStartNew = false;
+    }
+
+    if (!shouldStartNew) {
+      assignServerToSession(sessionId, reusableServer);
+      addLog(`Using existing Llama.cpp server (PID: ${reusableServer.pid})`, 'info', sessionId);
+      updateLlamaUI();
+      return { success: true };
+    }
+  }
+
+  await (window as any).llama.saveConfig(llamaConfig);
+  const startResult = await (window as any).llama.start();
+
+  if (startResult.running && startResult.pid) {
+    assignServerToSession(sessionId, {
+      pid: startResult.pid,
+      startTime: startResult.startTime || Date.now()
+    });
+    addLog(`Llama.cpp server started (PID: ${startResult.pid})`, 'success', sessionId);
+    updateLlamaUI();
+    return { success: true };
+  }
+
+  addLog(`Warning: Failed to start Llama.cpp server: ${startResult.error || 'Unknown error'}`, 'error', sessionId);
+  return { success: false };
+}
+
+async function stopLlamaServerForSession(sessionId: string, sessionName: string): Promise<boolean> {
+  await syncSessionServerTracking();
+
+  const serverInfo = sessionServerPids.get(sessionId);
+  if (!serverInfo) {
+    addLog('No Llama server tracked for this session', 'info', sessionId);
+    return false;
+  }
+
+  const released = releaseServerTrackingForSession(sessionId);
+  if (!released) {
+    return false;
+  }
+
+  if (released.remainingUsers > 0) {
+    addLog(`Keeping shared Llama.cpp server running (PID: ${released.pid}, ${released.remainingUsers} session(s) still using it)`, 'info', sessionId);
+    updateLlamaUI();
+    return true;
+  }
+
+  addLog(`Stopping Llama.cpp server (PID: ${released.pid})...`, 'info', sessionId);
+  try {
+    const stopResult = await (window as any).llama.stopByPid(released.pid);
+    if (!stopResult.error) {
+      addLog(`Llama.cpp server stopped for ${sessionName}`, 'success', sessionId);
+    } else {
+      addLog(`Warning: ${stopResult.error}`, 'error', sessionId);
+    }
+  } catch (e) {
+    addLog(`Error stopping Llama server: ${e}`, 'error', sessionId);
+  }
+
+  updateLlamaUI();
+  return true;
+}
 
 // Load llama.cpp configuration
 async function loadLlamaConfig() {
@@ -8687,16 +9158,10 @@ async function startLlamaServer() {
   (llamaStartBtn as HTMLButtonElement).disabled = true;
 
   try {
-    await (window as any).llama.saveConfig(llamaServerConfig);
-    const status = await (window as any).llama.start();
-
-    if (status.running && status.pid) {
-      // Store PID for this session
-      sessionServerPids.set(activeSessionId, { pid: status.pid, startTime: status.startTime || Date.now() });
-      addLog(`Llama.cpp server started (PID: ${status.pid})`, 'success');
-      updateLlamaUI();
-    } else {
-      addLog(`Failed to start server: ${status.error}`, 'error');
+    const sessionName = getSessionName(activeSessionId);
+    const result = await ensureLlamaServerForSession(activeSessionId, sessionName, llamaServerConfig, true);
+    if (!result.success && result.canceled) {
+      addLog('Server start canceled', 'info');
     }
   } catch (e) {
     addLog(`Error starting server: ${e}`, 'error');
@@ -8712,27 +9177,17 @@ async function stopLlamaServer() {
     return;
   }
 
-  const serverInfo = sessionServerPids.get(activeSessionId);
-  if (!serverInfo) {
+  const hasServer = sessionServerPids.has(activeSessionId);
+  if (!hasServer) {
     addLog('No server running for this session', 'error');
     return;
   }
-  
-  const currentPid = serverInfo.pid;
-  addLog(`Stopping Llama.cpp server (PID: ${currentPid})...`, 'highlight');
+
+  addLog('Stopping Llama.cpp server...', 'highlight');
   (llamaStopBtn as HTMLButtonElement).disabled = true;
 
   try {
-    const status = await (window as any).llama.stopByPid(currentPid);
-
-    if (!status.error) {
-      // Remove PID from this session's tracking
-      sessionServerPids.delete(activeSessionId);
-      addLog(`Llama.cpp server stopped (PID: ${currentPid})`, 'success');
-      updateLlamaUI();
-    } else {
-      addLog(`Failed to stop server: ${status.error}`, 'error');
-    }
+    await stopLlamaServerForSession(activeSessionId, getSessionName(activeSessionId));
   } catch (e) {
     addLog(`Error stopping server: ${e}`, 'error');
   } finally {
@@ -8742,8 +9197,7 @@ async function stopLlamaServer() {
 
 // Get llama.cpp server status (uses per-session tracking)
 async function getLlamaStatus() {
-  // Just update the UI based on our local session tracking
-  // No need to call the backend since we track PIDs per-session locally
+  await syncSessionServerTracking();
   updateLlamaUI();
 }
 
@@ -8819,6 +9273,23 @@ llamaConfigModal.addEventListener('click', (e) => {
     hideLlamaConfigModal();
   }
 });
+
+if (llamaServerChoiceExistingBtn) {
+  llamaServerChoiceExistingBtn.addEventListener('click', () => resolveLlamaServerChoice('use-existing'));
+}
+if (llamaServerChoiceNewBtn) {
+  llamaServerChoiceNewBtn.addEventListener('click', () => resolveLlamaServerChoice('start-new'));
+}
+if (llamaServerChoiceCancelBtn) {
+  llamaServerChoiceCancelBtn.addEventListener('click', () => resolveLlamaServerChoice('cancel'));
+}
+if (llamaServerChoiceModal) {
+  llamaServerChoiceModal.addEventListener('click', (e) => {
+    if (e.target === llamaServerChoiceModal) {
+      resolveLlamaServerChoice('cancel');
+    }
+  });
+}
 
 // Initialize llama status on startup
 loadLlamaConfig();
@@ -8982,18 +9453,13 @@ async function startAllSessionBots(): Promise<void> {
     // Start llama server only if using local AI provider and server is enabled for this session
     const aiProvider = aiConfig?.provider || 'local';
     if (aiProvider === 'local' && llamaConfig?.enabled && llamaConfig?.buildPath && llamaConfig?.startCommand) {
-      // Skip if already running
-      if (!sessionServerPids.has(sessionId)) {
-        try {
-          await (window as any).llama.saveConfig(llamaConfig);
-          const startResult = await (window as any).llama.start();
-          if (startResult.running && startResult.pid) {
-            sessionServerPids.set(sessionId, { pid: startResult.pid, startTime: startResult.startTime || Date.now() });
-            addLog(`Llama server started for ${sessionName} (PID: ${startResult.pid})`, 'success', sessionId);
-          }
-        } catch (e) {
-          addLog(`Failed to start llama for ${sessionName}: ${e}`, 'error', sessionId);
+      try {
+        const serverResult = await ensureLlamaServerForSession(sessionId, sessionName, llamaConfig, false);
+        if (!serverResult.success) {
+          addLog(`Failed to prepare local Llama server for ${sessionName}`, 'error', sessionId);
         }
+      } catch (e) {
+        addLog(`Failed to start llama for ${sessionName}: ${e}`, 'error', sessionId);
       }
     } else if (aiProvider === 'chatgpt') {
       addLog(`Using ChatGPT API for ${sessionName} (no local server needed)`, 'info', sessionId);
@@ -9077,15 +9543,8 @@ async function stopAllSessionBots(): Promise<void> {
     }
     
     // Stop llama server if running for this session
-    const serverInfo = sessionServerPids.get(sessionId);
-    if (serverInfo) {
-      try {
-        await (window as any).llama.stopByPid(serverInfo.pid);
-        sessionServerPids.delete(sessionId);
-        addLog(`Llama server stopped for ${sessionName}`, 'info', sessionId);
-      } catch (e) {
-        addLog(`Failed to stop llama for ${sessionName}: ${e}`, 'error', sessionId);
-      }
+    if (sessionServerPids.has(sessionId)) {
+      await stopLlamaServerForSession(sessionId, sessionName);
     }
   }
   

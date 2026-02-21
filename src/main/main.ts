@@ -51,6 +51,87 @@ function delayMs(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, Math.max(0, ms || 0)));
 }
 
+function normalizeDiscordWebhookUrl(raw: unknown): string | null {
+  if (typeof raw !== 'string') return null;
+  const trimmed = raw.trim();
+  if (!trimmed) return null;
+
+  try {
+    const parsed = new URL(trimmed);
+    const host = parsed.hostname.toLowerCase();
+    const isDiscordHost = host === 'discord.com' || host.endsWith('.discord.com') || host === 'discordapp.com' || host.endsWith('.discordapp.com');
+    if (parsed.protocol !== 'https:' || !isDiscordHost) {
+      return null;
+    }
+    if (!parsed.pathname.includes('/api/webhooks/')) {
+      return null;
+    }
+    return parsed.toString();
+  } catch {
+    return null;
+  }
+}
+
+async function postDiscordWebhookMessage(webhookUrl: string, content: string): Promise<{ success: boolean; error?: string }> {
+  const normalizedContent = String(content || '').trim();
+  if (!normalizedContent) {
+    return { success: false, error: 'Alert content is required' };
+  }
+
+  const payload = JSON.stringify({
+    content: normalizedContent.length > 1900 ? normalizedContent.slice(0, 1900) + '...' : normalizedContent
+  });
+
+  return new Promise((resolve) => {
+    try {
+      const parsed = new URL(webhookUrl);
+      const req = https.request(
+        {
+          protocol: parsed.protocol,
+          hostname: parsed.hostname,
+          port: parsed.port || 443,
+          path: parsed.pathname + parsed.search,
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Content-Length': Buffer.byteLength(payload)
+          },
+          timeout: 15000
+        },
+        (res) => {
+          let responseData = '';
+          res.on('data', (chunk) => {
+            responseData += chunk;
+          });
+          res.on('end', () => {
+            const statusCode = res.statusCode || 0;
+            if (statusCode >= 200 && statusCode < 300) {
+              resolve({ success: true });
+              return;
+            }
+            const shortResponse = responseData ? ` (${responseData.substring(0, 140)})` : '';
+            resolve({ success: false, error: `Discord webhook request failed with HTTP ${statusCode}${shortResponse}` });
+          });
+        }
+      );
+
+      req.on('error', (error) => {
+        resolve({ success: false, error: `Discord webhook request error: ${error.message}` });
+      });
+
+      req.on('timeout', () => {
+        req.destroy();
+        resolve({ success: false, error: 'Discord webhook request timed out' });
+      });
+
+      req.write(payload);
+      req.end();
+    } catch (error) {
+      resolve({ success: false, error: `Discord webhook request failed: ${String(error)}` });
+    }
+  });
+}
+
 /**
  * Load configuration from config.json or use defaults
  */
@@ -69,6 +150,10 @@ export function loadConfiguration(): Configuration {
       } else {
         config.ai = DEFAULT_AI_CONFIG;
       }
+      config.discordAlerts = {
+        webhookUrl: '',
+        ...(loadedConfig.discordAlerts || {})
+      };
       console.log('[Shell] Configuration loaded from user config:', configPath);
     } else {
       config = { ...DEFAULT_CONFIG, ai: DEFAULT_AI_CONFIG };
@@ -258,6 +343,8 @@ export function saveConfiguration(newConfig: Configuration): void {
   
   try {
     config = { ...DEFAULT_CONFIG, ...newConfig };
+    config.ai = { ...DEFAULT_AI_CONFIG, ...(newConfig.ai || {}) };
+    config.discordAlerts = { webhookUrl: '', ...(newConfig.discordAlerts || {}) };
     const configDir = path.dirname(configPath);
     if (!fs.existsSync(configDir)) {
       fs.mkdirSync(configDir, { recursive: true });
@@ -302,6 +389,28 @@ export function setupIPCHandlers(): void {
     return app.getVersion();
   });
 
+  ipcMain.handle('webview:getProcessId', async (_event, webContentsId: unknown) => {
+    const numericId = typeof webContentsId === 'number' ? webContentsId : Number(webContentsId);
+    if (!Number.isFinite(numericId) || numericId <= 0) {
+      return { pid: null, error: 'Invalid webContentsId' };
+    }
+
+    const target = webContents.fromId(numericId);
+    if (!target || target.isDestroyed()) {
+      return { pid: null, error: 'WebContents not found' };
+    }
+
+    try {
+      const pid = target.getOSProcessId();
+      if (!Number.isFinite(pid) || pid <= 0) {
+        return { pid: null, error: 'Process ID unavailable' };
+      }
+      return { pid };
+    } catch (error) {
+      return { pid: null, error: String(error) };
+    }
+  });
+
   // Handle save config request
   ipcMain.handle('bot:saveConfig', (event, newConfig: Configuration) => {
     saveConfiguration(newConfig);
@@ -341,6 +450,49 @@ export function setupIPCHandlers(): void {
     } catch (error) {
       console.error('[Shell] Error updating site settings:', error);
     }
+  });
+
+  ipcMain.handle('discord:getWebhook', async () => {
+    return {
+      webhookUrl: config.discordAlerts?.webhookUrl || ''
+    };
+  });
+
+  ipcMain.handle('discord:saveWebhook', async (_event, webhookUrl: unknown) => {
+    const raw = typeof webhookUrl === 'string' ? webhookUrl.trim() : '';
+
+    if (!raw) {
+      config.discordAlerts = { webhookUrl: '' };
+      saveConfiguration(config);
+      return { success: true, webhookUrl: '' };
+    }
+
+    const normalized = normalizeDiscordWebhookUrl(raw);
+    if (!normalized) {
+      return { success: false, error: 'Invalid Discord webhook URL' };
+    }
+
+    config.discordAlerts = {
+      webhookUrl: normalized
+    };
+    saveConfiguration(config);
+    return { success: true, webhookUrl: normalized };
+  });
+
+  ipcMain.handle('discord:sendAlert', async (_event, payload: unknown) => {
+    const data = (payload || {}) as { content?: string };
+    const content = typeof data.content === 'string' ? data.content.trim() : '';
+    if (!content) {
+      return { success: false, error: 'Alert content is required' };
+    }
+
+    const webhookUrl = config.discordAlerts?.webhookUrl || '';
+    const normalizedWebhook = normalizeDiscordWebhookUrl(webhookUrl);
+    if (!normalizedWebhook) {
+      return { success: false, error: 'Discord webhook is not configured' };
+    }
+
+    return await postDiscordWebhookMessage(normalizedWebhook, content);
   });
 
   ipcMain.handle('instagram:scheduler:pickFolder', async () => {

@@ -48,6 +48,19 @@
           <div id="log-tabs-container" class="log-tabs-container">
             <!-- Log tabs will be dynamically added here -->
           </div>
+          <div id="log-controls">
+            <input
+              id="discord-webhook-input"
+              type="password"
+              placeholder="Discord webhook URL"
+              autocomplete="off"
+              spellcheck="false"
+              title="Discord webhook URL for terminal alerts"
+            >
+            <button id="discord-save-webhook" type="button" title="Save Discord webhook">Save Webhook</button>
+            <button id="log-listen-btn" type="button" title="Listen for this session and PID">Listen</button>
+            <span id="log-listen-pid" title="Active PID filter">PID: -</span>
+          </div>
           <button id="log-toggle">▼</button>
         </div>
         <div id="log-content"></div>
@@ -739,6 +752,25 @@
           <button class="btn" id="llama-stop-btn">Stop All Servers</button>
           <button class="btn btn-primary" id="llama-start-btn">Start New Server</button>
           <button class="btn btn-primary" id="llama-save-config-btn">Save Config</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Existing Llama Server Choice Modal -->
+    <div id="llama-server-choice-modal" class="modal hidden">
+      <div class="modal-content llama-choice-modal-content">
+        <div class="modal-header">
+          <h2>Local Llama Server Detected</h2>
+        </div>
+        <div class="modal-body">
+          <p id="llama-server-choice-message" class="llama-choice-message">
+            A local Llama server is already running.
+          </p>
+        </div>
+        <div class="modal-footer llama-choice-actions">
+          <button id="llama-server-choice-cancel" class="btn btn-secondary">Cancel</button>
+          <button id="llama-server-choice-existing" class="btn">Use Existing</button>
+          <button id="llama-server-choice-new" class="btn btn-primary">Start New</button>
         </div>
       </div>
     </div>

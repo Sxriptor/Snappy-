@@ -357,6 +357,32 @@ const llamaAPI = {
 };
 
 /**
+ * Discord alerts API for webhook management and alert delivery
+ */
+const discordAPI = {
+  /**
+   * Get saved Discord webhook URL
+   */
+  getWebhook: async (): Promise<{ webhookUrl: string }> => {
+    return await ipcRenderer.invoke('discord:getWebhook');
+  },
+
+  /**
+   * Save Discord webhook URL
+   */
+  saveWebhook: async (webhookUrl: string): Promise<{ success: boolean; error?: string; webhookUrl?: string }> => {
+    return await ipcRenderer.invoke('discord:saveWebhook', webhookUrl);
+  },
+
+  /**
+   * Send plain text alert to Discord webhook
+   */
+  sendAlert: async (content: string): Promise<{ success: boolean; error?: string }> => {
+    return await ipcRenderer.invoke('discord:sendAlert', { content });
+  }
+};
+
+/**
  * Window Management API for detached tabs
  */
 const windowAPI = {
@@ -402,6 +428,13 @@ const electronAPI = {
    */
   getAppVersion: (): Promise<string> => {
     return ipcRenderer.invoke('app:getVersion');
+  },
+
+  /**
+   * Resolve OS process ID for a webview webContents ID
+   */
+  getWebviewProcessId: async (webContentsId: number): Promise<{ pid: number | null; error?: string }> => {
+    return await ipcRenderer.invoke('webview:getProcessId', webContentsId);
   },
 
   /**
@@ -590,6 +623,7 @@ contextBridge.exposeInMainWorld('updater', updaterAPI);
 contextBridge.exposeInMainWorld('session', sessionAPI);
 contextBridge.exposeInMainWorld('proxy', proxyAPI);
 contextBridge.exposeInMainWorld('llama', llamaAPI);
+contextBridge.exposeInMainWorld('discord', discordAPI);
 contextBridge.exposeInMainWorld('windowManager', windowAPI);
 contextBridge.exposeInMainWorld('electronAPI', electronAPI);
 contextBridge.exposeInMainWorld('tray', trayAPI);
