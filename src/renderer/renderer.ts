@@ -2136,11 +2136,27 @@ interface ThreadsPostSchedulerSettings {
 let isPanelOpen = false;
 let isBotActive = false;
 let isLogCollapsed = false;
+let discordTokenSaved = false;
+let discordClearTokenRequested = false;
 
 const panel = document.getElementById('settings-panel')!;
 const toggleBtn = document.getElementById('settings-toggle')!;
 const closeBtn = document.getElementById('panel-close')!;
 const minimizeToTrayBtn = document.getElementById('minimize-to-tray');
+const sidebarDiscordSettingsBtn = document.getElementById('sidebar-discord-settings-btn') as HTMLButtonElement | null;
+const discordBotModal = document.getElementById('discord-bot-modal') as HTMLDivElement | null;
+const discordBotCloseBtn = document.getElementById('discord-bot-close-btn') as HTMLButtonElement | null;
+const discordBotCancelBtn = document.getElementById('discord-bot-cancel-btn') as HTMLButtonElement | null;
+const discordBotEnabledInput = document.getElementById('discord-bot-enabled') as HTMLInputElement | null;
+const discordBotTokenInput = document.getElementById('discord-bot-token') as HTMLInputElement | null;
+const discordBotClearTokenBtn = document.getElementById('discord-bot-clear-token-btn') as HTMLButtonElement | null;
+const discordBotTokenHint = document.getElementById('discord-bot-token-hint') as HTMLDivElement | null;
+const discordTrustedIdsList = document.getElementById('discord-trusted-ids-list') as HTMLDivElement | null;
+const discordAddTrustedIdBtn = document.getElementById('discord-add-trusted-id-btn') as HTMLButtonElement | null;
+const discordBotStatusText = document.getElementById('discord-bot-status-text') as HTMLDivElement | null;
+const discordBotStartBtn = document.getElementById('discord-bot-start-btn') as HTMLButtonElement | null;
+const discordBotStopBtn = document.getElementById('discord-bot-stop-btn') as HTMLButtonElement | null;
+const discordBotSaveBtn = document.getElementById('discord-bot-save-btn') as HTMLButtonElement | null;
 
 // Multi-session: webview is now dynamically created per session
 // Get the active webview or null if none exists
@@ -3108,6 +3124,9 @@ function setupMultiSessionUI() {
   // Initialize log tabs container
   initializeLogTabs();
   updateDiscordControlsForActiveLogSession();
+
+  // Set up Discord bot settings UI and command bridge
+  setupDiscordBotUi();
   
   // Set up cross-session bot status synchronization
   setupBotStatusSync();
@@ -9547,6 +9566,413 @@ function updateAllTabIndicators() {
   sessionWebviews.forEach((_, sessionId) => {
     updateTabCustomSettingsIndicator(sessionId);
   });
+}
+
+// ============================================================================
+// Discord Bot Settings + Command Control
+// ============================================================================
+
+interface DiscordBotConfigView {
+  enabled: boolean;
+  tokenSet: boolean;
+  trustedUserIds: string[];
+}
+
+interface DiscordBotStatusView {
+  state: string;
+  botTag?: string;
+  guildCount?: number;
+  error?: string;
+}
+
+interface DiscordBotCommandRequestView {
+  requestId: string;
+  action: 'start' | 'stop';
+  sessionIds: string[];
+}
+
+interface DiscordBotCommandResultView {
+  requestId: string;
+  success: boolean;
+  results: Array<{ sessionId: string; status: 'success' | 'error' | 'skipped'; message: string }>;
+  error?: string;
+}
+
+function normalizeDiscordTrustedIds(values: string[]): string[] {
+  return Array.from(
+    new Set(
+      values
+        .map(value => String(value || '').trim())
+        .filter(value => /^\d{5,25}$/.test(value))
+    )
+  );
+}
+
+function createDiscordTrustedIdRow(value: string = ''): HTMLDivElement {
+  const row = document.createElement('div');
+  row.className = 'discord-id-row';
+
+  const input = document.createElement('input');
+  input.type = 'text';
+  input.className = 'input-sm discord-id-input';
+  input.placeholder = 'Discord user ID';
+  input.value = value;
+
+  const removeBtn = document.createElement('button');
+  removeBtn.type = 'button';
+  removeBtn.className = 'btn btn-secondary discord-id-remove';
+  removeBtn.textContent = 'Remove';
+  removeBtn.addEventListener('click', () => {
+    row.remove();
+    if (discordTrustedIdsList && discordTrustedIdsList.children.length === 0) {
+      discordTrustedIdsList.appendChild(createDiscordTrustedIdRow(''));
+    }
+  });
+
+  row.appendChild(input);
+  row.appendChild(removeBtn);
+  return row;
+}
+
+function setDiscordTrustedIdsList(values: string[]): void {
+  if (!discordTrustedIdsList) return;
+  discordTrustedIdsList.innerHTML = '';
+  const ids = normalizeDiscordTrustedIds(values);
+  if (ids.length === 0) {
+    discordTrustedIdsList.appendChild(createDiscordTrustedIdRow(''));
+    return;
+  }
+  ids.forEach(value => {
+    discordTrustedIdsList.appendChild(createDiscordTrustedIdRow(value));
+  });
+}
+
+function collectDiscordTrustedIds(): string[] {
+  if (!discordTrustedIdsList) return [];
+  const values: string[] = [];
+  discordTrustedIdsList.querySelectorAll('.discord-id-input').forEach((inputEl) => {
+    const value = String((inputEl as HTMLInputElement).value || '').trim();
+    if (value.length > 0) values.push(value);
+  });
+  return normalizeDiscordTrustedIds(values);
+}
+
+function updateDiscordBotStatusUI(status: DiscordBotStatusView): void {
+  if (!discordBotStatusText) return;
+  const state = String(status?.state || 'offline');
+  const parts: string[] = [state];
+  if (status?.botTag) parts.push(`as ${status.botTag}`);
+  if (typeof status?.guildCount === 'number') parts.push(`guilds: ${status.guildCount}`);
+  if (status?.error) parts.push(`error: ${status.error}`);
+  discordBotStatusText.textContent = parts.join(' | ');
+}
+
+async function loadDiscordBotConfigIntoUI(): Promise<void> {
+  try {
+    const config = await (window as any).discordBot?.getConfig?.() as DiscordBotConfigView | undefined;
+    if (!config) return;
+    if (discordBotEnabledInput) discordBotEnabledInput.checked = config.enabled === true;
+    if (discordBotTokenHint) {
+      discordBotTokenHint.textContent = config.tokenSet ? 'Token saved.' : 'Token not saved.';
+    }
+    if (discordBotTokenInput) discordBotTokenInput.value = '';
+    discordTokenSaved = config.tokenSet === true;
+    discordClearTokenRequested = false;
+    setDiscordTrustedIdsList(config.trustedUserIds || []);
+  } catch (error) {
+    addLog(`Failed loading Discord bot config: ${String(error)}`, 'error', 'global');
+  }
+}
+
+async function refreshDiscordBotStatus(): Promise<void> {
+  try {
+    const status = await (window as any).discordBot?.getStatus?.() as DiscordBotStatusView | undefined;
+    if (!status) return;
+    updateDiscordBotStatusUI(status);
+  } catch (error) {
+    addLog(`Failed loading Discord bot status: ${String(error)}`, 'error', 'global');
+  }
+}
+
+async function saveDiscordBotConfigFromUI(): Promise<void> {
+  if (!discordBotEnabledInput) return;
+
+  const trustedUserIds = collectDiscordTrustedIds();
+  const token = discordBotTokenInput?.value.trim() || '';
+
+  if (discordBotEnabledInput.checked && !discordTokenSaved && token.length === 0 && !discordClearTokenRequested) {
+    addLog('Discord bot token is required when enabling auto-start.', 'error', 'global');
+    return;
+  }
+
+  try {
+    const payload: any = {
+      enabled: discordBotEnabledInput.checked,
+      trustedUserIds
+    };
+
+    if (discordClearTokenRequested) {
+      payload.clearToken = true;
+    } else if (token.length > 0) {
+      payload.token = token;
+    }
+
+    const result = await (window as any).discordBot?.saveConfig?.(payload);
+    if (!result?.success) {
+      addLog(`Failed to save Discord bot settings: ${String(result?.error || 'Unknown error')}`, 'error', 'global');
+      return;
+    }
+
+    discordTokenSaved = result.tokenSet === true;
+    if (discordBotTokenInput) discordBotTokenInput.value = '';
+    if (discordBotTokenHint) {
+      discordBotTokenHint.textContent = discordTokenSaved ? 'Token saved.' : 'Token not saved.';
+    }
+    discordClearTokenRequested = false;
+    setDiscordTrustedIdsList(result.trustedUserIds || trustedUserIds);
+    addLog('Discord bot settings saved.', 'success', 'global');
+    await refreshDiscordBotStatus();
+  } catch (error) {
+    addLog(`Failed to save Discord bot settings: ${String(error)}`, 'error', 'global');
+  }
+}
+
+async function startDiscordBotNow(): Promise<void> {
+  try {
+    const result = await (window as any).discordBot?.start?.();
+    if (!result?.success) {
+      addLog(`Discord bot start failed: ${String(result?.error || 'Unknown error')}`, 'error', 'global');
+    } else {
+      addLog('Discord bot started.', 'success', 'global');
+    }
+  } catch (error) {
+    addLog(`Discord bot start failed: ${String(error)}`, 'error', 'global');
+  } finally {
+    await refreshDiscordBotStatus();
+  }
+}
+
+async function stopDiscordBotNow(): Promise<void> {
+  try {
+    const result = await (window as any).discordBot?.stop?.();
+    if (!result?.success) {
+      addLog(`Discord bot stop failed: ${String(result?.error || 'Unknown error')}`, 'error', 'global');
+    } else {
+      addLog('Discord bot stopped.', 'info', 'global');
+    }
+  } catch (error) {
+    addLog(`Discord bot stop failed: ${String(error)}`, 'error', 'global');
+  } finally {
+    await refreshDiscordBotStatus();
+  }
+}
+
+async function showDiscordBotModal(): Promise<void> {
+  if (!discordBotModal) return;
+  await loadDiscordBotConfigIntoUI();
+  await refreshDiscordBotStatus();
+  discordBotModal.classList.remove('hidden');
+}
+
+function hideDiscordBotModal(): void {
+  if (!discordBotModal) return;
+  discordBotModal.classList.add('hidden');
+}
+
+function setTabBotIndicator(sessionId: string, isActive: boolean): void {
+  const tab = document.getElementById(`tab-${sessionId}`);
+  if (!tab) return;
+  const botStatusEl = tab.querySelector('.tab-bot-status');
+  if (!botStatusEl) return;
+  botStatusEl.className = `tab-bot-status ${isActive ? 'active' : 'inactive'}`;
+  botStatusEl.setAttribute('title', `Bot Status: ${isActive ? 'active' : 'inactive'}`);
+}
+
+function updateGlobalBotUiFromActiveSession(): void {
+  if (!activeSessionId) return;
+  const tab = document.getElementById(`tab-${activeSessionId}`);
+  const isActive = !!tab?.querySelector('.tab-bot-status.active');
+  isBotActive = isActive;
+  statusDot.classList.toggle('active', isActive);
+  statusText.textContent = isActive ? 'Active' : 'Inactive';
+  botBtn.textContent = isActive ? 'Stop' : 'Start';
+}
+
+async function executeSessionBotActionForDiscord(sessionId: string, action: 'start' | 'stop'): Promise<{ sessionId: string; status: 'success' | 'error' | 'skipped'; message: string }> {
+  const sessionName = getSessionName(sessionId);
+  const webview = sessionWebviews.get(sessionId);
+  const tab = document.getElementById(`tab-${sessionId}`);
+  const isHibernated = tab?.classList.contains('hibernated');
+
+  if (!webview || isHibernated) {
+    return {
+      sessionId,
+      status: 'skipped',
+      message: `${sessionName}: session unavailable or hibernated`
+    };
+  }
+
+  if (action === 'start') {
+    try {
+      const config = sessionConfigs.get(sessionId);
+      const llamaConfig = (config as any)?.llama;
+      const aiConfig = (config as any)?.ai;
+      const aiProvider = aiConfig?.provider || 'local';
+
+      if (aiProvider === 'local' && llamaConfig?.enabled && llamaConfig?.buildPath && llamaConfig?.startCommand) {
+        const serverResult = await ensureLlamaServerForSession(sessionId, sessionName, llamaConfig, false);
+        if (!serverResult.success) {
+          return {
+            sessionId,
+            status: 'error',
+            message: `${sessionName}: failed to prepare local Llama server`
+          };
+        }
+      }
+
+      const injected = await injectBotIntoSpecificWebview(webview, sessionId);
+      if (!injected) {
+        return {
+          sessionId,
+          status: 'error',
+          message: `${sessionName}: bot injection failed`
+        };
+      }
+
+      await (window as any).session.updateBotStatus(sessionId, 'active');
+      setTabBotIndicator(sessionId, true);
+      if (sessionId === activeSessionId) updateGlobalBotUiFromActiveSession();
+
+      return {
+        sessionId,
+        status: 'success',
+        message: `${sessionName}: started`
+      };
+    } catch (error) {
+      return {
+        sessionId,
+        status: 'error',
+        message: `${sessionName}: ${String(error)}`
+      };
+    }
+  }
+
+  try {
+    await stopBotInSpecificWebview(webview);
+    await (window as any).session.updateBotStatus(sessionId, 'inactive');
+    setTabBotIndicator(sessionId, false);
+    if (sessionServerPids.has(sessionId)) {
+      await stopLlamaServerForSession(sessionId, sessionName);
+    }
+    if (sessionId === activeSessionId) updateGlobalBotUiFromActiveSession();
+
+    return {
+      sessionId,
+      status: 'success',
+      message: `${sessionName}: stopped`
+    };
+  } catch (error) {
+    return {
+      sessionId,
+      status: 'error',
+      message: `${sessionName}: ${String(error)}`
+    };
+  }
+}
+
+async function handleDiscordBotCommandRequest(request: DiscordBotCommandRequestView): Promise<DiscordBotCommandResultView> {
+  if (!request || !request.requestId || !Array.isArray(request.sessionIds)) {
+    return {
+      requestId: request?.requestId || '',
+      success: false,
+      error: 'Invalid request payload',
+      results: []
+    };
+  }
+
+  const action = request.action === 'stop' ? 'stop' : 'start';
+  const results: Array<{ sessionId: string; status: 'success' | 'error' | 'skipped'; message: string }> = [];
+
+  for (const sessionId of request.sessionIds) {
+    const result = await executeSessionBotActionForDiscord(String(sessionId), action);
+    results.push(result);
+  }
+
+  const hasErrors = results.some(item => item.status === 'error');
+  return {
+    requestId: request.requestId,
+    success: !hasErrors,
+    results
+  };
+}
+
+function setupDiscordBotUi(): void {
+  if (sidebarDiscordSettingsBtn) {
+    sidebarDiscordSettingsBtn.addEventListener('click', () => {
+      void showDiscordBotModal();
+    });
+  }
+
+  if (discordBotCloseBtn) {
+    discordBotCloseBtn.addEventListener('click', hideDiscordBotModal);
+  }
+  if (discordBotCancelBtn) {
+    discordBotCancelBtn.addEventListener('click', hideDiscordBotModal);
+  }
+  if (discordBotModal) {
+    discordBotModal.addEventListener('click', (event) => {
+      if (event.target === discordBotModal) hideDiscordBotModal();
+    });
+  }
+
+  if (discordBotClearTokenBtn) {
+    discordBotClearTokenBtn.addEventListener('click', () => {
+      if (discordBotTokenInput) discordBotTokenInput.value = '';
+      discordTokenSaved = false;
+      discordClearTokenRequested = true;
+      if (discordBotTokenHint) discordBotTokenHint.textContent = 'Token will be cleared on save.';
+    });
+  }
+
+  if (discordAddTrustedIdBtn) {
+    discordAddTrustedIdBtn.addEventListener('click', () => {
+      if (!discordTrustedIdsList) return;
+      discordTrustedIdsList.appendChild(createDiscordTrustedIdRow(''));
+    });
+  }
+
+  if (discordBotSaveBtn) {
+    discordBotSaveBtn.addEventListener('click', () => {
+      void saveDiscordBotConfigFromUI();
+    });
+  }
+
+  if (discordBotStartBtn) {
+    discordBotStartBtn.addEventListener('click', () => {
+      void startDiscordBotNow();
+    });
+  }
+
+  if (discordBotStopBtn) {
+    discordBotStopBtn.addEventListener('click', () => {
+      void stopDiscordBotNow();
+    });
+  }
+
+  if ((window as any).discordBot?.onStatusChanged) {
+    (window as any).discordBot.onStatusChanged((status: DiscordBotStatusView) => {
+      updateDiscordBotStatusUI(status);
+    });
+  }
+
+  if ((window as any).discordBot?.onCommandRequest) {
+    (window as any).discordBot.onCommandRequest((request: DiscordBotCommandRequestView) => {
+      void (async () => {
+        const result = await handleDiscordBotCommandRequest(request);
+        (window as any).discordBot.sendCommandResult(result);
+      })();
+    });
+  }
 }
 
 // ============================================================================

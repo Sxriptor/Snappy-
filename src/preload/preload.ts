@@ -383,6 +383,77 @@ const discordAPI = {
 };
 
 /**
+ * Discord bot control API
+ */
+const discordBotAPI = {
+  /**
+   * Get Discord bot configuration (token is not returned)
+   */
+  getConfig: async (): Promise<{ enabled: boolean; tokenSet: boolean; trustedUserIds: string[] }> => {
+    return await ipcRenderer.invoke('discordBot:getConfig');
+  },
+
+  /**
+   * Save Discord bot configuration
+   */
+  saveConfig: async (config: {
+    enabled: boolean;
+    token?: string;
+    clearToken?: boolean;
+    trustedUserIds: string[];
+  }): Promise<{ success: boolean; enabled: boolean; tokenSet: boolean; trustedUserIds: string[]; error?: string }> => {
+    return await ipcRenderer.invoke('discordBot:saveConfig', config);
+  },
+
+  /**
+   * Get current Discord bot runtime status
+   */
+  getStatus: async (): Promise<{ state: string; botTag?: string; guildCount?: number; error?: string }> => {
+    return await ipcRenderer.invoke('discordBot:getStatus');
+  },
+
+  /**
+   * Start Discord bot now
+   */
+  start: async (): Promise<{ success: boolean; error?: string }> => {
+    return await ipcRenderer.invoke('discordBot:start');
+  },
+
+  /**
+   * Stop Discord bot now
+   */
+  stop: async (): Promise<{ success: boolean; error?: string }> => {
+    return await ipcRenderer.invoke('discordBot:stop');
+  },
+
+  /**
+   * Listen for command execution requests from main process
+   */
+  onCommandRequest: (callback: (payload: { requestId: string; action: 'start' | 'stop'; sessionIds: string[] }) => void): void => {
+    ipcRenderer.on('discordBot:commandRequest', (_, payload) => callback(payload));
+  },
+
+  /**
+   * Send command execution results back to main process
+   */
+  sendCommandResult: (payload: {
+    requestId: string;
+    success: boolean;
+    results: Array<{ sessionId: string; status: 'success' | 'error' | 'skipped'; message: string }>;
+    error?: string;
+  }): void => {
+    ipcRenderer.send('discordBot:commandResult', payload);
+  },
+
+  /**
+   * Subscribe to Discord bot status changes
+   */
+  onStatusChanged: (callback: (status: { state: string; botTag?: string; guildCount?: number; error?: string }) => void): void => {
+    ipcRenderer.on('discordBot:statusChanged', (_, status) => callback(status));
+  }
+};
+
+/**
  * Window Management API for detached tabs
  */
 const windowAPI = {
@@ -624,6 +695,7 @@ contextBridge.exposeInMainWorld('session', sessionAPI);
 contextBridge.exposeInMainWorld('proxy', proxyAPI);
 contextBridge.exposeInMainWorld('llama', llamaAPI);
 contextBridge.exposeInMainWorld('discord', discordAPI);
+contextBridge.exposeInMainWorld('discordBot', discordBotAPI);
 contextBridge.exposeInMainWorld('windowManager', windowAPI);
 contextBridge.exposeInMainWorld('electronAPI', electronAPI);
 contextBridge.exposeInMainWorld('tray', trayAPI);

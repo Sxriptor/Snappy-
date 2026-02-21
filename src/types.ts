@@ -28,6 +28,7 @@ export interface Configuration {
   randomSkipProbability: number;
   ai?: AIConfig;  // New AI configuration
   discordAlerts?: DiscordAlertConfig;
+  discordBot?: DiscordBotConfig;
   siteSettings?: Partial<SiteSettingsConfig>;  // Site-specific settings
   threads?: {
     pollIntervalMs?: number;
@@ -144,6 +145,12 @@ export interface DiscordAlertConfig {
   webhookUrl: string;
 }
 
+export interface DiscordBotConfig {
+  enabled: boolean;
+  token: string;
+  trustedUserIds: string[];
+}
+
 /**
  * Chat message format for LLM requests (OpenAI-compatible)
  */
@@ -250,6 +257,11 @@ export const DEFAULT_CONFIG: Configuration = {
   randomSkipProbability: 0.15,
   discordAlerts: {
     webhookUrl: ''
+  },
+  discordBot: {
+    enabled: false,
+    token: '',
+    trustedUserIds: []
   },
   threads: {
     pollIntervalMs: 60000,

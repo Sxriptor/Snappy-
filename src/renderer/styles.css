@@ -1005,6 +1005,35 @@ body.resizing * {
   margin-top: auto;
   padding: 8px 4px 4px 4px;
   border-top: 1px solid #333;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+#sidebar-discord-settings-btn {
+  width: 100%;
+  min-height: 30px;
+  background: #111;
+  border: 1px solid #2a2a2a;
+  color: #7a7a7a;
+  cursor: pointer;
+  border-radius: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  font-size: 10px;
+  transition: all 0.2s ease;
+}
+
+#sidebar-discord-settings-btn:hover {
+  background: #1a1a1a;
+  color: #b0b0b0;
+  border-color: #3a3a3a;
+}
+
+#sidebar-discord-settings-btn svg {
+  flex-shrink: 0;
 }
 
 #sidebar-check-updates-btn {
@@ -1032,6 +1061,110 @@ body.resizing * {
 #sidebar-check-updates-btn:active {
   background: #0a0a0a;
   transform: translateY(0);
+}
+
+.discord-bot-modal-content {
+  width: min(620px, 92vw);
+}
+
+.checkbox-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: #9a9a9a;
+  font-size: 11px;
+}
+
+.discord-token-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.discord-token-row input {
+  flex: 1;
+}
+
+.discord-settings-hint {
+  margin-top: 6px;
+  color: #666;
+  font-size: 10px;
+}
+
+.discord-trusted-ids-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.discord-id-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.discord-id-row input {
+  flex: 1;
+}
+
+.discord-id-remove {
+  min-width: 64px;
+}
+
+.discord-add-id-btn {
+  margin-top: 8px;
+}
+
+.discord-bot-status-text {
+  border: 1px solid #1f1f1f;
+  background: #101010;
+  color: #8c8c8c;
+  padding: 8px 10px;
+  font-size: 11px;
+  border-radius: 4px;
+}
+
+.discord-setup-guide {
+  border: 1px solid #1f1f1f;
+  background: #0d0d0d;
+  border-radius: 4px;
+  padding: 10px 12px;
+}
+
+.discord-setup-guide label {
+  display: block;
+  margin-bottom: 6px;
+}
+
+.discord-setup-list {
+  margin: 0;
+  padding-left: 18px;
+  color: #8d8d8d;
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.discord-setup-list li {
+  margin-bottom: 6px;
+}
+
+.discord-setup-list code {
+  color: #b2b2b2;
+  background: #141414;
+  border: 1px solid #222;
+  border-radius: 3px;
+  padding: 1px 4px;
+}
+
+.discord-pill {
+  display: inline-block;
+  border: 1px solid #2a2a2a;
+  border-radius: 999px;
+  padding: 0 6px;
+  font-size: 10px;
+  color: #9ea8b5;
+  background: #15181c;
+  margin: 1px 3px 1px 0;
 }
 
 /* Context Menu */

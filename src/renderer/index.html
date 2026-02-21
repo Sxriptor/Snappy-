@@ -22,6 +22,16 @@
       
       <!-- Update Check Button at Bottom -->
       <div class="tab-bar-bottom">
+        <button id="sidebar-discord-settings-btn" title="Discord Bot Settings">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width: 16px; height: 16px;">
+            <path d="M9.5 16.5c.25.65 1.05 1.5 2.5 1.5s2.25-.85 2.5-1.5"/>
+            <path d="M8 8.5A5.5 5.5 0 0 1 12 7a5.5 5.5 0 0 1 4 1.5"/>
+            <path d="M6.5 18.5c-1-1.5-1.5-3.5-1.5-6 0-4 2-7 7-7s7 3 7 7c0 2.5-.5 4.5-1.5 6"/>
+            <circle cx="9" cy="12" r="1"/>
+            <circle cx="15" cy="12" r="1"/>
+          </svg>
+          <span>Discord</span>
+        </button>
         <button id="sidebar-check-updates-btn" title="Check for Updates">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width: 18px; height: 18px;">
             <path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/>
@@ -105,6 +115,59 @@
         <div class="modal-footer">
           <button class="btn btn-secondary modal-cancel">Cancel</button>
           <button class="btn btn-primary" id="create-session-btn">Create</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="discord-bot-modal" class="modal hidden">
+      <div class="modal-content discord-bot-modal-content">
+        <div class="modal-header">
+          <h2>Discord Bot Settings</h2>
+          <button class="modal-close" id="discord-bot-close-btn">&times;</button>
+        </div>
+        <div class="modal-body">
+          <div class="form-group discord-setup-guide">
+            <label>Quick Setup (Discord Developer Portal)</label>
+            <ol class="discord-setup-list">
+              <li>Open <code>https://discord.com/developers/applications</code>, create a New Application, then go to <strong>Bot</strong> and click <strong>Add Bot</strong>.</li>
+              <li>In <strong>Bot</strong>, copy the bot token and paste it below into <strong>Bot Token</strong>.</li>
+              <li>Enable privileged intent: <strong>Message Content Intent</strong>.</li>
+              <li>In <strong>OAuth2 → URL Generator</strong>, select scopes: <span class="discord-pill">bot</span> (optional: <span class="discord-pill">applications.commands</span>).</li>
+              <li>Select bot permissions: <span class="discord-pill">View Channels</span> <span class="discord-pill">Read Message History</span> <span class="discord-pill">Send Messages</span>.</li>
+              <li>Invite bot to your server using generated URL. Snappy commands are mention-based, for example <code>@snappy list</code>.</li>
+            </ol>
+            <div class="discord-settings-hint">Trusted User IDs: enable Developer Mode in Discord, right-click your user, then Copy User ID.</div>
+          </div>
+          <div class="form-group">
+            <label class="checkbox-row">
+              <input type="checkbox" id="discord-bot-enabled">
+              <span>Enable Discord Bot Auto-Start</span>
+            </label>
+          </div>
+          <div class="form-group">
+            <label for="discord-bot-token">Bot Token</label>
+            <div class="discord-token-row">
+              <input type="password" id="discord-bot-token" placeholder="Paste Discord bot token">
+              <button class="btn btn-secondary" id="discord-bot-clear-token-btn" type="button">Clear</button>
+            </div>
+            <div id="discord-bot-token-hint" class="discord-settings-hint">Token not saved.</div>
+          </div>
+          <div class="form-group">
+            <label>Trusted Discord User IDs</label>
+            <div id="discord-trusted-ids-list" class="discord-trusted-ids-list"></div>
+            <button class="btn btn-secondary discord-add-id-btn" id="discord-add-trusted-id-btn" type="button">+ Add Trusted ID</button>
+            <div class="discord-settings-hint">Only these users can execute commands.</div>
+          </div>
+          <div class="form-group">
+            <label>Bot Status</label>
+            <div id="discord-bot-status-text" class="discord-bot-status-text">offline</div>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary modal-cancel" id="discord-bot-cancel-btn" type="button">Close</button>
+          <button class="btn btn-secondary" id="discord-bot-stop-btn" type="button">Stop</button>
+          <button class="btn btn-secondary" id="discord-bot-start-btn" type="button">Start</button>
+          <button class="btn btn-primary" id="discord-bot-save-btn" type="button">Save</button>
         </div>
       </div>
     </div>

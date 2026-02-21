@@ -9,7 +9,7 @@ import * as path from 'path';
 import * as fs from 'fs';
 import * as https from 'https';
 import * as os from 'os';
-import { Configuration, DEFAULT_CONFIG, DEFAULT_AI_CONFIG, SessionConfig, ProxyConfig, IncomingMessage, AIConfig } from '../types';
+import { Configuration, DEFAULT_CONFIG, DEFAULT_AI_CONFIG, SessionConfig, ProxyConfig, IncomingMessage, AIConfig, Session, DiscordBotConfig } from '../types';
 import { SessionManager } from './sessionManager';
 import { ProxyManager } from './proxyManager';
 import { FingerprintGenerator } from './fingerprintGenerator';
@@ -21,6 +21,7 @@ import { buildThreadsBotScript } from '../injection/threadsBot';
 import { AIBrain } from '../brain/aiBrain';
 import { windowManager } from './windowManager';
 import { trayManager } from './trayManager';
+import { DiscordBotManager, DiscordBotStatus, DiscordCommand, DiscordCommandContext, PlatformTarget } from './discordBotManager';
 
 let mainWindow: BrowserWindow | null = null;
 let config: Configuration = DEFAULT_CONFIG;
@@ -38,6 +39,249 @@ const sessionManager = new SessionManager(
   fingerprintGenerator,
   proxyManager
 );
+
+interface DiscordBotCommandRequestPayload {
+  requestId: string;
+  action: 'start' | 'stop';
+  sessionIds: string[];
+}
+
+interface DiscordBotCommandResultSession {
+  sessionId: string;
+  status: 'success' | 'error' | 'skipped';
+  message: string;
+}
+
+interface DiscordBotCommandResultPayload {
+  requestId: string;
+  success: boolean;
+  results: DiscordBotCommandResultSession[];
+  error?: string;
+}
+
+interface PendingDiscordCommandRequest {
+  resolve: (value: DiscordBotCommandResultPayload) => void;
+  timeout: NodeJS.Timeout;
+}
+
+const pendingDiscordCommandRequests = new Map<string, PendingDiscordCommandRequest>();
+
+function getDiscordBotConfig(): DiscordBotConfig {
+  const raw = (config.discordBot || {}) as Partial<DiscordBotConfig>;
+  const trustedUserIds = Array.isArray(raw.trustedUserIds)
+    ? raw.trustedUserIds
+        .map((value: string) => String(value || '').trim())
+        .filter((value: string) => /^\d{5,25}$/.test(value))
+    : [];
+
+  return {
+    enabled: raw.enabled === true,
+    token: typeof raw.token === 'string' ? raw.token.trim() : '',
+    trustedUserIds: Array.from(new Set(trustedUserIds))
+  };
+}
+
+function detectPlatformFromSession(session: Session): PlatformTarget | 'unknown' {
+  const configAny = session.config as any;
+  const initialUrl = String(configAny?.initialUrl || '').toLowerCase();
+  const sessionName = String(session.name || '').toLowerCase();
+
+  if (initialUrl.includes('instagram.com') || sessionName.includes('instagram')) return 'instagram';
+  if (initialUrl.includes('snapchat.com') || sessionName.includes('snapchat')) return 'snapchat';
+  if (initialUrl.includes('threads.net') || initialUrl.includes('threads.com') || sessionName.includes('threads')) return 'threads';
+  if (initialUrl.includes('reddit.com') || sessionName.includes('reddit')) return 'reddit';
+
+  return 'unknown';
+}
+
+function getSessionLabel(session: Session): string {
+  const shortId = session.id.substring(0, 8);
+  return `${session.name} (${shortId})`;
+}
+
+function summarizeSessions(): string {
+  const sessions = sessionManager.getAllSessions();
+  const activeSessions = sessions.filter(session => session.state === 'active');
+  const runningBots = sessions.filter(session => session.botStatus === 'active');
+  const byPlatform = new Map<string, { total: number; running: number }>();
+
+  sessions.forEach(session => {
+    const platform = detectPlatformFromSession(session);
+    const key = platform === 'unknown' ? 'unknown' : platform;
+    const existing = byPlatform.get(key) || { total: 0, running: 0 };
+    existing.total += 1;
+    if (session.botStatus === 'active') existing.running += 1;
+    byPlatform.set(key, existing);
+  });
+
+  const header = `Sessions: ${sessions.length} total | ${activeSessions.length} active | ${runningBots.length} bot-active`;
+  const lines = Array.from(byPlatform.entries())
+    .sort((a, b) => a[0].localeCompare(b[0]))
+    .map(([platform, stats]) => `${platform}: ${stats.total} (${stats.running} running)`);
+
+  return lines.length > 0 ? `${header}\n${lines.join('\n')}` : `${header}\nNo sessions configured.`;
+}
+
+function resolveTargetSessions(command: Extract<DiscordCommand, { type: 'start' | 'stop' }>): { sessions: Session[]; descriptor: string; error?: string } {
+  const sessions = sessionManager.getAllSessions();
+  if (sessions.length === 0) {
+    return { sessions: [], descriptor: 'none', error: 'No sessions available.' };
+  }
+
+  if (command.target.kind === 'all') {
+    const eligible = sessions.filter(session => session.state === 'active');
+    return { sessions: eligible, descriptor: 'all active sessions' };
+  }
+
+  if (command.target.kind === 'platform') {
+    const platform = command.target.platform;
+    const matched = sessions.filter(session => detectPlatformFromSession(session) === platform && session.state === 'active');
+    return {
+      sessions: matched,
+      descriptor: `platform ${platform}`,
+      error: matched.length === 0 ? `No active sessions found for platform ${platform}.` : undefined
+    };
+  }
+
+  const ref = String(command.target.ref || '').trim().toLowerCase();
+  if (!ref) {
+    return { sessions: [], descriptor: 'session', error: 'Session reference is required.' };
+  }
+
+  const exactId = sessions.find(session => session.id.toLowerCase() === ref);
+  if (exactId) return { sessions: [exactId], descriptor: `session ${getSessionLabel(exactId)}` };
+
+  const prefixed = sessions.filter(session => session.id.toLowerCase().startsWith(ref));
+  if (prefixed.length === 1) return { sessions: [prefixed[0]], descriptor: `session ${getSessionLabel(prefixed[0])}` };
+  if (prefixed.length > 1) {
+    return {
+      sessions: [],
+      descriptor: 'session',
+      error: `Session reference is ambiguous: ${prefixed.map(session => getSessionLabel(session)).join(', ')}`
+    };
+  }
+
+  const byName = sessions.filter(session => session.name.toLowerCase() === ref);
+  if (byName.length === 1) return { sessions: [byName[0]], descriptor: `session ${getSessionLabel(byName[0])}` };
+  if (byName.length > 1) {
+    return {
+      sessions: [],
+      descriptor: 'session',
+      error: `Session name is ambiguous: ${byName.map(session => getSessionLabel(session)).join(', ')}`
+    };
+  }
+
+  if (/^\d+$/.test(ref)) {
+    const index = parseInt(ref, 10);
+    if (index >= 1 && index <= sessions.length) {
+      const sorted = sessions.slice().sort((a, b) => a.createdAt - b.createdAt);
+      const session = sorted[index - 1];
+      if (session) {
+        return { sessions: [session], descriptor: `session ${getSessionLabel(session)}` };
+      }
+    }
+  }
+
+  return { sessions: [], descriptor: 'session', error: `No session matched "${command.target.ref}".` };
+}
+
+function broadcastDiscordBotStatus(status: DiscordBotStatus): void {
+  const allWindows = BrowserWindow.getAllWindows();
+  allWindows.forEach(window => {
+    window.webContents.send('discordBot:statusChanged', status);
+  });
+}
+
+async function requestRendererBotCommand(action: 'start' | 'stop', sessionIds: string[]): Promise<DiscordBotCommandResultPayload> {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    return {
+      requestId: '',
+      success: false,
+      error: 'Main renderer window is unavailable',
+      results: []
+    };
+  }
+
+  const requestId = `discord-cmd-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  const payload: DiscordBotCommandRequestPayload = {
+    requestId,
+    action,
+    sessionIds
+  };
+
+  return await new Promise<DiscordBotCommandResultPayload>((resolve) => {
+    const timeout = setTimeout(() => {
+      pendingDiscordCommandRequests.delete(requestId);
+      resolve({
+        requestId,
+        success: false,
+        error: 'Renderer command timed out',
+        results: []
+      });
+    }, 20000);
+
+    pendingDiscordCommandRequests.set(requestId, { resolve, timeout });
+    mainWindow?.webContents.send('discordBot:commandRequest', payload);
+  });
+}
+
+async function executeDiscordCommand(command: DiscordCommand, _context: DiscordCommandContext): Promise<string> {
+  if (command.type === 'help') {
+    return [
+      'Commands:',
+      '- @snappy list',
+      '- @snappy status',
+      '- @snappy start all',
+      '- @snappy stop all',
+      '- @snappy start platform <instagram|snapchat|threads|reddit>',
+      '- @snappy stop platform <instagram|snapchat|threads|reddit>',
+      '- @snappy start session <id|name|index>',
+      '- @snappy stop session <id|name|index>'
+    ].join('\n');
+  }
+
+  if (command.type === 'list' || command.type === 'status') {
+    return summarizeSessions();
+  }
+
+  const resolved = resolveTargetSessions(command);
+  if (resolved.error) {
+    return resolved.error;
+  }
+  if (resolved.sessions.length === 0) {
+    return `No sessions matched ${resolved.descriptor}.`;
+  }
+
+  const action = command.type;
+  const actionPastTense = action === 'start' ? 'started' : 'stopped';
+  const requestedSessions = resolved.sessions.map(session => session.id);
+  const rendererResult = await requestRendererBotCommand(action, requestedSessions);
+
+  if (!rendererResult.success && rendererResult.results.length === 0) {
+    return `Failed to ${action} ${resolved.descriptor}: ${rendererResult.error || 'Unknown error'}`;
+  }
+
+  const successes = rendererResult.results.filter(result => result.status === 'success');
+  const skipped = rendererResult.results.filter(result => result.status === 'skipped');
+  const errors = rendererResult.results.filter(result => result.status === 'error');
+
+  const summary = `${actionPastTense.charAt(0).toUpperCase() + actionPastTense.slice(1)} ${successes.length}/${resolved.sessions.length} for ${resolved.descriptor}.`;
+  const detailLines: string[] = [];
+
+  if (skipped.length > 0) {
+    detailLines.push(`Skipped: ${skipped.map(item => item.message).join('; ')}`);
+  }
+  if (errors.length > 0) {
+    detailLines.push(`Errors: ${errors.map(item => item.message).join('; ')}`);
+  }
+
+  return detailLines.length > 0 ? `${summary}\n${detailLines.join('\n')}` : summary;
+}
+
+const discordBotManager = new DiscordBotManager(executeDiscordCommand);
+discordBotManager.on('statusChanged', (status: DiscordBotStatus) => {
+  broadcastDiscordBotStatus(status);
+});
 
 function getRuntimeConfigPath(): string {
   try {
@@ -154,6 +398,12 @@ export function loadConfiguration(): Configuration {
         webhookUrl: '',
         ...(loadedConfig.discordAlerts || {})
       };
+      config.discordBot = {
+        enabled: false,
+        token: '',
+        trustedUserIds: [],
+        ...(loadedConfig.discordBot || {})
+      };
       console.log('[Shell] Configuration loaded from user config:', configPath);
     } else {
       config = { ...DEFAULT_CONFIG, ai: DEFAULT_AI_CONFIG };
@@ -163,6 +413,9 @@ export function loadConfiguration(): Configuration {
     console.error('[Shell] Error loading configuration:', error);
     config = { ...DEFAULT_CONFIG, ai: DEFAULT_AI_CONFIG };
   }
+
+  config.discordBot = getDiscordBotConfig();
+  discordBotManager.setConfig(config.discordBot);
   
   return config;
 }
@@ -345,6 +598,14 @@ export function saveConfiguration(newConfig: Configuration): void {
     config = { ...DEFAULT_CONFIG, ...newConfig };
     config.ai = { ...DEFAULT_AI_CONFIG, ...(newConfig.ai || {}) };
     config.discordAlerts = { webhookUrl: '', ...(newConfig.discordAlerts || {}) };
+    config.discordBot = {
+      enabled: false,
+      token: '',
+      trustedUserIds: [],
+      ...(newConfig.discordBot || {})
+    };
+    config.discordBot = getDiscordBotConfig();
+    discordBotManager.setConfig(config.discordBot);
     const configDir = path.dirname(configPath);
     if (!fs.existsSync(configDir)) {
       fs.mkdirSync(configDir, { recursive: true });
@@ -409,6 +670,91 @@ export function setupIPCHandlers(): void {
     } catch (error) {
       return { pid: null, error: String(error) };
     }
+  });
+
+  ipcMain.on('discordBot:commandResult', (_event, payload: DiscordBotCommandResultPayload) => {
+    const requestId = String(payload?.requestId || '');
+    if (!requestId) return;
+
+    const pending = pendingDiscordCommandRequests.get(requestId);
+    if (!pending) return;
+
+    clearTimeout(pending.timeout);
+    pendingDiscordCommandRequests.delete(requestId);
+    pending.resolve(payload);
+  });
+
+  ipcMain.handle('discordBot:getConfig', async () => {
+    const discordConfig = getDiscordBotConfig();
+    return {
+      enabled: discordConfig.enabled,
+      tokenSet: discordConfig.token.length > 0,
+      trustedUserIds: [...discordConfig.trustedUserIds]
+    };
+  });
+
+  ipcMain.handle('discordBot:saveConfig', async (_event, payload: unknown) => {
+    const data = (payload || {}) as {
+      enabled?: unknown;
+      token?: unknown;
+      clearToken?: unknown;
+      trustedUserIds?: unknown;
+    };
+
+    const current = getDiscordBotConfig();
+    const next: DiscordBotConfig = {
+      enabled: data.enabled === true,
+      token: current.token,
+      trustedUserIds: []
+    };
+
+    if (data.clearToken === true) {
+      next.token = '';
+    } else if (typeof data.token === 'string' && data.token.trim().length > 0) {
+      next.token = data.token.trim();
+    }
+
+    if (Array.isArray(data.trustedUserIds)) {
+      next.trustedUserIds = Array.from(
+        new Set(
+          data.trustedUserIds
+            .map(value => String(value || '').trim())
+            .filter(value => /^\d{5,25}$/.test(value))
+        )
+      );
+    } else {
+      next.trustedUserIds = [...current.trustedUserIds];
+    }
+
+    config.discordBot = next;
+    saveConfiguration(config);
+
+    let lifecycleResult: { success: boolean; error?: string } = { success: true };
+    if (next.enabled) {
+      lifecycleResult = await discordBotManager.start();
+    } else {
+      lifecycleResult = await discordBotManager.stop();
+    }
+
+    return {
+      success: lifecycleResult.success,
+      enabled: next.enabled,
+      tokenSet: next.token.length > 0,
+      trustedUserIds: [...next.trustedUserIds],
+      error: lifecycleResult.error
+    };
+  });
+
+  ipcMain.handle('discordBot:getStatus', async () => {
+    return discordBotManager.getStatus();
+  });
+
+  ipcMain.handle('discordBot:start', async () => {
+    return await discordBotManager.start();
+  });
+
+  ipcMain.handle('discordBot:stop', async () => {
+    return await discordBotManager.stop();
   });
 
   // Handle save config request
@@ -1865,6 +2211,17 @@ async function initializeApp(): Promise<void> {
     windowManager.setMainWindow(mainWindow);
   }
   windowManager.setupIPCHandlers();
+
+  const discordConfig = getDiscordBotConfig();
+  discordBotManager.setConfig(discordConfig);
+  if (discordConfig.enabled) {
+    const startResult = await discordBotManager.start();
+    if (!startResult.success) {
+      console.error('[DiscordBot] Auto-start failed:', startResult.error || 'unknown error');
+    }
+  } else {
+    await discordBotManager.stop();
+  }
   
   if (!mainWindow) {
     throw new Error('Failed to create window');
@@ -1892,6 +2249,7 @@ async function initializeApp(): Promise<void> {
   // Load the UI HTML file
   const htmlPath = path.join(__dirname, '../renderer/index.html');
   await mainWindow.loadFile(htmlPath);
+  broadcastDiscordBotStatus(discordBotManager.getStatus());
 
   // Set up updater checks (only in production)
   if (app.isPackaged) {
@@ -1919,6 +2277,7 @@ app.on('window-all-closed', () => {
 
 app.on('before-quit', () => {
   trayManager.setQuitting(true);
+  void discordBotManager.stop();
 });
 
 app.on('activate', () => {
