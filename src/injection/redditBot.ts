@@ -2321,6 +2321,11 @@ export function buildRedditBotScript(config: Configuration): string {
     }
 
     const directRuleReply = findRuleReply(messageText);
+    if (directRuleReply) {
+      log('Using matched rule reply for u/' + (username || 'reddit_user'));
+      return directRuleReply;
+    }
+
     if (CONFIG?.ai?.enabled) {
       try {
         const reqId = 'rd-pm-' + Date.now() + '-' + Math.floor(Math.random() * 100000);
@@ -2332,21 +2337,10 @@ export function buildRedditBotScript(config: Configuration): string {
         const timeoutMs = Number(CONFIG?.ai?.requestTimeoutMs) || 30000;
         const reply = await waitForAiReply(reqId, timeoutMs);
         if (reply && String(reply).trim()) return String(reply).trim();
-        log('AI returned empty reply for u/' + (username || 'reddit_user') + ', trying keyword fallback');
+        log('AI returned empty reply for u/' + (username || 'reddit_user') + ', trying configured fallback');
       } catch (error) {
         log('AI PM reply generation failed: ' + error);
       }
-    }
-
-    if (directRuleReply) {
-      log('Using matched rule fallback for u/' + (username || 'reddit_user'));
-      return directRuleReply;
-    }
-
-    const fallbackRule = findRuleReply(messageText);
-    if (fallbackRule) {
-      log('Using keyword fallback reply for u/' + (username || 'reddit_user'));
-      return fallbackRule;
     }
 
     // If rules exist but nothing matched, use first non-empty reply as final fallback.
