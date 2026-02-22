@@ -3316,6 +3316,7 @@ const saveBtn = document.getElementById('save-btn')!;
 const logContent = document.getElementById('log-content')!;
 const logToggle = document.getElementById('log-toggle')!;
 const logHeader = document.getElementById('log-header')!;
+const logPanelEl = document.getElementById('log-panel') as HTMLDivElement | null;
 const logTabsContainerEl = document.getElementById('log-tabs-container') as HTMLDivElement | null;
 const logControls = document.getElementById('log-controls') as HTMLDivElement | null;
 const discordWebhookInput = document.getElementById('discord-webhook-input') as HTMLInputElement | null;
@@ -3787,10 +3788,22 @@ if (logListenBtn) {
   });
 }
 
+function updateSidebarBottomOffset(): void {
+  if (!logPanelEl) return;
+
+  const rect = logPanelEl.getBoundingClientRect();
+  const viewportHeight = window.innerHeight || document.documentElement.clientHeight;
+  const visibleHeight = Math.max(0, Math.round(viewportHeight - rect.top));
+  document.documentElement.style.setProperty('--log-panel-offset', `${visibleHeight}px`);
+}
+
+window.addEventListener('resize', updateSidebarBottomOffset);
+
 // Log panel toggle
 logHeader.addEventListener('click', () => {
   isLogCollapsed = !isLogCollapsed;
   logContent.classList.toggle('collapsed', isLogCollapsed);
+  updateSidebarBottomOffset();
   logToggle.textContent = isLogCollapsed ? '▲' : '▼';
 });
 
@@ -8712,6 +8725,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   await loadDiscordWebhook();
   updateDiscordControlsForActiveLogSession();
   addLog('Snappy initialized', 'highlight');
+  updateSidebarBottomOffset();
   
   // Set up resize handles for panels
   setupResizeHandles();
@@ -8782,6 +8796,10 @@ document.addEventListener('DOMContentLoaded', async () => {
   
   // Update webview reference
   webview = getActiveWebview();
+
+  // Recalculate after layout settles (modal/fonts/scrollbars can shift panel height).
+  setTimeout(updateSidebarBottomOffset, 50);
+  setTimeout(updateSidebarBottomOffset, 250);
 });
 
 
