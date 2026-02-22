@@ -13,6 +13,197 @@ function detectSiteFromHost(hostname: string | null | undefined): string {
   return 'unknown';
 }
 
+const VIRTUAL_MIC_LABEL_HINTS = [
+  'cable output',
+  'vb-audio',
+  'vb audio',
+  'virtual cable',
+  'vb-cable',
+  'vb cable'
+];
+
+interface VirtualMicLockResult {
+  installed?: boolean;
+  reused?: boolean;
+  reason?: string;
+  error?: string;
+}
+
+function shouldEnforceVirtualMicForHost(hostname: string | null | undefined): boolean {
+  const site = detectSiteFromHost(hostname);
+  return site === 'threads' || site === 'snapchat';
+}
+
+function hostFromUrlValue(urlValue: string | null | undefined): string {
+  try {
+    return new URL(String(urlValue || '')).hostname || '';
+  } catch {
+    return '';
+  }
+}
+
+function buildVirtualMicLockScript(): string {
+  const labelHintsJson = JSON.stringify(VIRTUAL_MIC_LABEL_HINTS);
+  return `
+(() => {
+  try {
+    const HINTS = ${labelHintsJson};
+    const LOCK_KEY = '__SNAPPY_VIRTUAL_MIC_LOCK__';
+    if (window[LOCK_KEY] === true) {
+      return { installed: true, reused: true };
+    }
+
+    const mediaDevices = navigator.mediaDevices;
+    if (!mediaDevices || typeof mediaDevices.getUserMedia !== 'function' || typeof mediaDevices.enumerateDevices !== 'function') {
+      return { installed: false, reason: 'media-devices-unavailable' };
+    }
+
+    const originalGetUserMedia = mediaDevices.getUserMedia.bind(mediaDevices);
+    const originalEnumerateDevices = mediaDevices.enumerateDevices.bind(mediaDevices);
+    let preferredDeviceId = '';
+    let refreshPromise = null;
+
+    function normalizeLabel(value) {
+      return String(value || '').toLowerCase();
+    }
+
+    function hasPreferredLabel(label) {
+      const haystack = normalizeLabel(label);
+      if (!haystack) return false;
+      for (const hint of HINTS) {
+        if (haystack.includes(hint)) return true;
+      }
+      return false;
+    }
+
+    function isAudioRequested(constraints) {
+      if (typeof constraints === 'undefined' || constraints === null) return true;
+      if (constraints === true) return true;
+      if (typeof constraints !== 'object') return false;
+      if (!Object.prototype.hasOwnProperty.call(constraints, 'audio')) return false;
+      return constraints.audio !== false;
+    }
+
+    function withPreferredAudioDevice(constraints, deviceId) {
+      if (constraints === true || typeof constraints === 'undefined' || constraints === null) {
+        return { audio: { deviceId: { exact: deviceId } }, video: false };
+      }
+      if (typeof constraints !== 'object') return constraints;
+      const nextConstraints = Object.assign({}, constraints);
+      const audioConstraints = nextConstraints.audio;
+      if (audioConstraints === true || typeof audioConstraints === 'undefined' || audioConstraints === null) {
+        nextConstraints.audio = { deviceId: { exact: deviceId } };
+      } else if (typeof audioConstraints === 'object') {
+        nextConstraints.audio = Object.assign({}, audioConstraints, { deviceId: { exact: deviceId } });
+      }
+      return nextConstraints;
+    }
+
+    async function resolvePreferredDevice(forceRefresh) {
+      if (!forceRefresh && preferredDeviceId) return preferredDeviceId;
+      if (!forceRefresh && refreshPromise) return refreshPromise;
+
+      refreshPromise = (async () => {
+        try {
+          const devices = await originalEnumerateDevices();
+          const inputs = Array.isArray(devices)
+            ? devices.filter(d => d && d.kind === 'audioinput')
+            : [];
+          const preferred = inputs.find(d => hasPreferredLabel(d.label));
+          preferredDeviceId = preferred && preferred.deviceId ? preferred.deviceId : '';
+          return preferredDeviceId;
+        } catch (_error) {
+          preferredDeviceId = '';
+          return '';
+        } finally {
+          refreshPromise = null;
+        }
+      })();
+
+      return refreshPromise;
+    }
+
+    if (typeof mediaDevices.addEventListener === 'function') {
+      mediaDevices.addEventListener('devicechange', () => {
+        preferredDeviceId = '';
+      });
+    }
+
+    const patchedGetUserMedia = async function(constraints) {
+      if (!isAudioRequested(constraints)) {
+        return originalGetUserMedia(constraints);
+      }
+
+      const deviceId = await resolvePreferredDevice(false);
+      if (!deviceId) {
+        return originalGetUserMedia(constraints);
+      }
+
+      const patchedConstraints = withPreferredAudioDevice(constraints, deviceId);
+      return originalGetUserMedia(patchedConstraints);
+    };
+
+    patchedGetUserMedia.toString = function() {
+      return originalGetUserMedia.toString();
+    };
+
+    mediaDevices.getUserMedia = patchedGetUserMedia;
+
+    window.__SNAPPY_VIRTUAL_MIC_REFRESH__ = function() {
+      preferredDeviceId = '';
+      return resolvePreferredDevice(true);
+    };
+
+    window.__SNAPPY_VIRTUAL_MIC_STATUS__ = function() {
+      return {
+        preferredDeviceId: preferredDeviceId || null,
+        labelHints: HINTS.slice()
+      };
+    };
+
+    window[LOCK_KEY] = true;
+    return { installed: true, reused: false };
+  } catch (error) {
+    return {
+      installed: false,
+      error: String(error && error.message ? error.message : error)
+    };
+  }
+})()
+`;
+}
+
+async function ensureVirtualMicLockForWebview(
+  targetWebview: Electron.WebviewTag,
+  sessionId: string | null = null,
+  hostnameHint?: string
+): Promise<void> {
+  let hostname = hostnameHint || '';
+  if (!hostname) {
+    try {
+      hostname = await targetWebview.executeJavaScript('location.hostname || ""');
+    } catch {
+      return;
+    }
+  }
+
+  if (!shouldEnforceVirtualMicForHost(hostname)) return;
+
+  try {
+    const result = await targetWebview.executeJavaScript(buildVirtualMicLockScript()) as VirtualMicLockResult;
+    if (sessionId && result?.installed === true && result.reused !== true) {
+      addLog('Virtual mic lock enabled (VB-CABLE preferred)', 'info', sessionId);
+    }
+    if (sessionId && result?.installed !== true && result?.reason !== 'media-devices-unavailable' && result?.error) {
+      addLog(`Virtual mic lock failed: ${result.error}`, 'error', sessionId);
+    }
+  } catch (error) {
+    if (sessionId) {
+      addLog(`Virtual mic lock injection failed: ${String(error)}`, 'error', sessionId);
+    }
+  }
+}
+
 // Inlined Threads bot script (avoiding ES6 imports in browser context)
 function buildThreadsBotScript(config: any): string {
   const serializedConfig = JSON.stringify(config || {});
@@ -2306,6 +2497,7 @@ function activateSession(sessionId: string, suppressLog: boolean = false) {
   if (wv) {
     wv.classList.remove('hidden');
     webview = wv; // Update global reference
+    void ensureVirtualMicLockForWebview(wv, sessionId);
   }
   
   // Highlight tab
@@ -5422,6 +5614,8 @@ async function injectBotIntoWebview() {
     } catch {
       hostname = '';
     }
+
+    await ensureVirtualMicLockForWebview(currentWebview, webviewSessionId || null, hostname);
     
     addLog(`Injecting bot for host: ${hostname || 'unknown'}`, 'info', webviewSessionId);
 
@@ -8377,10 +8571,12 @@ function setupWebviewReadyHandler(wv: Electron.WebviewTag) {
 
   wv.addEventListener('dom-ready', async () => {
     const sessionId = getSessionIdForWebview(wv) || undefined;
+    const hostname = hostFromUrlValue(wv.getURL());
     if (sessionId) {
       await refreshSessionProcessPid(sessionId, wv);
     }
     addLog('Page loaded: ' + wv.getURL(), 'info', sessionId);
+    await ensureVirtualMicLockForWebview(wv, sessionId || null, hostname);
   
     // Inject compatibility fixes (wrapped in try-catch to avoid errors)
     wv.executeJavaScript(`
@@ -10144,6 +10340,7 @@ async function injectBotIntoSpecificWebview(webview: Electron.WebviewTag, sessio
   try {
     const hostname = new URL(webview.getURL()).hostname;
     const site = detectSiteFromHost(hostname);
+    await ensureVirtualMicLockForWebview(webview, sessionId, hostname);
     const siteResolvedConfig = applySiteSettingsToConfig(config, hostname);
     const resolvedConfig = applyRuntimeLlamaOverrideToConfig(sessionId, siteResolvedConfig as Config);
     
