@@ -11,7 +11,8 @@ export type DiscordCommand =
   | { type: 'list' }
   | { type: 'status' }
   | { type: 'start'; target: { kind: 'all' } | { kind: 'platform'; platform: PlatformTarget } | { kind: 'session'; ref: string } }
-  | { type: 'stop'; target: { kind: 'all' } | { kind: 'platform'; platform: PlatformTarget } | { kind: 'session'; ref: string } };
+  | { type: 'stop'; target: { kind: 'all' } | { kind: 'platform'; platform: PlatformTarget } | { kind: 'session'; ref: string } }
+  | { type: 'logs'; pid: number; durationMs: number; durationLabel: string };
 
 export interface DiscordBotStatus {
   state: DiscordBotState;
@@ -29,6 +30,84 @@ export interface DiscordCommandContext {
 type DiscordCommandExecutor = (command: DiscordCommand, context: DiscordCommandContext) => Promise<string>;
 
 const PLATFORM_SET: Set<string> = new Set(['instagram', 'snapchat', 'threads', 'reddit']);
+const LOG_DURATION_MAX_MS = 7 * 24 * 60 * 60 * 1000;
+
+function parseDurationToken(token: string): { ms: number; label: string } | null {
+  const normalized = String(token || '').trim().toLowerCase();
+  const matched = normalized.match(/^(\d+)(s|m|h|d)$/);
+  if (!matched) return null;
+
+  const value = parseInt(matched[1], 10);
+  if (!Number.isFinite(value) || value <= 0) return null;
+
+  const unit = matched[2];
+  const multiplier =
+    unit === 's' ? 1000 :
+    unit === 'm' ? 60 * 1000 :
+    unit === 'h' ? 60 * 60 * 1000 :
+    24 * 60 * 60 * 1000;
+
+  const ms = value * multiplier;
+  if (!Number.isFinite(ms) || ms <= 0 || ms > LOG_DURATION_MAX_MS) {
+    return null;
+  }
+
+  return { ms, label: `${value}${unit}` };
+}
+
+function parseLogsCommand(tokens: string[]): { ok: true; command: DiscordCommand } | { ok: false; error: string } {
+  if (!Array.isArray(tokens) || tokens.length === 0) {
+    return { ok: false, error: 'Usage: @snappy logs <pid> <1m|5m|10m|1h|2h>' };
+  }
+
+  let pid: number | null = null;
+  let duration: { ms: number; label: string } | null = null;
+
+  for (const rawToken of tokens) {
+    const token = String(rawToken || '').trim().toLowerCase();
+    if (!token || token === 'pid') continue;
+
+    if (!duration) {
+      const parsedDuration = parseDurationToken(token);
+      if (parsedDuration) {
+        duration = parsedDuration;
+        continue;
+      }
+    }
+
+    if (pid === null && /^\d+$/.test(token)) {
+      const parsedPid = parseInt(token, 10);
+      if (Number.isFinite(parsedPid) && parsedPid > 0) {
+        pid = parsedPid;
+        continue;
+      }
+    }
+  }
+
+  if (pid === null || !duration) {
+    return { ok: false, error: 'Usage: @snappy logs <pid> <1m|5m|10m|1h|2h>' };
+  }
+
+  return {
+    ok: true,
+    command: {
+      type: 'logs',
+      pid,
+      durationMs: duration.ms,
+      durationLabel: duration.label
+    }
+  };
+}
+
+function truncateDiscordReply(text: string, maxLength: number = 1900): string {
+  const value = String(text || '');
+  if (value.length <= maxLength) {
+    return value;
+  }
+  const suffix = '\n...(truncated)';
+  const keep = Math.max(1, maxLength - suffix.length);
+  return `${value.slice(0, keep)}${suffix}`;
+}
 
 function normalizeConfig(input: Partial<DiscordBotConfig> | undefined | null): DiscordBotConfig {
   const rawTrusted = Array.isArray(input?.trustedUserIds) ? input?.trustedUserIds : [];
@@ -100,6 +179,10 @@ export function parseDiscordCommand(text: string): { ok: true; command: DiscordC
 
   if (action === 'start' || action === 'stop') {
     return { ok: true, command: parseTarget(action, tokens.slice(1)) };
+  }
+
+  if (action === 'logs' || action === 'log') {
+    return parseLogsCommand(tokens.slice(1));
   }
 
   return { ok: false, error: 'Unknown command' };
@@ -235,7 +318,7 @@ export class DiscordBotManager extends EventEmitter {
     const stripped = stripBotMention(message.content, client.user.id);
     const parsed = parseDiscordCommand(stripped);
     if (!parsed.ok) {
-      await message.reply('Unknown command. Try `@snappy help`.');
+      await message.reply(`${parsed.error}. Try \`@snappy help\`.`);
       return;
     }
 
@@ -247,11 +330,10 @@ export class DiscordBotManager extends EventEmitter {
 
     try {
       const response = await this.executor(parsed.command, context);
-      await message.reply(response);
+      await message.reply(truncateDiscordReply(response));
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
       await message.reply(`Command failed: ${errorMessage}`);
     }
   }
 }
-

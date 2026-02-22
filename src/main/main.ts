@@ -44,8 +44,12 @@ const sessionManager = new SessionManager(
 
 interface DiscordBotCommandRequestPayload {
   requestId: string;
-  action: 'start' | 'stop';
-  sessionIds: string[];
+  action: 'start' | 'stop' | 'logs';
+  sessionIds?: string[];
+  sessionId?: string;
+  pid?: number;
+  durationMs?: number;
+  durationLabel?: string;
 }
 
 interface DiscordBotCommandResultSession {
@@ -58,6 +62,7 @@ interface DiscordBotCommandResultPayload {
   requestId: string;
   success: boolean;
   results: DiscordBotCommandResultSession[];
+  response?: string;
   error?: string;
 }
 
@@ -294,6 +299,20 @@ function resolveTargetSessions(command: Extract<DiscordCommand, { type: 'start' 
     };
   }
 
+  const pidMatch = ref.match(/^(?:pid[:\s]*)?(\d+)$/i);
+  if (pidMatch) {
+    const parsedPid = parseInt(pidMatch[1], 10);
+    if (Number.isFinite(parsedPid) && parsedPid > 0) {
+      const sessionIdForPid = Array.from(sessionProcessPids.entries()).find(([, pid]) => pid === parsedPid)?.[0];
+      if (sessionIdForPid) {
+        const pidSession = sessions.find(session => session.id === sessionIdForPid);
+        if (pidSession) {
+          return { sessions: [pidSession], descriptor: `session ${getSessionLabel(pidSession)} (PID ${parsedPid})` };
+        }
+      }
+    }
+  }
+
   if (/^\d+$/.test(ref)) {
     const index = parseInt(ref, 10);
     if (index >= 1 && index <= sessions.length) {
@@ -315,7 +334,11 @@ function broadcastDiscordBotStatus(status: DiscordBotStatus): void {
   });
 }
 
-async function requestRendererBotCommand(action: 'start' | 'stop', sessionIds: string[]): Promise<DiscordBotCommandResultPayload> {
+async function requestRendererBotCommand(
+  payloadInput:
+    | { action: 'start' | 'stop'; sessionIds: string[] }
+    | { action: 'logs'; pid: number; durationMs: number; durationLabel: string; sessionId?: string }
+): Promise<DiscordBotCommandResultPayload> {
   if (!mainWindow || mainWindow.isDestroyed()) {
     return {
       requestId: '',
@@ -328,8 +351,7 @@ async function requestRendererBotCommand(action: 'start' | 'stop', sessionIds: s
   const requestId = `discord-cmd-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   const payload: DiscordBotCommandRequestPayload = {
     requestId,
-    action,
-    sessionIds
+    ...payloadInput
   };
 
   return await new Promise<DiscordBotCommandResultPayload>((resolve) => {
@@ -354,6 +376,7 @@ async function executeDiscordCommand(command: DiscordCommand, _context: DiscordC
       'Commands:',
       '- @snappy list',
       '- @snappy status',
+      '- @snappy logs <pid> <1m|5m|10m|1h|2h>',
       '- @snappy start all',
       '- @snappy stop all',
       '- @snappy start platform <instagram|snapchat|threads|reddit>',
@@ -367,6 +390,23 @@ async function executeDiscordCommand(command: DiscordCommand, _context: DiscordC
     return summarizeSessions();
   }
 
+  if (command.type === 'logs') {
+    const sessionIdForPid = Array.from(sessionProcessPids.entries()).find(([, pid]) => pid === command.pid)?.[0];
+    const rendererResult = await requestRendererBotCommand({
+      action: 'logs',
+      pid: command.pid,
+      durationMs: command.durationMs,
+      durationLabel: command.durationLabel,
+      sessionId: sessionIdForPid
+    });
+
+    if (!rendererResult.success) {
+      return `Failed to fetch logs for PID ${command.pid}: ${rendererResult.error || 'Unknown error'}`;
+    }
+
+    return rendererResult.response || `No logs found for PID ${command.pid} in last ${command.durationLabel}.`;
+  }
+
   const resolved = resolveTargetSessions(command);
   if (resolved.error) {
     return resolved.error;
@@ -378,7 +418,10 @@ async function executeDiscordCommand(command: DiscordCommand, _context: DiscordC
   const action = command.type;
   const actionPastTense = action === 'start' ? 'started' : 'stopped';
   const requestedSessions = resolved.sessions.map(session => session.id);
-  const rendererResult = await requestRendererBotCommand(action, requestedSessions);
+  const rendererResult = await requestRendererBotCommand({
+    action,
+    sessionIds: requestedSessions
+  });
 
   if (!rendererResult.success && rendererResult.results.length === 0) {
     return `Failed to ${action} ${resolved.descriptor}: ${rendererResult.error || 'Unknown error'}`;

@@ -3598,6 +3598,7 @@ interface LogEntry {
 const sessionLogs = new Map<string, LogEntry[]>();
 let activeLogSessionId: string | null = null;
 let discordWebhookUrl = '';
+const MAX_LOG_ENTRIES_PER_SESSION = 2000;
 
 type DiscordAlertKind = 'message-sent' | 'scheduled-post' | 'error';
 
@@ -3815,8 +3816,8 @@ function addLog(message: string, type: 'info' | 'success' | 'error' | 'highlight
   const logs = sessionLogs.get(sessionId)!;
   logs.push(logEntry);
   
-  // Keep only last 100 entries per session
-  if (logs.length > 100) {
+  // Keep a larger rolling buffer so Discord time-window log queries remain useful.
+  if (logs.length > MAX_LOG_ENTRIES_PER_SESSION) {
     logs.shift();
   }
   
@@ -9801,14 +9802,19 @@ interface DiscordBotStatusView {
 
 interface DiscordBotCommandRequestView {
   requestId: string;
-  action: 'start' | 'stop';
-  sessionIds: string[];
+  action: 'start' | 'stop' | 'logs';
+  sessionIds?: string[];
+  sessionId?: string;
+  pid?: number;
+  durationMs?: number;
+  durationLabel?: string;
 }
 
 interface DiscordBotCommandResultView {
   requestId: string;
   success: boolean;
   results: Array<{ sessionId: string; status: 'success' | 'error' | 'skipped'; message: string }>;
+  response?: string;
   error?: string;
 }
 
@@ -10094,10 +10100,116 @@ async function executeSessionBotActionForDiscord(sessionId: string, action: 'sta
   }
 }
 
+function formatDiscordLogTimestamp(value: Date): string {
+  return value.toLocaleTimeString();
+}
+
+function buildDiscordLogsResponse(
+  sessionId: string,
+  pid: number,
+  durationMs: number,
+  durationLabelRaw: string | undefined
+): string {
+  const durationLabel = String(durationLabelRaw || '').trim() || `${Math.max(1, Math.round(durationMs / 60000))}m`;
+  const sessionName = getSessionName(sessionId);
+  const source = sessionLogs.get(sessionId) || [];
+  const cutoff = Date.now() - Math.max(1, durationMs);
+
+  const filtered = source.filter((entry) => {
+    const timeMs = entry.timestamp instanceof Date ? entry.timestamp.getTime() : Number.NaN;
+    return Number.isFinite(timeMs) && timeMs >= cutoff;
+  });
+
+  if (filtered.length === 0) {
+    return `Logs for ${sessionName} | PID ${pid} | last ${durationLabel}\nNo entries in this time window.`;
+  }
+
+  const header = `Logs for ${sessionName} | PID ${pid} | last ${durationLabel}`;
+  const formattedLines = filtered.map((entry) => {
+    const timeText = formatDiscordLogTimestamp(entry.timestamp);
+    const level = String(entry.type || 'info').toUpperCase();
+    return `[${timeText}] [${level}] ${entry.message}`;
+  });
+
+  const MAX_REPLY_LEN = 1850;
+  const lines = formattedLines.slice(-80);
+  let visible = [...lines];
+  let response = `${header}\n${visible.join('\n')}`;
+
+  while (response.length > MAX_REPLY_LEN && visible.length > 1) {
+    visible.shift();
+    response = `${header}\n${visible.join('\n')}`;
+  }
+
+  if (formattedLines.length > visible.length) {
+    const omitted = formattedLines.length - visible.length;
+    const suffix = `\n... (${omitted} older line${omitted === 1 ? '' : 's'} omitted)`;
+    if (response.length + suffix.length <= MAX_REPLY_LEN) {
+      response += suffix;
+    }
+  }
+
+  return response;
+}
+
+function buildDiscordLogsCommandResult(request: DiscordBotCommandRequestView): DiscordBotCommandResultView {
+  const pid = typeof request.pid === 'number' ? request.pid : Number(request.pid);
+  const durationMs = typeof request.durationMs === 'number' ? request.durationMs : Number(request.durationMs);
+  const explicitSessionId = typeof request.sessionId === 'string' ? request.sessionId.trim() : '';
+
+  if (!Number.isFinite(pid) || pid <= 0) {
+    return {
+      requestId: request.requestId,
+      success: false,
+      error: 'Invalid PID for logs command',
+      results: []
+    };
+  }
+
+  if (!Number.isFinite(durationMs) || durationMs <= 0) {
+    return {
+      requestId: request.requestId,
+      success: false,
+      error: 'Invalid duration for logs command',
+      results: []
+    };
+  }
+
+  const sessionIdMatch = explicitSessionId || Array.from(sessionProcessPids.entries()).find(([, value]) => value === pid)?.[0];
+  if (!sessionIdMatch) {
+    return {
+      requestId: request.requestId,
+      success: false,
+      error: `No active session found for PID ${pid}`,
+      results: []
+    };
+  }
+
+  return {
+    requestId: request.requestId,
+    success: true,
+    response: buildDiscordLogsResponse(sessionIdMatch, pid, durationMs, request.durationLabel),
+    results: []
+  };
+}
+
 async function handleDiscordBotCommandRequest(request: DiscordBotCommandRequestView): Promise<DiscordBotCommandResultView> {
-  if (!request || !request.requestId || !Array.isArray(request.sessionIds)) {
+  if (!request || !request.requestId) {
     return {
       requestId: request?.requestId || '',
+      success: false,
+      error: 'Invalid request payload',
+      results: []
+    };
+  }
+
+  if (request.action === 'logs') {
+    return buildDiscordLogsCommandResult(request);
+  }
+
+  if (!Array.isArray(request.sessionIds)) {
+    return {
+      requestId: request.requestId,
       success: false,
       error: 'Invalid request payload',
       results: []

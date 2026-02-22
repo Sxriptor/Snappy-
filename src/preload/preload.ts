@@ -429,7 +429,15 @@ const discordBotAPI = {
   /**
    * Listen for command execution requests from main process
    */
-  onCommandRequest: (callback: (payload: { requestId: string; action: 'start' | 'stop'; sessionIds: string[] }) => void): void => {
+  onCommandRequest: (callback: (payload: {
+    requestId: string;
+    action: 'start' | 'stop' | 'logs';
+    sessionIds?: string[];
+    sessionId?: string;
+    pid?: number;
+    durationMs?: number;
+    durationLabel?: string;
+  }) => void): void => {
     ipcRenderer.on('discordBot:commandRequest', (_, payload) => callback(payload));
   },
 
@@ -440,6 +448,7 @@ const discordBotAPI = {
     requestId: string;
     success: boolean;
     results: Array<{ sessionId: string; status: 'success' | 'error' | 'skipped'; message: string }>;
+    response?: string;
     error?: string;
   }): void => {
     ipcRenderer.send('discordBot:commandResult', payload);
