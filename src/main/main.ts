@@ -30,6 +30,8 @@ let isInjected: boolean = false;
 let aiBrain: AIBrain | null = null;
 let isProcessingReply: boolean = false;
 let macManualUpdateUrl: string | null = null;
+const sessionProcessPids = new Map<string, number>();
+const trackedWebviewSessions = new Map<number, { sessionId: string; pid: number | null }>();
 
 // Multi-session managers
 const fingerprintGenerator = new FingerprintGenerator();
@@ -99,6 +101,114 @@ function getSessionLabel(session: Session): string {
   return `${session.name} (${shortId})`;
 }
 
+function getWebContentsProcessId(contents: Electron.WebContents): number | null {
+  try {
+    const pid = contents.getOSProcessId();
+    return Number.isFinite(pid) && pid > 0 ? pid : null;
+  } catch {
+    return null;
+  }
+}
+
+function getWebContentsPartitionCandidates(contents: Electron.WebContents): string[] {
+  const candidates: string[] = [];
+  const getLastPreferences = (contents as Electron.WebContents & {
+    getLastWebPreferences?: () => { partition?: unknown } | null;
+  }).getLastWebPreferences;
+  const lastPreferences = typeof getLastPreferences === 'function' ? getLastPreferences.call(contents) : null;
+  const preferredPartition = typeof lastPreferences?.partition === 'string' ? lastPreferences.partition.trim() : '';
+  if (preferredPartition.length > 0) {
+    candidates.push(preferredPartition);
+  }
+
+  const storagePath = typeof contents.session.storagePath === 'string' ? contents.session.storagePath.trim() : '';
+  if (storagePath.length > 0) {
+    const normalizedStoragePath = storagePath.replace(/\\/g, '/');
+    const pathParts = normalizedStoragePath.split('/').filter(Boolean);
+    const lastSegment = pathParts.length > 0 ? pathParts[pathParts.length - 1] : '';
+    if (lastSegment.length > 0) {
+      candidates.push(lastSegment);
+      if (!lastSegment.startsWith('persist:')) {
+        candidates.push(`persist:${lastSegment}`);
+      }
+    }
+  }
+
+  return Array.from(new Set(candidates));
+}
+
+function resolveSessionForWebContents(contents: Electron.WebContents): Session | undefined {
+  const sessions = sessionManager.getAllSessions();
+  const candidates = getWebContentsPartitionCandidates(contents);
+
+  for (const candidate of candidates) {
+    const normalizedCandidate = candidate.toLowerCase();
+    const candidateBare = normalizedCandidate.replace(/^persist:/, '');
+    const matched = sessions.find(session => {
+      const partition = String(session.partition || '').toLowerCase();
+      const partitionBare = partition.replace(/^persist:/, '');
+      return (
+        partition === normalizedCandidate ||
+        partitionBare === candidateBare ||
+        partition.includes(candidateBare)
+      );
+    });
+
+    if (matched) {
+      return matched;
+    }
+  }
+
+  return undefined;
+}
+
+function trackWebviewSession(contents: Electron.WebContents, session: Session): void {
+  const pid = getWebContentsProcessId(contents);
+  trackedWebviewSessions.set(contents.id, { sessionId: session.id, pid });
+  if (pid !== null) {
+    sessionProcessPids.set(session.id, pid);
+  }
+}
+
+function refreshTrackedWebviewPid(contents: Electron.WebContents): void {
+  const tracked = trackedWebviewSessions.get(contents.id);
+  if (!tracked) {
+    return;
+  }
+
+  const pid = getWebContentsProcessId(contents);
+  trackedWebviewSessions.set(contents.id, { ...tracked, pid });
+  if (pid !== null) {
+    sessionProcessPids.set(tracked.sessionId, pid);
+  }
+}
+
+function cleanupTrackedWebviewSession(contents: Electron.WebContents): void {
+  const tracked = trackedWebviewSessions.get(contents.id);
+  if (!tracked) {
+    return;
+  }
+
+  trackedWebviewSessions.delete(contents.id);
+  const currentPid = sessionProcessPids.get(tracked.sessionId);
+  if (typeof currentPid !== 'number') {
+    return;
+  }
+
+  if (tracked.pid === null || currentPid === tracked.pid) {
+    sessionProcessPids.delete(tracked.sessionId);
+  }
+}
+
+function clearTrackedSessionPid(sessionId: string): void {
+  sessionProcessPids.delete(sessionId);
+  for (const [contentsId, tracked] of trackedWebviewSessions.entries()) {
+    if (tracked.sessionId === sessionId) {
+      trackedWebviewSessions.delete(contentsId);
+    }
+  }
+}
+
 function summarizeSessions(): string {
   const sessions = sessionManager.getAllSessions();
   const activeSessions = sessions.filter(session => session.state === 'active');
@@ -118,8 +228,21 @@ function summarizeSessions(): string {
   const lines = Array.from(byPlatform.entries())
     .sort((a, b) => a[0].localeCompare(b[0]))
     .map(([platform, stats]) => `${platform}: ${stats.total} (${stats.running} running)`);
+  const sessionPidLines = sessions
+    .slice()
+    .sort((a, b) => a.createdAt - b.createdAt)
+    .map((session, index) => {
+      const platform = detectPlatformFromSession(session);
+      const pid = sessionProcessPids.get(session.id);
+      const pidText = typeof pid === 'number' && pid > 0 ? String(pid) : '-';
+      return `${index + 1}. ${session.name} [${platform}] PID: ${pidText}`;
+    });
 
-  return lines.length > 0 ? `${header}\n${lines.join('\n')}` : `${header}\nNo sessions configured.`;
+  if (sessions.length === 0) {
+    return `${header}\nNo sessions configured.`;
+  }
+
+  return `${header}\n${lines.join('\n')}\nSession PIDs:\n${sessionPidLines.join('\n')}`;
 }
 
 function resolveTargetSessions(command: Extract<DiscordCommand, { type: 'start' | 'stop' }>): { sessions: Session[]; descriptor: string; error?: string } {
@@ -464,10 +587,10 @@ export function createWindow(): BrowserWindow {
 function setupWebviewHandling(): void {
   app.on('web-contents-created', (_event, contents) => {
     if (contents.getType() === 'webview') {
-      // Get the partition to find the associated session
-      const partition = contents.session.storagePath?.split('Partitions/')[1] || '';
-      const sessions = sessionManager.getAllSessions();
-      const matchingSession = sessions.find(s => s.partition.includes(partition));
+      let matchingSession = resolveSessionForWebContents(contents);
+      if (matchingSession) {
+        trackWebviewSession(contents, matchingSession);
+      }
       
       // Use session fingerprint or default Chrome UA
       const userAgent = matchingSession?.fingerprint.userAgent || CHROME_USER_AGENT;
@@ -487,6 +610,14 @@ function setupWebviewHandling(): void {
 
       // Inject fingerprint script on DOM ready
       contents.on('dom-ready', async () => {
+        if (!matchingSession) {
+          matchingSession = resolveSessionForWebContents(contents);
+        }
+        if (matchingSession) {
+          trackWebviewSession(contents, matchingSession);
+          refreshTrackedWebviewPid(contents);
+        }
+
         if (matchingSession) {
           try {
             const fingerprintScript = createFingerprintInjectorScript({
@@ -499,6 +630,14 @@ function setupWebviewHandling(): void {
             console.error('[Shell] Error injecting fingerprint:', error);
           }
         }
+      });
+
+      contents.on('render-process-gone', () => {
+        cleanupTrackedWebviewSession(contents);
+      });
+
+      contents.once('destroyed', () => {
+        cleanupTrackedWebviewSession(contents);
       });
 
       console.log('[Shell] Webview configured with fingerprint spoofing');
@@ -1716,6 +1855,7 @@ export function setupIPCHandlers(): void {
 
   ipcMain.handle('session:delete', async (event, sessionId: string) => {
     try {
+      clearTrackedSessionPid(sessionId);
       const result = sessionManager.deleteSession(sessionId);
       if (result && mainWindow) {
         mainWindow.webContents.send('session:deleted', sessionId);
