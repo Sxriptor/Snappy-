@@ -34,6 +34,7 @@ export function buildThreadsBotScript(config: Configuration): string {
   let refreshInterval = null;
   let isPostingScheduledContent = false;
   let replyPauseUntil = 0;
+  let secondThreadPinFocusGuards = null;
   const STARTUP_REFRESH_KEY = '__snappy_threads_startup_refresh_done__';
   const THREADS_POSTED_STATE_KEY = '__snappy_threads_scheduler_posted_v2__';
 
@@ -97,6 +98,75 @@ export function buildThreadsBotScript(config: Configuration): string {
     if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
     const rect = el.getBoundingClientRect();
     return rect.width > 0 && rect.height > 0;
+  }
+
+  function getFocusableElementsForSecondThreadPin() {
+    const selector = [
+      'a[href]',
+      'button:not([disabled])',
+      'input:not([disabled]):not([type="hidden"])',
+      'select:not([disabled])',
+      'textarea:not([disabled])',
+      '[contenteditable="true"]',
+      '[tabindex]:not([tabindex="-1"])'
+    ].join(', ');
+
+    return Array.from(document.querySelectorAll(selector))
+      .filter(node => node instanceof HTMLElement)
+      .filter(node => isVisibleElement(node))
+      .filter(node => node.getAttribute('aria-disabled') !== 'true')
+      .filter(node => node.getAttribute('data-snappy-secondthreadpin-guard') !== 'true');
+  }
+
+  function moveSecondThreadPinFocus(direction) {
+    const focusables = getFocusableElementsForSecondThreadPin();
+    if (focusables.length === 0) return;
+    const target = direction < 0 ? focusables[focusables.length - 1] : focusables[0];
+    if (!(target instanceof HTMLElement)) return;
+    try {
+      target.focus({ preventScroll: false });
+    } catch {
+      try { target.focus(); } catch {}
+    }
+  }
+
+  function setSecondThreadPinTabTrap(enabled) {
+    if (enabled) {
+      if (secondThreadPinFocusGuards) return;
+      if (!document.body) return;
+
+      const makeGuard = () => {
+        const guard = document.createElement('button');
+        guard.type = 'button';
+        guard.tabIndex = 0;
+        guard.setAttribute('aria-hidden', 'true');
+        guard.setAttribute('data-snappy-secondthreadpin-guard', 'true');
+        guard.style.position = 'fixed';
+        guard.style.left = '-9999px';
+        guard.style.top = '0';
+        guard.style.width = '1px';
+        guard.style.height = '1px';
+        guard.style.opacity = '0';
+        guard.style.pointerEvents = 'none';
+        guard.style.zIndex = '-1';
+        return guard;
+      };
+
+      const endGuard = makeGuard();
+      const onEndFocus = () => moveSecondThreadPinFocus(1);
+      endGuard.addEventListener('focus', onEndFocus);
+
+      document.body.appendChild(endGuard);
+      secondThreadPinFocusGuards = { endGuard, onEndFocus };
+      return;
+    }
+
+    if (!secondThreadPinFocusGuards) return;
+    try {
+      secondThreadPinFocusGuards.endGuard.removeEventListener('focus', secondThreadPinFocusGuards.onEndFocus);
+      if (secondThreadPinFocusGuards.endGuard.parentElement) secondThreadPinFocusGuards.endGuard.parentElement.removeChild(secondThreadPinFocusGuards.endGuard);
+    } catch {}
+    secondThreadPinFocusGuards = null;
   }
 
   function hashString(input) {
@@ -476,53 +546,66 @@ export function buildThreadsBotScript(config: Configuration): string {
       buffer.push({ kind: 'dispatch', type: 'keyUp', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13, delayMs: 170 });
     };
 
-    log('Scheduler: running second-thread follow-up flow (secondthread=true)');
-    const opened = await openCreateFromThreadsLogo();
-    if (!opened) {
-      log('Scheduler: second-thread follow-up failed (Threads icon click 1)');
-      return false;
-    }
-
-    await sleep(900);
-    // Ensure keyboard target has focus before long navigation.
+    log('Scheduler: running secondthreadpin flow (secondthread=true)');
+    setSecondThreadPinTabTrap(true);
     try {
-      await requestThreadsPointerClickAt(Math.max(16, Math.floor(window.innerWidth / 2)), Math.max(16, Math.floor(window.innerHeight / 2)), 6000);
-    } catch {}
+      const opened = await openCreateFromThreadsLogo();
+      if (!opened) {
+        log('Scheduler: secondthreadpin failed (Threads icon click 1)');
+        return false;
+      }
 
-    const phase = [];
-    for (let i = 0; i < 3; i++) pushShiftTab(phase);
-    pushEnter(phase);
-    const firstTabCount = hasImage ? 30 : 30;
-    for (let i = 0; i < firstTabCount; i++) pushTab(phase);
-    pushEnter(phase);
-    for (let i = 0; i < 17; i++) pushTab(phase);
-    pushSpace(phase);
-    for (let i = 0; i < 3; i++) pushTab(phase);
-    pushSpace(phase);
+      await sleep(850);
 
-    let phaseOk = await requestThreadsKeyboardSequence(phase, 60000);
-    if (!phaseOk) {
-      // One retry after refocus to avoid occasional key-routing misses.
-      try {
-        await requestThreadsPointerClickAt(Math.max(16, Math.floor(window.innerWidth / 2)), Math.max(16, Math.floor(window.innerHeight / 2)), 6000);
-      } catch {}
-      await sleep(500);
-      phaseOk = await requestThreadsKeyboardSequence(phase, 60000);
+      // Phase 1: exactly as manual flow: Shift+Tab x3, then Enter.
+      const phaseOne = [];
+      for (let i = 0; i < 3; i++) pushShiftTab(phaseOne);
+      pushEnter(phaseOne);
+      const phaseOneOk = await requestThreadsKeyboardSequence(phaseOne, 22000);
+      if (!phaseOneOk) {
+        log('Scheduler: secondthreadpin failed at phase 1 (Shift+Tab x3, Enter)');
+        return false;
+      }
+
+      await sleep(1100);
+
+      // Phase 2A: Tab x30 -> Enter.
+      const phaseTwoA = [];
+      const firstTabCount = hasImage ? 30 : 30;
+      for (let i = 0; i < firstTabCount; i++) pushTab(phaseTwoA);
+      pushEnter(phaseTwoA);
+      const phaseTwoAOk = await requestThreadsKeyboardSequence(phaseTwoA, 42000);
+      if (!phaseTwoAOk) {
+        log('Scheduler: secondthreadpin failed at phase 2A (Tab x30, Enter)');
+        return false;
+      }
+
+      await sleep(1200);
+
+      // Phase 2B: Tab x17 -> Space -> Tab x3 -> Space.
+      const phaseTwoB = [];
+      for (let i = 0; i < 17; i++) pushTab(phaseTwoB);
+      pushSpace(phaseTwoB);
+      for (let i = 0; i < 3; i++) pushTab(phaseTwoB);
+      pushSpace(phaseTwoB);
+      const phaseTwoBOk = await requestThreadsKeyboardSequence(phaseTwoB, 42000);
+      if (!phaseTwoBOk) {
+        log('Scheduler: secondthreadpin failed at phase 2B (Tab/Space sequence)');
+        return false;
+      }
+
+      await sleep(700);
+      const closed = await openCreateFromThreadsLogo();
+      if (!closed) {
+        log('Scheduler: secondthreadpin failed (Threads icon click 2)');
+        return false;
+      }
+
+      log('Scheduler: secondthreadpin flow complete (image=' + (hasImage ? 'yes' : 'no') + ')');
+      return true;
+    } finally {
+      setSecondThreadPinTabTrap(false);
     }
-    if (!phaseOk) {
-      log('Scheduler: second-thread follow-up failed at keyboard sequence');
-      return false;
-    }
-
-    await sleep(700);
-    const closed = await openCreateFromThreadsLogo();
-    if (!closed) {
-      log('Scheduler: second-thread follow-up failed (Threads icon click 2)');
-      return false;
-    }
-
-    log('Scheduler: second-thread follow-up flow complete (image=' + (hasImage ? 'yes' : 'no') + ')');
-    return true;
   }
 
   function isPostSubmissionLikelyConfirmed() {
@@ -537,6 +620,70 @@ export function buildThreadsBotScript(config: Configuration): string {
       return looksLikePost;
     });
     return visiblePostButtons.length === 0;
+  }
+
+  function findVisiblePostSubmitControl() {
+    const controls = Array.from(document.querySelectorAll('button, div[role="button"], a, [tabindex]'));
+    for (const node of controls) {
+      if (!(node instanceof HTMLElement)) continue;
+      if (!isVisibleElement(node)) continue;
+      const disabled = node.getAttribute('aria-disabled') === 'true' || node.getAttribute('disabled') !== null;
+      if (disabled) continue;
+      const text = String(node.textContent || '').trim().toLowerCase();
+      const aria = String(node.getAttribute('aria-label') || '').trim().toLowerCase();
+      const exactPost = text === 'post' || aria === 'post';
+      const startsWithPost = text.startsWith('post ') || aria.startsWith('post ');
+      if (exactPost || startsWithPost) {
+        return node;
+      }
+    }
+    return null;
+  }
+
+  async function attemptFallbackPostSubmit() {
+    const postControl = findVisiblePostSubmitControl();
+    if (!postControl) {
+      log('Scheduler: fallback submit could not find Post control');
+      return false;
+    }
+
+    const rect = postControl.getBoundingClientRect();
+    const cx = rect.left + (rect.width / 2);
+    const cy = rect.top + (rect.height / 2);
+    let clickedViaCdp = await requestThreadsPointerClickAt(cx, cy, 6000);
+    if (!clickedViaCdp) {
+      try {
+        postControl.dispatchEvent(new MouseEvent('mouseover', { bubbles: true, cancelable: true }));
+        postControl.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
+        if (typeof postControl.click === 'function') postControl.click();
+        postControl.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true }));
+        clickedViaCdp = true;
+      } catch {}
+    }
+
+    if (!clickedViaCdp) {
+      log('Scheduler: fallback submit click failed');
+      return false;
+    }
+
+    await sleep(1600);
+    if (isPostSubmissionLikelyConfirmed()) {
+      log('Scheduler: submit confirmed via fallback Post click');
+      return true;
+    }
+
+    // Final nudge: send Enter once more in case focus remained on submit control.
+    const enterEvents = [
+      { kind: 'dispatch', type: 'keyDown', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13, delayMs: 110 },
+      { kind: 'dispatch', type: 'keyUp', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13, delayMs: 170 }
+    ];
+    await requestThreadsKeyboardSequence(enterEvents, 5000);
+    await sleep(1200);
+    const confirmed = isPostSubmissionLikelyConfirmed();
+    if (confirmed) {
+      log('Scheduler: submit confirmed after fallback Enter');
+    }
+    return confirmed;
   }
 
   async function openCreateFromThreadsLogo() {
@@ -597,15 +744,16 @@ export function buildThreadsBotScript(config: Configuration): string {
       await sleep(1400);
       const confirmed = isPostSubmissionLikelyConfirmed();
       if (!confirmed) {
-        log('Scheduler: submit not confirmed (Post control still visible)');
-        return false;
+        // Threads UI variants can keep a visible "Post" control even after successful submit.
+        // Treat as submitted to prevent duplicate reposting of the same scheduled file.
+        log('Scheduler: submit not confirmed (Post control still visible); assuming submitted to avoid duplicate repost');
       }
 
       if (shouldRunSecondThreadFollowup) {
-        log('Scheduler: secondthread flag is true; running follow-up sequence');
+        log('Scheduler: secondthread flag is true; running secondthreadpin sequence');
         const followupOk = await runSecondThreadPostFollowupFlow(hasImage);
         if (!followupOk) {
-          log('Scheduler: second-thread follow-up did not fully complete; continuing without retry');
+          log('Scheduler: secondthreadpin did not fully complete; continuing without retry');
         }
       }
 

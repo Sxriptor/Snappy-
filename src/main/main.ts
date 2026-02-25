@@ -1681,18 +1681,50 @@ export function setupIPCHandlers(): void {
         });
       } catch {}
 
+      const refreshTargetFocus = async () => {
+        try {
+          targetWebContents.focus();
+        } catch {}
+        try {
+          await targetWebContents.debugger.sendCommand('Page.bringToFront');
+        } catch {}
+        try {
+          await targetWebContents.debugger.sendCommand('Runtime.evaluate', {
+            expression: `
+              (function() {
+                try { window.focus(); } catch (e) {}
+              })();
+            `
+          });
+        } catch {}
+      };
+
+      let dispatchedEvents = 0;
       for (const event of events) {
         const delay = Number(event?.delayMs || 0);
         if (delay > 0) {
           await delayMs(delay);
         }
 
-        const kind = String(event?.kind || 'dispatch');
+        const eventKind = String(event?.kind || 'dispatch');
+        const eventType = String(event?.type || '');
+        const eventKey = String(event?.key || '');
+        const isTabKeyDispatch = eventKind !== 'insertText'
+          && eventKey.toLowerCase() === 'tab'
+          && (eventType === 'rawKeyDown' || eventType === 'keyDown');
+
+        // Keep routing locked to the target webContents during long tab-heavy sequences.
+        if (isTabKeyDispatch || (dispatchedEvents > 0 && dispatchedEvents % 6 === 0)) {
+          await refreshTargetFocus();
+        }
+
+        const kind = eventKind;
         if (kind === 'insertText') {
           const text = String(event?.text || '');
           if (text.length > 0) {
             await targetWebContents.debugger.sendCommand('Input.insertText', { text });
           }
+          dispatchedEvents++;
           continue;
         }
 
@@ -1715,6 +1747,7 @@ export function setupIPCHandlers(): void {
         if (Number.isFinite(modifiers)) params.modifiers = modifiers;
 
         await targetWebContents.debugger.sendCommand('Input.dispatchKeyEvent', params);
+        dispatchedEvents++;
       }
 
       if (attachedHere && targetWebContents.debugger.isAttached()) {
