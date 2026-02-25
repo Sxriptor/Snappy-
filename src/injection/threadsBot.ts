@@ -198,6 +198,7 @@ export function buildThreadsBotScript(config: Configuration): string {
   function parseThreadsScheduledText(rawText) {
     const text = String(rawText || '').replace(/^\\uFEFF/, '').replace(/\\r/g, '').trim();
     const lines = text.split('\\n').map(line => String(line || '').trim()).filter(Boolean);
+    const cleanField = (value) => String(value || '').replace(/\\\\+$/g, '').trim();
     let caption = '';
     let topic = '';
     let secondThread = '';
@@ -207,16 +208,16 @@ export function buildThreadsBotScript(config: Configuration): string {
       if (!match) continue;
       const key = match[1].toLowerCase();
       if (key === 'caption' || key === 'title') {
-        caption = match[2].trim();
+        caption = cleanField(match[2]);
       } else if (key === 'topic') {
-        topic = match[2].trim();
+        topic = cleanField(match[2]);
       } else if (key === 'secondthread') {
-        secondThread = match[2].trim();
+        secondThread = cleanField(match[2]);
       }
     }
 
-    if (!caption && lines.length > 0) caption = lines[0];
-    if (!topic && lines.length > 1) topic = lines[1];
+    if (!caption && lines.length > 0) caption = cleanField(lines[0]);
+    if (!topic && lines.length > 1) topic = cleanField(lines[1]);
     if (!topic) topic = caption;
 
     return {
@@ -403,6 +404,7 @@ export function buildThreadsBotScript(config: Configuration): string {
       buffer.push({ kind: 'dispatch', type: 'keyDown', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13, delayMs: 110 });
       buffer.push({ kind: 'dispatch', type: 'keyUp', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13, delayMs: 170 });
     };
+    const containsExternalLink = (value) => /(?:https?:\\/\\/\\S+|\\b[\\w.-]+\\.(?:com|org|xyz)\\b)/i.test(String(value || ''));
 
     const phaseOne = [];
     pushTab(phaseOne);
@@ -425,6 +427,7 @@ export function buildThreadsBotScript(config: Configuration): string {
 
     const phaseTwo = [];
     const hasSecondThread = String(secondThread || '').trim().length > 0;
+    const hasLinkInPostText = containsExternalLink(topic) || containsExternalLink(secondThread);
     const finalTabCount = uploadPaths.length > 0 ? 8 : 9;
     pushShiftTab(phaseTwo);
     phaseTwo.push({ kind: 'insertText', text: String(topic || ''), delayMs: 260 });
@@ -432,19 +435,21 @@ export function buildThreadsBotScript(config: Configuration): string {
     pushEnter(phaseTwo);
 
     if (hasSecondThread) {
-      const bridgeTabCount = uploadPaths.length > 0 ? 7 : 8;
-      for (let i = 0; i < bridgeTabCount; i++) pushTab(phaseTwo);
+      const firstSecondThreadTabCount = uploadPaths.length > 0 ? 7 : 8;
+      const secondSecondThreadTabCount = hasLinkInPostText ? 5 : (uploadPaths.length > 0 ? 7 : 8);
+      for (let i = 0; i < firstSecondThreadTabCount; i++) pushTab(phaseTwo);
       pushSpace(phaseTwo);
       phaseTwo.push({ kind: 'insertText', text: String(secondThread || ''), delayMs: 260 });
-      for (let i = 0; i < bridgeTabCount; i++) pushTab(phaseTwo);
+      for (let i = 0; i < secondSecondThreadTabCount; i++) pushTab(phaseTwo);
       pushEnter(phaseTwo);
-      log('Scheduler: continuing key sequence phase 2 (Shift+Tab, topic, ArrowDown, Enter, Tab x' + bridgeTabCount + ', Space, secondthread, Tab x' + bridgeTabCount + ', Enter)');
+      log('Scheduler: continuing key sequence phase 2 (Shift+Tab, topic, ArrowDown, Enter, Tab x' + firstSecondThreadTabCount + ', Space, secondthread, Tab x' + secondSecondThreadTabCount + ', Enter, media=' + (uploadPaths.length > 0 ? 'yes' : 'no') + ', link=' + (hasLinkInPostText ? 'yes' : 'no') + ')');
       return await requestThreadsKeyboardSequence(phaseTwo, 30000);
     }
 
-    for (let i = 0; i < finalTabCount; i++) pushTab(phaseTwo);
+    const resolvedFinalTabCount = hasLinkInPostText ? 7 : finalTabCount;
+    for (let i = 0; i < resolvedFinalTabCount; i++) pushTab(phaseTwo);
     pushEnter(phaseTwo);
-    log('Scheduler: continuing key sequence phase 2 (Shift+Tab, topic, ArrowDown, Enter, Tab x' + finalTabCount + ', Enter)');
+    log('Scheduler: continuing key sequence phase 2 (Shift+Tab, topic, ArrowDown, Enter, Tab x' + resolvedFinalTabCount + ', Enter, link=' + (hasLinkInPostText ? 'yes' : 'no') + ')');
     return await requestThreadsKeyboardSequence(phaseTwo, 25000);
   }
 

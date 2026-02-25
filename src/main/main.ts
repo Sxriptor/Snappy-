@@ -1419,6 +1419,29 @@ export function setupIPCHandlers(): void {
       ]);
       const textExtensions = new Set(['.txt', '.rtd', '.rtf']);
       const videoExtensions = new Set(['.mp4', '.mov', '.webm', '.mkv']);
+      const decodeRtfToPlainText = (raw: string): string => {
+        let text = String(raw || '').replace(/\r/g, '');
+        text = text.replace(/\\par[d]?/gi, '\n').replace(/\\line/gi, '\n').replace(/\\tab/gi, '\t');
+        text = text.replace(/\\u(-?\d+)\??/g, (_match, codePoint) => {
+          const n = Number(codePoint);
+          if (!Number.isFinite(n)) return '';
+          const normalized = n < 0 ? 65536 + n : n;
+          try {
+            return String.fromCharCode(normalized);
+          } catch {
+            return '';
+          }
+        });
+        text = text.replace(/\\'([0-9a-fA-F]{2})/g, (_match, hex) => String.fromCharCode(parseInt(hex, 16)));
+        text = text.replace(/\\([{}\\])/g, '$1');
+        text = text.replace(/\\[a-zA-Z]+-?\d* ?/g, '');
+        text = text.replace(/[{}]/g, '');
+        return text
+          .split('\n')
+          .map(line => line.replace(/\\+$/g, '').trim())
+          .filter(Boolean)
+          .join('\n');
+      };
 
       const getGroupKey = (baseName: string): string => {
         const trimmed = (baseName || '').trim();
@@ -1461,7 +1484,9 @@ export function setupIPCHandlers(): void {
           const textFile = bucket.text.find(name => preferredTextNames.some(preferred => name.toLowerCase() === preferred.toLowerCase()))
             || bucket.text.sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' }))[0];
           const textPath = path.join(folderPath, textFile);
-          const body = fs.readFileSync(textPath, 'utf-8').trim();
+          const textExt = path.extname(textFile).toLowerCase();
+          const rawBody = fs.readFileSync(textPath, 'utf-8');
+          const body = (textExt === '.rtf' ? decodeRtfToPlainText(rawBody) : rawBody).trim();
           const mediaPaths = mediaFiles.map(file => path.join(folderPath, file));
           const mediaPath = mediaPaths.length > 0 ? mediaPaths[0] : '';
           const mediaType = mediaFiles.some(file => videoExtensions.has(path.extname(file).toLowerCase())) ? 'video' : 'image';
