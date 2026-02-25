@@ -200,15 +200,18 @@ export function buildThreadsBotScript(config: Configuration): string {
     const lines = text.split('\\n').map(line => String(line || '').trim()).filter(Boolean);
     let caption = '';
     let topic = '';
+    let secondThread = '';
 
     for (const line of lines) {
-      const match = line.match(/^\\s*(caption|title|topic)\\s*:\\s*(.+)$/i);
+      const match = line.match(/^\\s*(caption|title|topic|secondthread)\\s*:\\s*(.+)$/i);
       if (!match) continue;
       const key = match[1].toLowerCase();
       if (key === 'caption' || key === 'title') {
         caption = match[2].trim();
-      } else if (match[1].toLowerCase() === 'topic') {
+      } else if (key === 'topic') {
         topic = match[2].trim();
+      } else if (key === 'secondthread') {
+        secondThread = match[2].trim();
       }
     }
 
@@ -218,7 +221,8 @@ export function buildThreadsBotScript(config: Configuration): string {
 
     return {
       title: caption.substring(0, 500),
-      topic: topic.substring(0, 200)
+      topic: topic.substring(0, 200),
+      secondThread: secondThread.substring(0, 500)
     };
   }
 
@@ -368,7 +372,7 @@ export function buildThreadsBotScript(config: Configuration): string {
     return await requestThreadsKeyboardSequence(events, 7000);
   }
 
-  async function runThreadsKeyboardPostFlow(title, topic, mediaPaths) {
+  async function runThreadsKeyboardPostFlow(title, topic, secondThread, mediaPaths) {
     const uploadPaths = Array.isArray(mediaPaths)
       ? mediaPaths.filter(item => typeof item === 'string' && item.trim().length > 0)
       : [];
@@ -420,11 +424,24 @@ export function buildThreadsBotScript(config: Configuration): string {
     }
 
     const phaseTwo = [];
+    const hasSecondThread = String(secondThread || '').trim().length > 0;
     const finalTabCount = uploadPaths.length > 0 ? 8 : 9;
     pushShiftTab(phaseTwo);
     phaseTwo.push({ kind: 'insertText', text: String(topic || ''), delayMs: 260 });
     pushArrowDown(phaseTwo);
     pushEnter(phaseTwo);
+
+    if (hasSecondThread) {
+      const bridgeTabCount = uploadPaths.length > 0 ? 7 : 8;
+      for (let i = 0; i < bridgeTabCount; i++) pushTab(phaseTwo);
+      pushSpace(phaseTwo);
+      phaseTwo.push({ kind: 'insertText', text: String(secondThread || ''), delayMs: 260 });
+      for (let i = 0; i < bridgeTabCount; i++) pushTab(phaseTwo);
+      pushEnter(phaseTwo);
+      log('Scheduler: continuing key sequence phase 2 (Shift+Tab, topic, ArrowDown, Enter, Tab x' + bridgeTabCount + ', Space, secondthread, Tab x' + bridgeTabCount + ', Enter)');
+      return await requestThreadsKeyboardSequence(phaseTwo, 30000);
+    }
+
     for (let i = 0; i < finalTabCount; i++) pushTab(phaseTwo);
     pushEnter(phaseTwo);
     log('Scheduler: continuing key sequence phase 2 (Shift+Tab, topic, ArrowDown, Enter, Tab x' + finalTabCount + ', Enter)');
@@ -488,7 +505,12 @@ export function buildThreadsBotScript(config: Configuration): string {
       if (!createOpened) return false;
 
       const mediaPaths = getPostMediaPaths(post);
-      const flowed = await runThreadsKeyboardPostFlow(parsed.title, parsed.topic || parsed.title, mediaPaths);
+      const flowed = await runThreadsKeyboardPostFlow(
+        parsed.title,
+        parsed.topic || parsed.title,
+        parsed.secondThread,
+        mediaPaths
+      );
       if (!flowed) {
         log('Scheduler: keyboard posting flow failed');
         return false;
@@ -519,7 +541,7 @@ export function buildThreadsBotScript(config: Configuration): string {
 
     const post = getNextScheduledPost();
     if (!post) {
-      log('Scheduler: no unposted .txt posts available');
+      log('Scheduler: no unposted text posts available');
       processedScheduleSlots.add(dueSlot.slotKey);
       return;
     }
@@ -1273,6 +1295,3 @@ export function buildThreadsBotScript(config: Configuration): string {
 })();
 `;
 }
-
-
-

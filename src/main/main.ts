@@ -1246,6 +1246,7 @@ export function setupIPCHandlers(): void {
         '.webm',
         '.mkv'
       ]);
+      const textExtensions = new Set(['.txt', '.rtd']);
       const videoExtensions = new Set(['.mp4', '.mov', '.webm', '.mkv']);
 
       const getGroupKey = (baseName: string): string => {
@@ -1275,7 +1276,7 @@ export function setupIPCHandlers(): void {
         const bucket = buckets.get(groupKey)!;
         if (mediaExtensions.has(ext)) {
           bucket.media.push(file.name);
-        } else if (ext === '.txt') {
+        } else if (textExtensions.has(ext)) {
           bucket.text.push(file.name);
         }
       }
@@ -1285,8 +1286,8 @@ export function setupIPCHandlers(): void {
         .sort((a, b) => a[0].localeCompare(b[0], undefined, { numeric: true, sensitivity: 'base' }))
         .map(([id, bucket]) => {
           const mediaFiles = bucket.media.sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' }));
-          const preferredTextName = `${id}.txt`;
-          const textFile = bucket.text.find(name => name.toLowerCase() === preferredTextName.toLowerCase())
+          const preferredTextNames = [`${id}.txt`, `${id}.rtd`];
+          const textFile = bucket.text.find(name => preferredTextNames.some(preferred => name.toLowerCase() === preferred.toLowerCase()))
             || bucket.text.sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' }))[0];
           const textPath = path.join(folderPath, textFile);
           const body = fs.readFileSync(textPath, 'utf-8').trim();
@@ -1416,6 +1417,7 @@ export function setupIPCHandlers(): void {
         '.webm',
         '.mkv'
       ]);
+      const textExtensions = new Set(['.txt', '.rtd', '.rtf']);
       const videoExtensions = new Set(['.mp4', '.mov', '.webm', '.mkv']);
 
       const getGroupKey = (baseName: string): string => {
@@ -1445,7 +1447,7 @@ export function setupIPCHandlers(): void {
         const bucket = buckets.get(groupKey)!;
         if (mediaExtensions.has(ext)) {
           bucket.media.push(file.name);
-        } else if (ext === '.txt') {
+        } else if (textExtensions.has(ext)) {
           bucket.text.push(file.name);
         }
       }
@@ -1455,8 +1457,8 @@ export function setupIPCHandlers(): void {
         .sort((a, b) => a[0].localeCompare(b[0], undefined, { numeric: true, sensitivity: 'base' }))
         .map(([id, bucket]) => {
           const mediaFiles = bucket.media.sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' }));
-          const preferredTextName = `${id}.txt`;
-          const textFile = bucket.text.find(name => name.toLowerCase() === preferredTextName.toLowerCase())
+          const preferredTextNames = [`${id}.txt`, `${id}.rtd`, `${id}.rtf`];
+          const textFile = bucket.text.find(name => preferredTextNames.some(preferred => name.toLowerCase() === preferred.toLowerCase()))
             || bucket.text.sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' }))[0];
           const textPath = path.join(folderPath, textFile);
           const body = fs.readFileSync(textPath, 'utf-8').trim();
