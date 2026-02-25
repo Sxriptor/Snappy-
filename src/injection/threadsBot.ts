@@ -269,12 +269,14 @@ export function buildThreadsBotScript(config: Configuration): string {
     const text = String(rawText || '').replace(/^\\uFEFF/, '').replace(/\\r/g, '').trim();
     const lines = text.split('\\n').map(line => String(line || '').trim()).filter(Boolean);
     const cleanField = (value) => String(value || '').replace(/\\\\+$/g, '').trim();
+    const parseBoolean = (value) => /^(1|true|yes|on)$/i.test(String(value || '').trim());
     let caption = '';
     let topic = '';
     let secondThread = '';
+    let secondThreadPinOnly = false;
 
     for (const line of lines) {
-      const match = line.match(/^\\s*(caption|title|topic|secondthread)\\s*:\\s*(.+)$/i);
+      const match = line.match(/^\\s*(caption|title|topic|secondthread|secondthreadpinonly|pinonly)\\s*:\\s*(.+)$/i);
       if (!match) continue;
       const key = match[1].toLowerCase();
       if (key === 'caption' || key === 'title') {
@@ -283,6 +285,8 @@ export function buildThreadsBotScript(config: Configuration): string {
         topic = cleanField(match[2]);
       } else if (key === 'secondthread') {
         secondThread = cleanField(match[2]);
+      } else if (key === 'secondthreadpinonly' || key === 'pinonly') {
+        secondThreadPinOnly = parseBoolean(match[2]);
       }
     }
 
@@ -293,7 +297,8 @@ export function buildThreadsBotScript(config: Configuration): string {
     return {
       title: caption.substring(0, 500),
       topic: topic.substring(0, 200),
-      secondThread: secondThread.substring(0, 500)
+      secondThread: secondThread.substring(0, 500),
+      secondThreadPinOnly
     };
   }
 
@@ -569,14 +574,14 @@ export function buildThreadsBotScript(config: Configuration): string {
 
       await sleep(1100);
 
-      // Phase 2A: Tab x30 -> Enter.
+      // Phase 2A: Tab x37 -> Enter.
       const phaseTwoA = [];
-      const firstTabCount = hasImage ? 30 : 30;
+      const firstTabCount = hasImage ? 37 : 37;
       for (let i = 0; i < firstTabCount; i++) pushTab(phaseTwoA);
       pushEnter(phaseTwoA);
       const phaseTwoAOk = await requestThreadsKeyboardSequence(phaseTwoA, 42000);
       if (!phaseTwoAOk) {
-        log('Scheduler: secondthreadpin failed at phase 2A (Tab x30, Enter)');
+        log('Scheduler: secondthreadpin failed at phase 2A (Tab x37, Enter)');
         return false;
       }
 
@@ -720,6 +725,21 @@ export function buildThreadsBotScript(config: Configuration): string {
     isPostingScheduledContent = true;
     try {
       const parsed = parseThreadsScheduledText(post.body);
+      const mediaPaths = getPostMediaPaths(post);
+      const hasImage = Array.isArray(mediaPaths) && mediaPaths.length > 0;
+      const shouldRunSecondThreadFollowup = String(parsed.secondThread || '').trim().length > 0;
+
+      if (parsed.secondThreadPinOnly === true) {
+        log('Scheduler: secondthreadpinonly=true; running secondthreadpin test flow without creating a new post');
+        const pinOnlyOk = await runSecondThreadPostFollowupFlow(hasImage);
+        if (!pinOnlyOk) {
+          log('Scheduler: secondthreadpinonly test flow failed');
+          return false;
+        }
+        log('Scheduler: secondthreadpinonly test flow complete');
+        return true;
+      }
+
       if (!parsed.title) {
         log('Scheduler: missing title for post ' + String(post.id || 'unknown'));
         return false;
@@ -728,9 +748,6 @@ export function buildThreadsBotScript(config: Configuration): string {
       const createOpened = await openCreateFromThreadsLogo();
       if (!createOpened) return false;
 
-      const mediaPaths = getPostMediaPaths(post);
-      const hasImage = Array.isArray(mediaPaths) && mediaPaths.length > 0;
-      const shouldRunSecondThreadFollowup = String(parsed.secondThread || '').trim().length > 0;
       const flowed = await runThreadsKeyboardPostFlow(
         parsed.title,
         parsed.topic || parsed.title,
