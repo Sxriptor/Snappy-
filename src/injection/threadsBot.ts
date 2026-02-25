@@ -453,6 +453,78 @@ export function buildThreadsBotScript(config: Configuration): string {
     return await requestThreadsKeyboardSequence(phaseTwo, 25000);
   }
 
+  async function runSecondThreadPostFollowupFlow(hasImage) {
+    const STEP_DELAY = 95;
+    const TRANSITION_DELAY = 140;
+    const pushTab = (buffer) => {
+      buffer.push({ kind: 'dispatch', type: 'rawKeyDown', key: 'Tab', code: 'Tab', windowsVirtualKeyCode: 9, nativeVirtualKeyCode: 9, delayMs: STEP_DELAY });
+      buffer.push({ kind: 'dispatch', type: 'keyUp', key: 'Tab', code: 'Tab', windowsVirtualKeyCode: 9, nativeVirtualKeyCode: 9, delayMs: TRANSITION_DELAY });
+    };
+    const pushShiftTab = (buffer) => {
+      buffer.push({ kind: 'dispatch', type: 'rawKeyDown', key: 'Shift', code: 'ShiftLeft', windowsVirtualKeyCode: 16, nativeVirtualKeyCode: 16, delayMs: STEP_DELAY });
+      buffer.push({ kind: 'dispatch', type: 'rawKeyDown', key: 'Tab', code: 'Tab', windowsVirtualKeyCode: 9, nativeVirtualKeyCode: 9, modifiers: 8, delayMs: STEP_DELAY });
+      buffer.push({ kind: 'dispatch', type: 'keyUp', key: 'Tab', code: 'Tab', windowsVirtualKeyCode: 9, nativeVirtualKeyCode: 9, modifiers: 8, delayMs: STEP_DELAY });
+      buffer.push({ kind: 'dispatch', type: 'keyUp', key: 'Shift', code: 'ShiftLeft', windowsVirtualKeyCode: 16, nativeVirtualKeyCode: 16, delayMs: TRANSITION_DELAY });
+    };
+    const pushSpace = (buffer) => {
+      buffer.push({ kind: 'dispatch', type: 'rawKeyDown', key: ' ', code: 'Space', windowsVirtualKeyCode: 32, nativeVirtualKeyCode: 32, delayMs: 120 });
+      buffer.push({ kind: 'dispatch', type: 'char', key: ' ', code: 'Space', text: ' ', windowsVirtualKeyCode: 32, nativeVirtualKeyCode: 32, delayMs: 130 });
+      buffer.push({ kind: 'dispatch', type: 'keyUp', key: ' ', code: 'Space', windowsVirtualKeyCode: 32, nativeVirtualKeyCode: 32, delayMs: 220 });
+    };
+    const pushEnter = (buffer) => {
+      buffer.push({ kind: 'dispatch', type: 'keyDown', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13, delayMs: 110 });
+      buffer.push({ kind: 'dispatch', type: 'keyUp', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13, delayMs: 170 });
+    };
+
+    log('Scheduler: running second-thread follow-up flow (secondthread=true)');
+    const opened = await openCreateFromThreadsLogo();
+    if (!opened) {
+      log('Scheduler: second-thread follow-up failed (Threads icon click 1)');
+      return false;
+    }
+
+    await sleep(900);
+    // Ensure keyboard target has focus before long navigation.
+    try {
+      await requestThreadsPointerClickAt(Math.max(16, Math.floor(window.innerWidth / 2)), Math.max(16, Math.floor(window.innerHeight / 2)), 6000);
+    } catch {}
+
+    const phase = [];
+    for (let i = 0; i < 3; i++) pushShiftTab(phase);
+    pushEnter(phase);
+    const firstTabCount = hasImage ? 30 : 30;
+    for (let i = 0; i < firstTabCount; i++) pushTab(phase);
+    pushEnter(phase);
+    for (let i = 0; i < 17; i++) pushTab(phase);
+    pushSpace(phase);
+    for (let i = 0; i < 3; i++) pushTab(phase);
+    pushSpace(phase);
+
+    let phaseOk = await requestThreadsKeyboardSequence(phase, 60000);
+    if (!phaseOk) {
+      // One retry after refocus to avoid occasional key-routing misses.
+      try {
+        await requestThreadsPointerClickAt(Math.max(16, Math.floor(window.innerWidth / 2)), Math.max(16, Math.floor(window.innerHeight / 2)), 6000);
+      } catch {}
+      await sleep(500);
+      phaseOk = await requestThreadsKeyboardSequence(phase, 60000);
+    }
+    if (!phaseOk) {
+      log('Scheduler: second-thread follow-up failed at keyboard sequence');
+      return false;
+    }
+
+    await sleep(700);
+    const closed = await openCreateFromThreadsLogo();
+    if (!closed) {
+      log('Scheduler: second-thread follow-up failed (Threads icon click 2)');
+      return false;
+    }
+
+    log('Scheduler: second-thread follow-up flow complete (image=' + (hasImage ? 'yes' : 'no') + ')');
+    return true;
+  }
+
   function isPostSubmissionLikelyConfirmed() {
     // If a prominent "Post" action is still visible/enabled, assume submit did not complete.
     const buttons = Array.from(document.querySelectorAll('button, div[role="button"], a, span'));
@@ -510,6 +582,8 @@ export function buildThreadsBotScript(config: Configuration): string {
       if (!createOpened) return false;
 
       const mediaPaths = getPostMediaPaths(post);
+      const hasImage = Array.isArray(mediaPaths) && mediaPaths.length > 0;
+      const shouldRunSecondThreadFollowup = String(parsed.secondThread || '').trim().length > 0;
       const flowed = await runThreadsKeyboardPostFlow(
         parsed.title,
         parsed.topic || parsed.title,
@@ -525,6 +599,14 @@ export function buildThreadsBotScript(config: Configuration): string {
       if (!confirmed) {
         log('Scheduler: submit not confirmed (Post control still visible)');
         return false;
+      }
+
+      if (shouldRunSecondThreadFollowup) {
+        log('Scheduler: secondthread flag is true; running follow-up sequence');
+        const followupOk = await runSecondThreadPostFollowupFlow(hasImage);
+        if (!followupOk) {
+          log('Scheduler: second-thread follow-up did not fully complete; continuing without retry');
+        }
       }
 
       log('Scheduler: Threads post submitted');
