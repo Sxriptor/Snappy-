@@ -2116,6 +2116,42 @@ Reattach button for detached windows */
   width: 100%;
 }
 
+.scheduler-format-card {
+  margin-top: 10px;
+  padding: 8px;
+  border: 1px dashed #242424;
+  border-radius: 4px;
+  background: #0c0c0c;
+}
+
+.scheduler-format-title {
+  color: #8a8a8a;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin-bottom: 4px;
+}
+
+.scheduler-format-note {
+  color: #636363;
+  font-size: 10px;
+  line-height: 1.4;
+  margin-bottom: 6px;
+}
+
+.scheduler-format-code {
+  margin: 0;
+  padding: 8px;
+  border: 1px solid #1a1a1a;
+  border-radius: 3px;
+  background: #090909;
+  color: #9ab9cf;
+  font-size: 10px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 .scheduler-days {
   display: grid;
   grid-template-columns: 1fr;
