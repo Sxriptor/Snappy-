@@ -561,41 +561,44 @@ export function buildThreadsBotScript(config: Configuration): string {
       }
 
       await sleep(850);
+      log('Scheduler: refreshing Threads screen before pin sequence');
+      const refreshed = await openCreateFromThreadsLogo();
+      if (!refreshed) {
+        log('Scheduler: Threads screen refresh click failed; continuing pin sequence');
+      }
+      await sleep(700);
 
-      // Phase 1: exactly as manual flow: Shift+Tab x3, then Enter.
+      // Sequence 1: Shift+Tab x3 -> Enter
       const phaseOne = [];
       for (let i = 0; i < 3; i++) pushShiftTab(phaseOne);
       pushEnter(phaseOne);
-      const phaseOneOk = await requestThreadsKeyboardSequence(phaseOne, 22000);
+      const phaseOneOk = await requestThreadsKeyboardSequence(phaseOne, 26000);
       if (!phaseOneOk) {
         log('Scheduler: secondthreadpin failed at phase 1 (Shift+Tab x3, Enter)');
         return false;
       }
 
-      await sleep(1100);
-
-      // Phase 2A: Tab x37 -> Enter.
-      const phaseTwoA = [];
-      const firstTabCount = hasImage ? 37 : 37;
-      for (let i = 0; i < firstTabCount; i++) pushTab(phaseTwoA);
-      pushEnter(phaseTwoA);
-      const phaseTwoAOk = await requestThreadsKeyboardSequence(phaseTwoA, 42000);
-      if (!phaseTwoAOk) {
-        log('Scheduler: secondthreadpin failed at phase 2A (Tab x37, Enter)');
+      await sleep(900);
+      const profileClicked = await clickThreadsProfileTextRequired();
+      if (!profileClicked) {
+        log('Scheduler: secondthreadpin failed (Profile text click required but not found/clickable)');
         return false;
       }
+      await sleep(900);
 
-      await sleep(1200);
+      // Sequence 2: Tab x30 -> Enter -> Tab x17 -> Space -> Tab x3 -> Space
+      const phaseTwo = [];
+      const firstTabCount = 30;
+      for (let i = 0; i < firstTabCount; i++) pushTab(phaseTwo);
+      pushEnter(phaseTwo);
+      for (let i = 0; i < 17; i++) pushTab(phaseTwo);
+      pushSpace(phaseTwo);
+      for (let i = 0; i < 3; i++) pushTab(phaseTwo);
+      pushSpace(phaseTwo);
 
-      // Phase 2B: Tab x17 -> Space -> Tab x3 -> Space.
-      const phaseTwoB = [];
-      for (let i = 0; i < 17; i++) pushTab(phaseTwoB);
-      pushSpace(phaseTwoB);
-      for (let i = 0; i < 3; i++) pushTab(phaseTwoB);
-      pushSpace(phaseTwoB);
-      const phaseTwoBOk = await requestThreadsKeyboardSequence(phaseTwoB, 42000);
-      if (!phaseTwoBOk) {
-        log('Scheduler: secondthreadpin failed at phase 2B (Tab/Space sequence)');
+      const phaseTwoOk = await requestThreadsKeyboardSequence(phaseTwo, 62000);
+      if (!phaseTwoOk) {
+        log('Scheduler: secondthreadpin failed at phase 2 (Tab x30, Enter, Tab/Space sequence)');
         return false;
       }
 
@@ -718,6 +721,63 @@ export function buildThreadsBotScript(config: Configuration): string {
     return true;
   }
 
+  async function clickThreadsProfileTextRequired() {
+    const normalize = (value) => String(value || '').replace(/\\s+/g, ' ').trim().toLowerCase();
+    let target = null;
+
+    const textCandidates = Array.from(document.querySelectorAll('a, button, div[role="button"], [role="link"], [tabindex], span'));
+    for (const node of textCandidates) {
+      if (!(node instanceof HTMLElement)) continue;
+      if (!isVisibleElement(node)) continue;
+      const text = normalize(node.textContent || '');
+      if (text === 'profile') {
+        target = node;
+        break;
+      }
+    }
+
+    if (!target) {
+      const profileSvg = document.querySelector('svg[aria-label="Profile"]');
+      if (profileSvg) {
+        const parent = profileSvg.closest('a, button, div[role="button"], [role="link"], [tabindex]');
+        if (parent instanceof HTMLElement && isVisibleElement(parent)) {
+          target = parent;
+        }
+      }
+    }
+
+    if (!(target instanceof Element)) {
+      log('Scheduler: required Profile target not found');
+      return false;
+    }
+
+    const rect = target.getBoundingClientRect();
+    if (!(rect.width > 0 && rect.height > 0)) {
+      log('Scheduler: required Profile target has invalid bounds');
+      return false;
+    }
+
+    const cx = rect.left + (rect.width / 2);
+    const cy = rect.top + (rect.height / 2);
+    const clickedViaCdp = await requestThreadsPointerClickAt(cx, cy, 6000);
+    if (clickedViaCdp) {
+      log('Scheduler: clicked required Profile target via CDP');
+      return true;
+    }
+
+    try {
+      target.dispatchEvent(new MouseEvent('mouseover', { bubbles: true, cancelable: true }));
+      target.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
+      if (typeof target.click === 'function') target.click();
+      target.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true }));
+      log('Scheduler: clicked required Profile target via fallback');
+      return true;
+    } catch {
+      log('Scheduler: failed clicking required Profile target');
+      return false;
+    }
+  }
+
   async function publishScheduledThreadPost(post) {
     if (!post || typeof post.body !== 'string') return false;
     if (isPostingScheduledContent) return false;
@@ -727,7 +787,7 @@ export function buildThreadsBotScript(config: Configuration): string {
       const parsed = parseThreadsScheduledText(post.body);
       const mediaPaths = getPostMediaPaths(post);
       const hasImage = Array.isArray(mediaPaths) && mediaPaths.length > 0;
-      const shouldRunSecondThreadFollowup = String(parsed.secondThread || '').trim().length > 0;
+      const hasSecondThreadText = String(parsed.secondThread || '').trim().length > 0;
 
       if (parsed.secondThreadPinOnly === true) {
         log('Scheduler: secondthreadpinonly=true; running secondthreadpin test flow without creating a new post');
@@ -766,8 +826,9 @@ export function buildThreadsBotScript(config: Configuration): string {
         log('Scheduler: submit not confirmed (Post control still visible); assuming submitted to avoid duplicate repost');
       }
 
-      if (shouldRunSecondThreadFollowup) {
-        log('Scheduler: secondthread flag is true; running secondthreadpin sequence');
+      if (hasSecondThreadText) {
+        // Treat secondthread text as enabling the same flow as secondthreadpinonly=true.
+        log('Scheduler: secondthread detected; auto-enabling secondthreadpinonly follow-up flow');
         const followupOk = await runSecondThreadPostFollowupFlow(hasImage);
         if (!followupOk) {
           log('Scheduler: secondthreadpin did not fully complete; continuing without retry');
