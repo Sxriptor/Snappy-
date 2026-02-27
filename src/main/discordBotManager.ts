@@ -10,9 +10,38 @@ export type DiscordCommand =
   | { type: 'help' }
   | { type: 'list' }
   | { type: 'status' }
+  | { type: 'screenshot' }
   | { type: 'start'; target: { kind: 'all' } | { kind: 'platform'; platform: PlatformTarget } | { kind: 'session'; ref: string } }
   | { type: 'stop'; target: { kind: 'all' } | { kind: 'platform'; platform: PlatformTarget } | { kind: 'session'; ref: string } }
   | { type: 'logs'; pid: number; durationMs: number; durationLabel: string };
+
+export interface DiscordCommandAttachment {
+  filename: string;
+  data: Buffer;
+}
+
+export interface DiscordCommandResponse {
+  text: string;
+  attachments?: DiscordCommandAttachment[];
+}
+
+const DISCORD_COMMAND_HELP_LINES = [
+  'Commands:',
+  '- @snappy list',
+  '- @snappy status',
+  '- @snappy screenshot',
+  '- @snappy logs <pid> <1m|5m|10m|1h|2h>',
+  '- @snappy start all',
+  '- @snappy stop all',
+  '- @snappy start platform <instagram|snapchat|threads|reddit>',
+  '- @snappy stop platform <instagram|snapchat|threads|reddit>',
+  '- @snappy start session <id|name|index>',
+  '- @snappy stop session <id|name|index>'
+];
+
+export function getDiscordCommandHelpText(): string {
+  return DISCORD_COMMAND_HELP_LINES.join('\n');
+}
 
 export interface DiscordBotStatus {
   state: DiscordBotState;
@@ -27,7 +56,7 @@ export interface DiscordCommandContext {
   channelId: string;
 }
 
-type DiscordCommandExecutor = (command: DiscordCommand, context: DiscordCommandContext) => Promise<string>;
+type DiscordCommandExecutor = (command: DiscordCommand, context: DiscordCommandContext) => Promise<string | DiscordCommandResponse>;
 
 const PLATFORM_SET: Set<string> = new Set(['instagram', 'snapchat', 'threads', 'reddit']);
 const LOG_DURATION_MAX_MS = 7 * 24 * 60 * 60 * 1000;
@@ -156,6 +185,35 @@ function parseTarget(action: 'start' | 'stop', tokens: string[]): DiscordCommand
   return { type: action, target: { kind: 'session', ref: tokens.join(' ').trim() } };
 }
 
+function normalizeCommandToken(raw: string): string {
+  return String(raw || '')
+    .trim()
+    .toLowerCase()
+    .replace(/^[`"'“”‘’([{<\s]+/, '')
+    .replace(/[`"'“”‘’)\]}>:;,.!?]+$/g, '');
+}
+
+function trimLeadingCommandPrefixes(tokens: string[]): string[] {
+  const result = [...tokens];
+  while (result.length > 1) {
+    const token = normalizeCommandToken(result[0]);
+    if (!token) {
+      result.shift();
+      continue;
+    }
+    if (token.startsWith('@') || token === 'snappy' || token === 'bot') {
+      result.shift();
+      continue;
+    }
+    break;
+  }
+  return result;
+}
+
+function isScreenshotAction(action: string): boolean {
+  return action === 'screenshot' || action === 'screen' || action === 'shot' || action === 'capture';
+}
+
 export function parseDiscordCommand(text: string): { ok: true; command: DiscordCommand } | { ok: false; error: string } {
   const normalized = (text || '').trim().toLowerCase();
   if (!normalized) {
@@ -174,8 +232,13 @@ export function parseDiscordCommand(text: string): { ok: true; command: DiscordC
     return { ok: true, command: { type: 'status' } };
   }
 
-  const tokens = normalized.split(/\s+/).filter(Boolean);
-  const action = tokens[0];
+  const rawTokens = normalized.split(/\s+/).filter(Boolean);
+  const tokens = trimLeadingCommandPrefixes(rawTokens);
+  const action = normalizeCommandToken(tokens[0]);
+
+  if (isScreenshotAction(action)) {
+    return { ok: true, command: { type: 'screenshot' } };
+  }
 
   if (action === 'start' || action === 'stop') {
     return { ok: true, command: parseTarget(action, tokens.slice(1)) };
@@ -330,7 +393,36 @@ export class DiscordBotManager extends EventEmitter {
 
     try {
       const response = await this.executor(parsed.command, context);
-      await message.reply(truncateDiscordReply(response));
+      if (typeof response === 'string') {
+        await message.reply(truncateDiscordReply(response));
+        return;
+      }
+
+      const normalizedText = truncateDiscordReply(response.text || 'Command completed.');
+      const files = Array.isArray(response.attachments)
+        ? response.attachments
+            .filter(item =>
+              item &&
+              typeof item.filename === 'string' &&
+              item.filename.trim().length > 0 &&
+              Buffer.isBuffer(item.data) &&
+              item.data.length > 0
+            )
+            .map(item => ({
+              attachment: item.data,
+              name: item.filename.trim()
+            }))
+        : [];
+
+      if (files.length > 0) {
+        await message.reply({
+          content: normalizedText,
+          files
+        });
+        return;
+      }
+
+      await message.reply(normalizedText);
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
       await message.reply(`Command failed: ${errorMessage}`);

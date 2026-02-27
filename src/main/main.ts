@@ -21,7 +21,16 @@ import { buildThreadsBotScript } from '../injection/threadsBot';
 import { AIBrain } from '../brain/aiBrain';
 import { windowManager } from './windowManager';
 import { trayManager } from './trayManager';
-import { DiscordBotManager, DiscordBotStatus, DiscordCommand, DiscordCommandContext, PlatformTarget } from './discordBotManager';
+import {
+  DiscordBotManager,
+  DiscordBotStatus,
+  DiscordCommand,
+  DiscordCommandContext,
+  PlatformTarget,
+  DiscordCommandAttachment,
+  DiscordCommandResponse,
+  getDiscordCommandHelpText
+} from './discordBotManager';
 
 let mainWindow: BrowserWindow | null = null;
 let config: Configuration = DEFAULT_CONFIG;
@@ -370,24 +379,106 @@ async function requestRendererBotCommand(
   });
 }
 
-async function executeDiscordCommand(command: DiscordCommand, _context: DiscordCommandContext): Promise<string> {
+function normalizeDiscordScreenshotFileToken(raw: unknown): string {
+  const normalized = String(raw || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^[-_]+|[-_]+$/g, '');
+  return normalized || 'window';
+}
+
+async function captureWindowScreenshot(window: BrowserWindow | null | undefined, filename: string): Promise<DiscordCommandAttachment | null> {
+  if (!window || window.isDestroyed()) {
+    return null;
+  }
+
+  const contents = window.webContents;
+  if (!contents || contents.isDestroyed()) {
+    return null;
+  }
+
+  try {
+    const image = await contents.capturePage();
+    if (image.isEmpty()) {
+      return null;
+    }
+
+    const data = image.toPNG();
+    if (!Buffer.isBuffer(data) || data.length === 0) {
+      return null;
+    }
+
+    return { filename, data };
+  } catch (error) {
+    console.warn(`[DiscordBot] Failed to capture screenshot "${filename}":`, error);
+    return null;
+  }
+}
+
+async function captureDiscordScreenshots(): Promise<DiscordCommandAttachment[]> {
+  const captures: DiscordCommandAttachment[] = [];
+  const usedFilenames = new Set<string>();
+
+  const mainCapture = await captureWindowScreenshot(mainWindow, 'main-ui.png');
+  if (mainCapture) {
+    captures.push(mainCapture);
+    usedFilenames.add(mainCapture.filename);
+  }
+
+  const detachedWindows = windowManager.getDetachedWindows();
+  for (const detached of detachedWindows) {
+    const baseToken = normalizeDiscordScreenshotFileToken(detached.sessionId || detached.id);
+    let filename = `detached-${baseToken}.png`;
+
+    if (usedFilenames.has(filename)) {
+      const fallbackToken = normalizeDiscordScreenshotFileToken(detached.id);
+      filename = `detached-${baseToken}-${fallbackToken}.png`;
+    }
+
+    const detachedCapture = await captureWindowScreenshot(detached.window, filename);
+    if (!detachedCapture) {
+      continue;
+    }
+
+    captures.push(detachedCapture);
+    usedFilenames.add(detachedCapture.filename);
+  }
+
+  return captures;
+}
+
+async function executeDiscordCommand(command: DiscordCommand, _context: DiscordCommandContext): Promise<string | DiscordCommandResponse> {
   if (command.type === 'help') {
-    return [
-      'Commands:',
-      '- @snappy list',
-      '- @snappy status',
-      '- @snappy logs <pid> <1m|5m|10m|1h|2h>',
-      '- @snappy start all',
-      '- @snappy stop all',
-      '- @snappy start platform <instagram|snapchat|threads|reddit>',
-      '- @snappy stop platform <instagram|snapchat|threads|reddit>',
-      '- @snappy start session <id|name|index>',
-      '- @snappy stop session <id|name|index>'
-    ].join('\n');
+    return getDiscordCommandHelpText();
   }
 
   if (command.type === 'list' || command.type === 'status') {
     return summarizeSessions();
+  }
+
+  if (command.type === 'screenshot') {
+    const attachments = await captureDiscordScreenshots();
+    if (attachments.length === 0) {
+      return 'Unable to capture screenshots: no active main or detached windows are available.';
+    }
+
+    const hasMainScreenshot = attachments.some(item => item.filename === 'main-ui.png');
+    const detachedCount = attachments.filter(item => item.filename !== 'main-ui.png').length;
+    const detailParts: string[] = [];
+    if (hasMainScreenshot) {
+      detailParts.push('main UI');
+    }
+    if (detachedCount > 0) {
+      detailParts.push(`${detachedCount} detached window${detachedCount === 1 ? '' : 's'}`);
+    }
+
+    const detailText = detailParts.length > 0 ? ` (${detailParts.join(' + ')})` : '';
+    return {
+      text: `Captured ${attachments.length} screenshot${attachments.length === 1 ? '' : 's'}${detailText}.`,
+      attachments
+    };
   }
 
   if (command.type === 'logs') {
