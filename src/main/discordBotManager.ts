@@ -13,6 +13,8 @@ export type DiscordCommand =
   | { type: 'screenshot' }
   | { type: 'start'; target: { kind: 'all' } | { kind: 'platform'; platform: PlatformTarget } | { kind: 'session'; ref: string } }
   | { type: 'stop'; target: { kind: 'all' } | { kind: 'platform'; platform: PlatformTarget } | { kind: 'session'; ref: string } }
+  | { type: 'detach'; target: { kind: 'all' } | { kind: 'platform'; platform: PlatformTarget } | { kind: 'session'; ref: string } }
+  | { type: 'reattach'; target: { kind: 'all' } | { kind: 'platform'; platform: PlatformTarget } | { kind: 'session'; ref: string } }
   | { type: 'logs'; pid: number; durationMs: number; durationLabel: string };
 
 export interface DiscordCommandAttachment {
@@ -33,10 +35,16 @@ const DISCORD_COMMAND_HELP_LINES = [
   '- @snappy logs <pid> <1m|5m|10m|1h|2h>',
   '- @snappy start all',
   '- @snappy stop all',
+  '- @snappy detach all',
+  '- @snappy reattach all',
   '- @snappy start platform <instagram|snapchat|threads|reddit>',
   '- @snappy stop platform <instagram|snapchat|threads|reddit>',
+  '- @snappy detach platform <instagram|snapchat|threads|reddit>',
+  '- @snappy reattach platform <instagram|snapchat|threads|reddit>',
   '- @snappy start session <id|name|index>',
-  '- @snappy stop session <id|name|index>'
+  '- @snappy stop session <id|name|index>',
+  '- @snappy detach session <id|name|index|pid>',
+  '- @snappy reattach session <id|name|index|pid>'
 ];
 
 export function getDiscordCommandHelpText(): string {
@@ -162,7 +170,7 @@ function stripBotMention(content: string, botId: string): string {
   return stripped.replace(/\s+/g, ' ').trim();
 }
 
-function parseTarget(action: 'start' | 'stop', tokens: string[]): DiscordCommand {
+function parseTarget(action: 'start' | 'stop' | 'detach' | 'reattach', tokens: string[]): DiscordCommand {
   if (tokens.length === 0 || tokens[0] === 'all') {
     return { type: action, target: { kind: 'all' } };
   }
@@ -214,6 +222,14 @@ function isScreenshotAction(action: string): boolean {
   return action === 'screenshot' || action === 'screen' || action === 'shot' || action === 'capture';
 }
 
+function isDetachAction(action: string): boolean {
+  return action === 'detach' || action === 'detatch';
+}
+
+function isReattachAction(action: string): boolean {
+  return action === 'reattach' || action === 'retach' || action === 'attach';
+}
+
 export function parseDiscordCommand(text: string): { ok: true; command: DiscordCommand } | { ok: false; error: string } {
   const normalized = (text || '').trim().toLowerCase();
   if (!normalized) {
@@ -238,6 +254,14 @@ export function parseDiscordCommand(text: string): { ok: true; command: DiscordC
 
   if (isScreenshotAction(action)) {
     return { ok: true, command: { type: 'screenshot' } };
+  }
+
+  if (isDetachAction(action)) {
+    return { ok: true, command: parseTarget('detach', tokens.slice(1)) };
+  }
+
+  if (isReattachAction(action)) {
+    return { ok: true, command: parseTarget('reattach', tokens.slice(1)) };
   }
 
   if (action === 'start' || action === 'stop') {

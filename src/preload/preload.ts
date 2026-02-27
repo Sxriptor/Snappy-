@@ -431,7 +431,7 @@ const discordBotAPI = {
    */
   onCommandRequest: (callback: (payload: {
     requestId: string;
-    action: 'start' | 'stop' | 'logs';
+    action: 'start' | 'stop' | 'detach' | 'reattach' | 'logs';
     sessionIds?: string[];
     sessionId?: string;
     pid?: number;

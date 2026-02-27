@@ -2571,23 +2571,46 @@ async function deleteSession(sessionId: string) {
   }
 }
 
+interface SessionWindowActionResult {
+  success: boolean;
+  status: 'success' | 'error' | 'skipped';
+  message: string;
+}
+
 // Detach a session to a new window
-async function detachSession(sessionId: string) {
+async function detachSession(sessionId: string): Promise<SessionWindowActionResult> {
   try {
     const sessionName = getSessionName(sessionId);
+    const detachedWindows = await (window as any).windowManager.getDetachedWindows();
+    const alreadyDetached = Array.isArray(detachedWindows) && detachedWindows.some((item: any) => item?.sessionId === sessionId);
+    if (alreadyDetached) {
+      return {
+        success: false,
+        status: 'skipped',
+        message: `${sessionName}: already detached`
+      };
+    }
     
     // Get webview before detaching
     const wv = sessionWebviews.get(sessionId);
     if (!wv) {
       addLog('No webview found for session', 'error', sessionId);
-      return;
+      return {
+        success: false,
+        status: 'skipped',
+        message: `${sessionName}: session unavailable or already detached`
+      };
     }
     
     // Create detached window
     const result = await (window as any).windowManager.detachSession(sessionId, sessionName);
     if (!result.success) {
       addLog(`Failed to detach session: ${result.error}`, 'error', sessionId);
-      return;
+      return {
+        success: false,
+        status: 'error',
+        message: `${sessionName}: ${String(result.error || 'failed to detach')}`
+      };
     }
     
     // Remove the session from main window completely
@@ -2622,9 +2645,19 @@ async function detachSession(sessionId: string) {
     }
     
     addLog(`Session "${sessionName}" detached to new window`, 'success');
+    return {
+      success: true,
+      status: 'success',
+      message: `${sessionName}: detached`
+    };
     
   } catch (e) {
     addLog(`Failed to detach session: ${e}`, 'error');
+    return {
+      success: false,
+      status: 'error',
+      message: `${getSessionName(sessionId)}: ${String(e)}`
+    };
   }
 }
 
@@ -3066,24 +3099,32 @@ async function loadDetachedSession(sessionId: string, sessionName: string) {
   }
 }
 
-// Reattach a session from detached window
-async function reattachSession(sessionId: string) {
+// Reattach a session back to the main window
+async function reattachSession(sessionId: string): Promise<SessionWindowActionResult> {
+  const sessionName = getSessionName(sessionId);
   try {
-    addLog(`Reattaching session to main window...`, 'info');
-    
-    // Don't wait for the response since the window will be closed
-    // Just fire and forget - the main window will handle the reattach
-    (window as any).windowManager.reattachSession(sessionId).catch((e: any) => {
-      // Ignore errors since the window is being closed
-      console.log('Reattach call completed (window closing)');
-    });
-    
-    // Show success message immediately since we know it will work
-    addLog(`Session reattach initiated`, 'success');
-    
+    const result = await (window as any).windowManager.reattachSession(sessionId);
+    if (!result?.success) {
+      return {
+        success: false,
+        status: 'skipped',
+        message: `${sessionName}: not currently detached`
+      };
+    }
+    addLog(`Session "${sessionName}" reattach initiated`, 'success');
+    return {
+      success: true,
+      status: 'success',
+      message: `${sessionName}: reattach initiated`
+    };
   } catch (e) {
     console.error('Reattach error:', e);
     addLog(`Error during reattach: ${e}`, 'error');
+    return {
+      success: false,
+      status: 'error',
+      message: `${sessionName}: ${String(e)}`
+    };
   }
 }
 
@@ -9802,7 +9843,7 @@ interface DiscordBotStatusView {
 
 interface DiscordBotCommandRequestView {
   requestId: string;
-  action: 'start' | 'stop' | 'logs';
+  action: 'start' | 'stop' | 'detach' | 'reattach' | 'logs';
   sessionIds?: string[];
   sessionId?: string;
   pid?: number;
@@ -10100,6 +10141,21 @@ async function executeSessionBotActionForDiscord(sessionId: string, action: 'sta
   }
 }
 
+async function executeSessionWindowActionForDiscord(
+  sessionId: string,
+  action: 'detach' | 'reattach'
+): Promise<{ sessionId: string; status: 'success' | 'error' | 'skipped'; message: string }> {
+  const outcome = action === 'detach'
+    ? await detachSession(sessionId)
+    : await reattachSession(sessionId);
+
+  return {
+    sessionId,
+    status: outcome.status,
+    message: outcome.message
+  };
+}
+
 function formatDiscordLogTimestamp(value: Date): string {
   return value.toLocaleTimeString();
 }
@@ -10216,11 +10272,15 @@ async function handleDiscordBotCommandRequest(request: DiscordBotCommandRequestV
     };
   }
 
-  const action = request.action === 'stop' ? 'stop' : 'start';
+  const action = request.action;
   const results: Array<{ sessionId: string; status: 'success' | 'error' | 'skipped'; message: string }> = [];
 
   for (const sessionId of request.sessionIds) {
-    const result = await executeSessionBotActionForDiscord(String(sessionId), action);
+    const normalizedSessionId = String(sessionId);
+    const result =
+      action === 'detach' || action === 'reattach'
+        ? await executeSessionWindowActionForDiscord(normalizedSessionId, action)
+        : await executeSessionBotActionForDiscord(normalizedSessionId, action === 'stop' ? 'stop' : 'start');
     results.push(result);
   }
 

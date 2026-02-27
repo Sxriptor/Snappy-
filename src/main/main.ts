@@ -53,7 +53,7 @@ const sessionManager = new SessionManager(
 
 interface DiscordBotCommandRequestPayload {
   requestId: string;
-  action: 'start' | 'stop' | 'logs';
+  action: 'start' | 'stop' | 'detach' | 'reattach' | 'logs';
   sessionIds?: string[];
   sessionId?: string;
   pid?: number;
@@ -259,7 +259,7 @@ function summarizeSessions(): string {
   return `${header}\n${lines.join('\n')}\nSession PIDs:\n${sessionPidLines.join('\n')}`;
 }
 
-function resolveTargetSessions(command: Extract<DiscordCommand, { type: 'start' | 'stop' }>): { sessions: Session[]; descriptor: string; error?: string } {
+function resolveTargetSessions(command: Extract<DiscordCommand, { type: 'start' | 'stop' | 'detach' | 'reattach' }>): { sessions: Session[]; descriptor: string; error?: string } {
   const sessions = sessionManager.getAllSessions();
   if (sessions.length === 0) {
     return { sessions: [], descriptor: 'none', error: 'No sessions available.' };
@@ -345,7 +345,7 @@ function broadcastDiscordBotStatus(status: DiscordBotStatus): void {
 
 async function requestRendererBotCommand(
   payloadInput:
-    | { action: 'start' | 'stop'; sessionIds: string[] }
+    | { action: 'start' | 'stop' | 'detach' | 'reattach'; sessionIds: string[] }
     | { action: 'logs'; pid: number; durationMs: number; durationLabel: string; sessionId?: string }
 ): Promise<DiscordBotCommandResultPayload> {
   if (!mainWindow || mainWindow.isDestroyed()) {
@@ -507,7 +507,11 @@ async function executeDiscordCommand(command: DiscordCommand, _context: DiscordC
   }
 
   const action = command.type;
-  const actionPastTense = action === 'start' ? 'started' : 'stopped';
+  const actionPastTense =
+    action === 'start' ? 'started' :
+    action === 'stop' ? 'stopped' :
+    action === 'detach' ? 'detached' :
+    'reattached';
   const requestedSessions = resolved.sessions.map(session => session.id);
   const rendererResult = await requestRendererBotCommand({
     action,
